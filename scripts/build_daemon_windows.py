@@ -45,8 +45,20 @@ def build_with_pyinstaller():
 
     built_exe = os.path.join(dist_dir, "hil-daemon.exe")
     if os.path.exists(built_exe):
+        # Terminate any running instances before copying
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/f", "/im", OUT_EXE_NAME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.makedirs(os.path.dirname(FINAL_TARGET), exist_ok=True)
         shutil.copy2(built_exe, FINAL_TARGET)
-        print(f"\n[SUCCESS] Standalone binary copied to: {FINAL_TARGET}")
+        bin_target = os.path.join(ROOT_DIR, "bin", OUT_EXE_NAME)
+        os.makedirs(os.path.dirname(bin_target), exist_ok=True)
+        shutil.copy2(built_exe, bin_target)
+        root_target = os.path.join(ROOT_DIR, OUT_EXE_NAME)
+        shutil.copy2(built_exe, root_target)
+        print(f"\n[SUCCESS] Standalone binary copied to:")
+        print(f"  - {FINAL_TARGET}")
+        print(f"  - {bin_target}")
+        print(f"  - {root_target}")
         # Clean build artifacts
         shutil.rmtree(dist_dir, ignore_errors=True)
         shutil.rmtree(work_dir, ignore_errors=True)

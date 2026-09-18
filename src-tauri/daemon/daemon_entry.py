@@ -443,6 +443,33 @@ MCP_TOOLS = [
 ]
 
 
+MCP_SERVER_NAME = "embedded-hil-debugger"
+MCP_SERVER_VERSION = "1.0.0"
+MCP_DEFAULT_PROTOCOL_VERSION = "2024-11-05"
+
+# 兼容旧调用方式：直接以工具名作为 JSON-RPC method
+DIRECT_TOOL_METHODS = [
+    "list_probes",
+    "read_core_registers",
+    "read_memory",
+    "write_memory",
+    "flash_firmware",
+    "reset_target",
+    "diagnose_hardfault",
+]
+
+
+def wrap_tool_result(payload: Any) -> Dict[str, Any]:
+    """把工具原始返回值包装成 MCP CallToolResult。"""
+    text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False, indent=2)
+    return {"content": [{"type": "text", "text": text}], "isError": False}
+
+
+def wrap_tool_error(message: str) -> Dict[str, Any]:
+    """工具级失败按 MCP 约定用 isError 上报，而不是 JSON-RPC error。"""
+    return {"content": [{"type": "text", "text": message}], "isError": True}
+
+
 def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
     """Dispatch tool call to corresponding handler."""
     probe_id = arguments.get("probe_id")
@@ -508,19 +535,37 @@ def main():
 
             req_id = request.get("id")
             method = request.get("method")
-            params = request.get("params", {})
+            params = request.get("params") or {}
+
+            # MCP 通知（无 id）不需要应答，静默处理
+            if req_id is None:
+                continue
 
             # Handle JSON-RPC / MCP Methods
             try:
-                if method == "ping":
-                    result = "pong"
+                if method == "initialize":
+                    # 回显客户端请求的协议版本，避免 SDK 因版本不在支持列表而拒绝连接
+                    requested = params.get("protocolVersion")
+                    result = {
+                        "protocolVersion": requested or MCP_DEFAULT_PROTOCOL_VERSION,
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {"name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION},
+                    }
+                elif method == "ping":
+                    result = {}
                 elif method == "tools/list" or method == "list_tools":
                     result = {"tools": MCP_TOOLS}
                 elif method == "tools/call" or method == "call_tool":
                     tool_name = params.get("name")
-                    tool_args = params.get("arguments", {})
-                    result = dispatch_tool(tool_name, tool_args)
-                elif method in ["list_probes", "read_core_registers", "read_memory", "write_memory", "flash_firmware", "reset_target", "diagnose_hardfault"]:
+                    tool_args = params.get("arguments") or {}
+                    # MCP 要求返回 CallToolResult；工具级失败用 isError 上报
+                    try:
+                        result = wrap_tool_result(dispatch_tool(tool_name, tool_args))
+                    except Exception as tool_error:
+                        logger.error(f"Tool '{tool_name}' failed: {tool_error}")
+                        result = wrap_tool_error(f"{tool_name}: {tool_error}")
+                elif method in DIRECT_TOOL_METHODS:
+                    # 保留旧的“工具名即 method”调用方式，返回裸结果
                     result = dispatch_tool(method, params)
                 else:
                     raise ValueError(f"Method not found: {method}")
