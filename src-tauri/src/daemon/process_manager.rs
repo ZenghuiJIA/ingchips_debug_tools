@@ -4,10 +4,29 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use sysinfo::System;
 use tauri::AppHandle;
 
 #[cfg(target_os = "windows")]
 use crate::platform::windows::job_object::ProcessJob;
+
+/// Clean up any orphan or lingering hil-daemon background processes
+pub fn kill_all_daemons() {
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let my_pid = std::process::id();
+
+    for (pid, proc_) in sys.processes() {
+        if pid.as_u32() == my_pid {
+            continue;
+        }
+        let name = proc_.name().to_string_lossy().to_lowercase();
+        if name.contains("hil-daemon") {
+            println!("[DaemonManager] Killing lingering daemon process: PID {} ({})", pid, name);
+            let _ = proc_.kill();
+        }
+    }
+}
 
 pub struct DaemonManager {
     child: Arc<Mutex<Option<Child>>>,
@@ -211,5 +230,8 @@ impl DaemonManager {
         *self.stdin_writer.lock().unwrap() = None;
         *self.stdout_reader.lock().unwrap() = None;
         *self.child_pid.lock().unwrap() = None;
+
+        // Ensure all child processes (including PyInstaller workers) are completely stopped
+        kill_all_daemons();
     }
 }

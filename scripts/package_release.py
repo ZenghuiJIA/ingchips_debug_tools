@@ -49,11 +49,19 @@ def package():
 
     # Copy primary executables
     print("[1/5] Copying application executables...")
-    main_exe = ROOT_DIR / "AI-HIL-Debugger.exe"
-    if main_exe.exists():
+    main_exe_candidates = [
+        ROOT_DIR / "src-tauri" / "target" / "release" / "ai-hil-debugger.exe",
+        ROOT_DIR / "src-tauri" / "target" / "release" / "AI-HIL-Debugger.exe",
+        ROOT_DIR / "AI-HIL-Debugger.exe",
+        ROOT_DIR / "bin" / "AI-HIL-Debugger.exe",
+    ]
+    main_exe = next((p for p in main_exe_candidates if p.exists()), None)
+    if main_exe:
         shutil.copy2(main_exe, TARGET_DIR / "AI-HIL-Debugger.exe")
         shutil.copy2(main_exe, TARGET_DIR / "bin" / "AI-HIL-Debugger.exe")
-        print(f"  [OK] Copied {main_exe.name} ({main_exe.stat().st_size / 1024 / 1024:.1f} MB)")
+        shutil.copy2(main_exe, ROOT_DIR / "AI-HIL-Debugger.exe")
+        shutil.copy2(main_exe, ROOT_DIR / "bin" / "AI-HIL-Debugger.exe")
+        print(f"  [OK] Copied {main_exe.name} -> AI-HIL-Debugger.exe ({main_exe.stat().st_size / 1024 / 1024:.1f} MB)")
 
     daemon_exe = ROOT_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe"
     if daemon_exe.exists():

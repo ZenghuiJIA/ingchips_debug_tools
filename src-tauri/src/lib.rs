@@ -62,15 +62,24 @@ pub fn run() {
     #[cfg(debug_assertions)]
     ensure_dev_server_running();
 
+    // 1. Pre-launch cleanup: kill any lingering background daemons or orphans before starting
+    daemon::process_manager::kill_all_daemons();
+
     let serial = Arc::new(SerialManager::new());
     let daemon = Arc::new(DaemonManager::new());
 
     let serial_exit = Arc::clone(&serial);
     let daemon_exit = Arc::clone(&daemon);
+    let serial_win = Arc::clone(&serial);
+    let daemon_win = Arc::clone(&daemon);
 
     let app = match tauri::Builder::default()
-        .on_window_event(|window, event| {
-            log_debug(&format!("[WINDOW_EVENT] {}: {:?}", window.label(), event));
+        .on_window_event(move |_window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
+                log_debug("[WINDOW_EVENT] Window closing, cleaning up all background processes...");
+                let _ = serial_win.close();
+                daemon_win.stop();
+            }
         })
         .on_page_load(|window, payload| {
             log_debug(&format!("[PAGE_LOAD] {}: url={}, event={:?}", window.label(), payload.url(), payload.event()));
@@ -131,16 +140,21 @@ pub fn run() {
             tauri::RunEvent::Ready => {
                 log_debug("[EVENT] RunEvent::Ready");
             }
-            tauri::RunEvent::WindowEvent { label, event, .. } => {
-                log_debug(&format!("[EVENT] WindowEvent {}: {:?}", label, event));
+            tauri::RunEvent::WindowEvent { event, .. } => {
+                if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
+                    let _ = serial_exit.close();
+                    daemon_exit.stop();
+                }
             }
             tauri::RunEvent::Exit => {
                 log_debug("[EVENT] RunEvent::Exit");
                 let _ = serial_exit.close();
                 daemon_exit.stop();
             }
-            tauri::RunEvent::ExitRequested { api: _, .. } => {
+            tauri::RunEvent::ExitRequested { .. } => {
                 log_debug("[EVENT] RunEvent::ExitRequested");
+                let _ = serial_exit.close();
+                daemon_exit.stop();
             }
             _ => {}
         }
