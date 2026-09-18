@@ -9,6 +9,7 @@ echo.
 echo This script will register the Embedded HIL Debugger MCP server
 echo into all discovered AI agents on your system:
 echo  - CCSwitch (Database: ~/.cc-switch/cc-switch.db)
+echo  - DeepSeek Harness (~/.ohdsh/profiles/desktop/cordis.patch.yml)
 echo  - Claude Code (~/.claude.json)
 echo  - Claude Desktop (%%APPDATA%%\Claude\claude_desktop_config.json)
 echo  - Cursor / Windsurf (mcp.json)

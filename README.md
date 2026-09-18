@@ -70,8 +70,9 @@ install_mcp.bat
 ```cmd
 python scripts/deploy_mcp_to_agents.py
 ```
-该脚本会自动检测并注册 MCP 服务到：
+该脚本会自动检测并注册 MCP 服务到（具备幂等检测，已有配置自动跳过，不重复安装）：
 - **CCSwitch** (`~/.cc-switch/cc-switch.db`)
+- **DeepSeek Harness** (`~/.ohdsh/profiles/desktop/cordis.patch.yml` 与 `web/cordis.patch.yml`)
 - **Claude Code** (`~/.claude.json`)
 - **Claude Desktop** (`%APPDATA%\Claude\claude_desktop_config.json`)
 - **Cursor / Windsurf** (`mcp.json`)
@@ -88,7 +89,13 @@ install_skill.bat
 ```cmd
 python scripts/install_skill.py
 ```
-该脚本会将标准 `embedded-hil-debugger` Skill 安装到 Antigravity、Claude Code 以及本地工程中。
+该脚本会自动校验版本一致性，安全部署且**不重复覆盖**已有相同 Skill：
+- **CC Switch 全局通用技能库** (`~/.agents/skills/embedded-hil-debugger/`)
+- **DeepSeek Harness 全局技能库** (`~/.ohdsh/skills/embedded-hil-debugger/`)
+- **Antigravity / Gemini CLI 技能库** (`~/.gemini/antigravity-cli/skills/` & `~/.gemini/config/skills/`)
+- **Claude Code 技能库** (`~/.claude/skills/`)
+- **本地工程技能空间** (`.agents/skills/`)
+- 自动向 CC Switch 数据库登记同步。
 
 ---
 

@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import sqlite3
@@ -11,6 +12,7 @@ ROOT_DIR = SCRIPT_DIR.parent
 candidates = [
     ROOT_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe",
     ROOT_DIR / "hil-daemon-x86_64-pc-windows-msvc.exe",
+    Path(r"C:\ming\source\tools\test_tools\release\AI-HIL-Debugger-v1.0.0-windows-x64\bin\hil-daemon-x86_64-pc-windows-msvc.exe"),
     Path(r"C:\ming\source\tools\test_tools\bin\hil-daemon-x86_64-pc-windows-msvc.exe"),
 ]
 
@@ -28,6 +30,23 @@ if not os.path.exists(DAEMON_EXE):
 else:
     print(f"[INFO] Using daemon executable: {DAEMON_EXE}")
 
+def is_same_daemon(cmd_str: str) -> bool:
+    """Check if an existing command points to a valid hil-daemon executable."""
+    if not cmd_str:
+        return False
+    if cmd_str == DAEMON_EXE:
+        return True
+    try:
+        p1 = Path(cmd_str).resolve()
+        p2 = Path(DAEMON_EXE).resolve()
+        if p1 == p2:
+            return True
+        if p1.exists() and "hil-daemon" in p1.name:
+            return True
+    except Exception:
+        pass
+    return False
+
 def backup_file(path: Path):
     if path.exists():
         bak = path.with_suffix(path.suffix + ".bak")
@@ -35,17 +54,30 @@ def backup_file(path: Path):
         print(f"  [Backup] Created backup at {bak}")
 
 def deploy_to_ccswitch():
-    print(f"\n[1/6] Deploying to CCSwitch (Database)...")
+    print(f"\n[1/7] Deploying to CCSwitch (Database)...")
     db_path = Path(r"C:\Users\ming\.cc-switch\cc-switch.db")
     if not db_path.exists():
         print(f"  [SKIP] CCSwitch database not found at {db_path}")
         return
 
-    backup_file(db_path)
     try:
         conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
 
+        # Check if already installed with valid daemon command
+        cur.execute("SELECT server_config FROM mcp_servers WHERE id = ?", (SERVER_ID,))
+        row = cur.fetchone()
+        if row:
+            try:
+                cfg = json.loads(row[0])
+                if is_same_daemon(cfg.get("command", "")) and cfg.get("args") == ["--mode", "stdio-mcp"]:
+                    print(f"  [EXISTS] MCP server '{SERVER_ID}' is already up to date in CCSwitch (Skipping)")
+                    conn.close()
+                    return
+            except Exception:
+                pass
+
+        backup_file(db_path)
         server_config = json.dumps({
             "type": "stdio",
             "command": DAEMON_EXE,
@@ -79,17 +111,24 @@ def deploy_to_ccswitch():
         print(f"  [ERROR] Failed to update CCSwitch database: {e}")
 
 def deploy_to_claude_code():
-    print(f"\n[2/6] Deploying to Claude Code (.claude.json)...")
+    print(f"\n[2/7] Deploying to Claude Code (.claude.json)...")
     claude_json_path = Path(r"C:\Users\ming\.claude.json")
     if not claude_json_path.exists():
         print(f"  [SKIP] .claude.json not found at {claude_json_path}")
         return
 
     try:
-        backup_file(claude_json_path)
         with open(claude_json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
+        mcp_servers = data.get("mcpServers", {})
+        if SERVER_ID in mcp_servers:
+            curr = mcp_servers[SERVER_ID]
+            if is_same_daemon(curr.get("command", "")) and curr.get("args") == ["--mode", "stdio-mcp"]:
+                print(f"  [EXISTS] MCP server '{SERVER_ID}' is already configured in Claude Code (Skipping)")
+                return
+
+        backup_file(claude_json_path)
         if "mcpServers" not in data or not isinstance(data["mcpServers"], dict):
             data["mcpServers"] = {}
 
@@ -106,19 +145,25 @@ def deploy_to_claude_code():
         print(f"  [ERROR] Failed to update Claude Code configuration: {e}")
 
 def deploy_to_codex():
-    print(f"\n[3/6] Deploying to OpenAI Codex (.codex/config.toml)...")
+    print(f"\n[3/7] Deploying to OpenAI Codex (.codex/config.toml)...")
     codex_toml_path = Path(r"C:\Users\ming\.codex\config.toml")
     if not codex_toml_path.exists():
         print(f"  [SKIP] Codex config.toml not found at {codex_toml_path}")
         return
 
     try:
-        backup_file(codex_toml_path)
         with open(codex_toml_path, "r", encoding="utf-8") as f:
             content = f.read()
 
         section_header = "[mcp_servers.embedded_hil_debugger]"
-        escaped_exe = DAEMON_EXE.replace("\\", "\\\\")
+        if section_header in content:
+            # Check if command is already configured and valid
+            match = re.search(r"command\s*=\s*['\"]([^'\"]+)['\"]", content)
+            if match and is_same_daemon(match.group(1)):
+                print(f"  [EXISTS] MCP server 'embedded_hil_debugger' already configured in Codex (Skipping)")
+                return
+
+        backup_file(codex_toml_path)
         toml_block = (
             f"\n{section_header}\n"
             f"command = '{DAEMON_EXE}'\n"
@@ -126,13 +171,9 @@ def deploy_to_codex():
         )
 
         if section_header in content:
-            # Already present, replace or update
-            print(f"  [INFO] Codex config already contains {section_header}, ensuring up to date...")
-            import re
             pattern = re.compile(r"\[mcp_servers\.embedded_hil_debugger\].*?(?=\n\[|\Z)", re.DOTALL)
             content = pattern.sub(lambda _: toml_block.strip(), content)
         else:
-            # Append to [mcp_servers] or end of file
             if "[mcp_servers]" in content:
                 content = content.replace("[mcp_servers]", "[mcp_servers]" + toml_block, 1)
             else:
@@ -146,17 +187,24 @@ def deploy_to_codex():
         print(f"  [ERROR] Failed to update Codex configuration: {e}")
 
 def deploy_to_opencode():
-    print(f"\n[4/6] Deploying to OpenCode (.config/opencode/opencode.json)...")
+    print(f"\n[4/7] Deploying to OpenCode (.config/opencode/opencode.json)...")
     opencode_json_path = Path(r"C:\Users\ming\.config\opencode\opencode.json")
     if not opencode_json_path.exists():
         print(f"  [SKIP] OpenCode config not found at {opencode_json_path}")
         return
 
     try:
-        backup_file(opencode_json_path)
         with open(opencode_json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
+        mcp_cfg = data.get("mcp", {})
+        if SERVER_ID in mcp_cfg:
+            curr = mcp_cfg[SERVER_ID]
+            if is_same_daemon(curr.get("command", "")) and curr.get("args") == ["--mode", "stdio-mcp"]:
+                print(f"  [EXISTS] MCP server '{SERVER_ID}' already configured in OpenCode (Skipping)")
+                return
+
+        backup_file(opencode_json_path)
         if "mcp" not in data or not isinstance(data["mcp"], dict):
             data["mcp"] = {}
 
@@ -174,12 +222,9 @@ def deploy_to_opencode():
         print(f"  [ERROR] Failed to update OpenCode configuration: {e}")
 
 def deploy_to_gemini():
-    print(f"\n[5/6] Deploying to Gemini / Antigravity (.gemini/config/mcp_config.json)...")
+    print(f"\n[5/7] Deploying to Gemini / Antigravity (.gemini/config/mcp_config.json)...")
     gemini_mcp_path = Path(r"C:\Users\ming\.gemini\config\mcp_config.json")
     try:
-        gemini_mcp_path.parent.mkdir(parents=True, exist_ok=True)
-        backup_file(gemini_mcp_path)
-
         data = {}
         if gemini_mcp_path.exists():
             try:
@@ -189,6 +234,16 @@ def deploy_to_gemini():
                         data = json.loads(txt)
             except Exception:
                 data = {}
+
+        mcp_servers = data.get("mcpServers", {})
+        if SERVER_ID in mcp_servers:
+            curr = mcp_servers[SERVER_ID]
+            if is_same_daemon(curr.get("command", "")) and curr.get("args") == ["--mode", "stdio-mcp"]:
+                print(f"  [EXISTS] MCP server '{SERVER_ID}' already configured in Gemini / Antigravity (Skipping)")
+                return
+
+        gemini_mcp_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_file(gemini_mcp_path)
 
         if "mcpServers" not in data or not isinstance(data["mcpServers"], dict):
             data["mcpServers"] = {}
@@ -206,7 +261,7 @@ def deploy_to_gemini():
         print(f"  [ERROR] Failed to update Gemini configuration: {e}")
 
 def deploy_to_claude_desktop():
-    print(f"\n[6/6] Deploying to Claude Desktop (%APPDATA%/Claude/claude_desktop_config.json)...")
+    print(f"\n[6/7] Deploying to Claude Desktop (%APPDATA%/Claude/claude_desktop_config.json)...")
     appdata = os.getenv("APPDATA")
     if not appdata:
         return
@@ -215,7 +270,6 @@ def deploy_to_claude_desktop():
     config_path = claude_desktop_dir / "claude_desktop_config.json"
 
     try:
-        backup_file(config_path)
         data = {}
         if config_path.exists():
             try:
@@ -226,6 +280,14 @@ def deploy_to_claude_desktop():
             except Exception:
                 data = {}
 
+        mcp_servers = data.get("mcpServers", {})
+        if SERVER_ID in mcp_servers:
+            curr = mcp_servers[SERVER_ID]
+            if is_same_daemon(curr.get("command", "")) and curr.get("args") == ["--mode", "stdio-mcp"]:
+                print(f"  [EXISTS] MCP server '{SERVER_ID}' already configured in Claude Desktop (Skipping)")
+                return
+
+        backup_file(config_path)
         if "mcpServers" not in data or not isinstance(data["mcpServers"], dict):
             data["mcpServers"] = {}
 
@@ -241,6 +303,57 @@ def deploy_to_claude_desktop():
     except Exception as e:
         print(f"  [ERROR] Failed to update Claude Desktop configuration: {e}")
 
+def deploy_to_deepseek_harness():
+    print(f"\n[7/7] Deploying to DeepSeek Harness (~/.ohdsh)...")
+    ohdsh_dir = Path.home() / ".ohdsh"
+    if not ohdsh_dir.exists():
+        print(f"  [SKIP] DeepSeek Harness directory not found at {ohdsh_dir}")
+        return
+
+    profiles = ["desktop", "web"]
+    for profile in profiles:
+        patch_file = ohdsh_dir / "profiles" / profile / "cordis.patch.yml"
+        if not patch_file.parent.exists():
+            continue
+
+        existing_content = ""
+        if patch_file.exists():
+            try:
+                with open(patch_file, "r", encoding="utf-8") as f:
+                    existing_content = f.read()
+            except Exception:
+                existing_content = ""
+
+        # Check if already installed with valid daemon executable
+        if "mcp-embedded-hil" in existing_content:
+            match = re.search(r"command\s*:\s*['\"]([^'\"]+)['\"]", existing_content)
+            if match and is_same_daemon(match.group(1)):
+                print(f"  [EXISTS] MCP server already registered in DeepSeek Harness ({profile}) (Skipping)")
+                continue
+
+        backup_file(patch_file)
+        mcp_block = f"""
+- id: mcp-embedded-hil
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: hil
+    transport: stdio
+    command: '{DAEMON_EXE}'
+    args: ['--mode', 'stdio-mcp']
+    toolCallTimeoutMs: 120000
+"""
+        if "mcp-embedded-hil" in existing_content:
+            # Replace existing outdated mcp-embedded-hil block
+            pattern = re.compile(r"-\s*id:\s*mcp-embedded-hil.*?(?=\n-|\Z)", re.DOTALL)
+            new_content = pattern.sub(mcp_block.strip(), existing_content)
+        else:
+            new_content = existing_content.rstrip() + "\n" + mcp_block.strip() + "\n"
+
+        with open(patch_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        print(f"  [OK] Successfully registered MCP server in DeepSeek Harness ({profile})!")
+
 if __name__ == "__main__":
     print("================================================================")
     print(" Deploying Embedded HIL MCP Server to CCSwitch & Agent Configs  ")
@@ -255,7 +368,8 @@ if __name__ == "__main__":
     deploy_to_opencode()
     deploy_to_gemini()
     deploy_to_claude_desktop()
+    deploy_to_deepseek_harness()
 
     print("\n================================================================")
-    print("[SUCCESS] All MCP deployments finished!")
+    print("[SUCCESS] All MCP deployments finished without repeat!")
     print("================================================================")

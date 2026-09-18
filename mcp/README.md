@@ -40,12 +40,15 @@ install_mcp.bat
 
 脚本将自动探测您系统上已安装的各种 Agent 工具，并自动完成注册与热配置：
 * ✅ **CCSwitch**：自动注入 SQLite 数据库 `~/.cc-switch/cc-switch.db`，并打上 `embedded`、`hil`、`swd` 标签；
+* ✅ **DeepSeek Harness**：自动注入 `~/.ohdsh/profiles/desktop/cordis.patch.yml` 与 `web/cordis.patch.yml`；
 * ✅ **Claude Code**：自动配置 `~/.claude.json` 中的 `mcpServers`；
 * ✅ **Claude Desktop**：自动配置 `%APPDATA%\Claude\claude_desktop_config.json`；
 * ✅ **Cursor / Windsurf**：兼容标准 `mcp.json`；
 * ✅ **OpenAI Codex**：自动配置 `~/.codex/config.toml`；
 * ✅ **OpenCode**：自动配置 `~/.config/opencode/opencode.json`；
 * ✅ **Gemini / Antigravity CLI**：自动配置 `~/.gemini/config/mcp_config.json`。
+
+> 💡 **防重复安装保障**：安装脚本具备完全的幂等性校验机制，若对应 Agent 已注册该 MCP 服务且配置一致，将自动跳过，绝不产生重复写入或冗余备份。
 
 ---
 
@@ -128,11 +131,14 @@ install_skill.bat
 ```cmd
 python scripts/install_skill.py
 ```
-该脚本会将标准 Skill 文件安装至：
-1. `~/.gemini/antigravity-cli/skills/embedded-hil-debugger/`
-2. `~/.gemini/config/skills/embedded-hil-debugger/`
-3. `~/.claude/skills/embedded-hil-debugger/`
-4. 本地工程 `.agents/skills/embedded-hil-debugger/`
+该脚本会将标准 Skill 文件安全部署至各大 AI Agent 技能空间（若检测到已有相同版本的 Skill 则自动跳过，绝不重复写入）：
+1. `~/.agents/skills/embedded-hil-debugger/`（CC Switch 管理的通用全局 Skill 目录）
+2. `~/.ohdsh/skills/embedded-hil-debugger/`（DeepSeek Harness 全局 Skill 目录）
+3. `~/.gemini/antigravity-cli/skills/embedded-hil-debugger/`（Antigravity CLI 默认技能目录）
+4. `~/.gemini/config/skills/embedded-hil-debugger/`（Gemini CLI 全局配置目录）
+5. `~/.claude/skills/embedded-hil-debugger/`（Claude Code 默认技能目录）
+6. 本地工程 `.agents/skills/embedded-hil-debugger/`（项目工作区技能目录）
+7. 自动同步登记至 CC Switch 本地数据库 (`~/.cc-switch/cc-switch.db`) 中的 `skills` 表。
 
 ### 5.2 什么时候调用 MCP
 1. **死机排障**：当用户说“程序死在 HardFault_Handler 里了”、“单片机跑飞了”，AI 自动触发 `diagnose_hardfault` 提取 `CFSR` 位域，结合 `PC` 寄存器指出是空指针越界、总线错误还是未使能时钟；
