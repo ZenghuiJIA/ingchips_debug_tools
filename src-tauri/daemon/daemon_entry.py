@@ -12,6 +12,10 @@ import gc
 import traceback
 from typing import Dict, Any, List, Optional
 
+import threading
+import socket
+import time
+
 # Configure stderr logging (stdout is reserved strictly for JSON-RPC)
 logging.basicConfig(
     stream=sys.stderr,
@@ -29,6 +33,13 @@ try:
 except Exception as e:
     logger.warning(f"PyOCD import warning: {e}")
     PYOCD_AVAILABLE = False
+
+try:
+    import pylink
+    PYLINK_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"PyLink import warning: {e}")
+    PYLINK_AVAILABLE = False
 
 
 def trim_process_memory():
@@ -378,6 +389,249 @@ class PyOCDController:
         }
 
 
+class RTTController:
+    """
+    Segger RTT Controller supporting both J-Link (via pylink-square) and DAPLink (via PyOCD).
+    Exposes a local TCP socket bridge so Tauri or any terminal can stream bi-directional RTT traffic.
+    """
+    _lock = threading.Lock()
+    _running = False
+    _thread = None
+    _server_sock = None
+    _client_sock = None
+    _tcp_port = 0
+
+    _mode = None  # 'jlink' or 'pyocd'
+    _jlink = None
+    _session = None
+
+    @classmethod
+    def start_rtt(cls, probe_id: Optional[str] = None, target_override: Optional[str] = None,
+                  block_address: Optional[int] = None, probe_type: Optional[str] = None) -> Dict[str, Any]:
+        with cls._lock:
+            if cls._running:
+                return {
+                    "status": "already_running",
+                    "tcp_port": cls._tcp_port,
+                    "mode": cls._mode
+                }
+
+            # Create ephemeral TCP server for bi-directional streaming
+            cls._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            cls._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            cls._server_sock.bind(("127.0.0.1", 0))
+            cls._server_sock.listen(1)
+            cls._tcp_port = cls._server_sock.getsockname()[1]
+
+            # Decide probe type if not specified
+            chosen_type = (probe_type or "").lower()
+            if not chosen_type:
+                # Check probe description
+                for p in PyOCDController.list_probes():
+                    if not probe_id or p["unique_id"] == probe_id:
+                        chosen_type = p.get("probe_type", "generic")
+                        break
+
+            cls._running = True
+
+            if chosen_type == "jlink" and PYLINK_AVAILABLE:
+                try:
+                    cls._start_jlink(probe_id, target_override, block_address)
+                    cls._mode = "jlink"
+                except Exception as e:
+                    logger.warning(f"J-Link RTT start failed, trying PyOCD fallback: {e}")
+                    cls._start_pyocd(probe_id, target_override, block_address)
+                    cls._mode = "pyocd"
+            else:
+                cls._start_pyocd(probe_id, target_override, block_address)
+                cls._mode = "pyocd"
+
+            # Launch background streaming worker thread
+            cls._thread = threading.Thread(target=cls._rtt_worker_loop, daemon=True)
+            cls._thread.start()
+
+            return {
+                "status": "started",
+                "tcp_port": cls._tcp_port,
+                "mode": cls._mode,
+                "probe_type": chosen_type
+            }
+
+    @classmethod
+    def _start_jlink(cls, probe_id: Optional[str], target_override: Optional[str], block_address: Optional[int]):
+        cls._jlink = pylink.JLink()
+        if probe_id and probe_id.isdigit():
+            cls._jlink.open(int(probe_id))
+        else:
+            cls._jlink.open()
+
+        chip = target_override or "Cortex-M4"
+        cls._jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+        cls._jlink.connect(chip)
+        cls._jlink.rtt_start(block_address)
+        logger.info(f"J-Link RTT started on target {chip} (CB addr: {block_address})")
+
+    @classmethod
+    def _start_pyocd(cls, probe_id: Optional[str], target_override: Optional[str], block_address: Optional[int]):
+        if not PYOCD_AVAILABLE:
+            raise RuntimeError("PyOCD is not available for DAPLink RTT")
+
+        kwargs = {"auto_open": True}
+        if probe_id:
+            kwargs["unique_id"] = probe_id
+        if target_override:
+            kwargs["target_override"] = target_override
+
+        cls._session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        cls._session.open()
+        logger.info(f"PyOCD session opened for RTT on probe {probe_id}")
+
+    @classmethod
+    def _rtt_worker_loop(cls):
+        """Worker thread that accepts TCP client and pumps bytes between RTT and TCP socket."""
+        logger.info(f"RTT TCP Bridge listening on 127.0.0.1:{cls._tcp_port}")
+        cls._server_sock.settimeout(3.0)
+
+        # 1. Accept client connection (Rust backend or local tool)
+        client = None
+        while cls._running:
+            try:
+                client, addr = cls._server_sock.accept()
+                logger.info(f"RTT TCP Bridge connected by client: {addr}")
+                client.setblocking(False)
+                cls._client_sock = client
+                break
+            except socket.timeout:
+                continue
+            except Exception as e:
+                logger.error(f"Error accepting RTT TCP client: {e}")
+                break
+
+        if not client:
+            logger.warning("No RTT client connected, shutting down worker.")
+            cls.stop_rtt()
+            return
+
+        # 2. RTT streaming loop
+        # For PyOCD, maintain scanned RTT CB state
+        cb_address = None
+        up_buf_ptr = None
+        up_buf_size = 0
+
+        while cls._running:
+            try:
+                # A. Read outgoing RTT data from Target MCU -> send to TCP Client
+                if cls._mode == "jlink" and cls._jlink:
+                    try:
+                        data = cls._jlink.rtt_read(0, 1024)
+                        if data:
+                            client.sendall(bytes(data))
+                    except Exception as e:
+                        logger.debug(f"JLink RTT read error: {e}")
+
+                elif cls._mode == "pyocd" and cls._session:
+                    target = cls._session.board.target
+                    if cb_address is None:
+                        # Search for "SEGGER RTT" in RAM (e.g. 0x20000000 - 0x20010000)
+                        try:
+                            start_ram = 0x20000000
+                            scan_len = 0x10000 // 4  # 64KB scan range
+                            words = target.read_memory_block32(start_ram, scan_len)
+                            # Magic string: "SEGGER RTT\0" -> 0x47455320, etc.
+                            # Scan bytes
+                            raw_bytes = bytearray()
+                            for w in words:
+                                raw_bytes.extend(w.to_bytes(4, 'little'))
+                            magic_idx = raw_bytes.find(b"SEGGER RTT")
+                            if magic_idx != -1:
+                                cb_address = start_ram + magic_idx
+                                # Parse Up Buffer 0 info:
+                                # Header: acID(16), MaxNumUp(4), MaxNumDown(4) -> 24 bytes offset to aUp[0]
+                                # aUp[0]: sName(4), pBuffer(4), SizeOfBuffer(4), WrOff(4), RdOff(4), Flags(4)
+                                up_buf_ptr = int.from_bytes(raw_bytes[magic_idx+28:magic_idx+32], 'little')
+                                up_buf_size = int.from_bytes(raw_bytes[magic_idx+32:magic_idx+36], 'little')
+                                logger.info(f"PyOCD found SEGGER RTT CB at 0x{cb_address:08X}, UpBuffer: 0x{up_buf_ptr:08X} ({up_buf_size} bytes)")
+                        except Exception as e:
+                            logger.debug(f"Scanning for RTT CB failed: {e}")
+
+                    if cb_address and up_buf_ptr and up_buf_size > 0:
+                        try:
+                            # Read WrOff and RdOff: offset 24 + 12 = 36 from cb_address
+                            wr_off = target.read32(cb_address + 36)
+                            rd_off = target.read32(cb_address + 40)
+                            if wr_off != rd_off:
+                                if wr_off > rd_off:
+                                    to_read = wr_off - rd_off
+                                    data = target.read_memory_block8(up_buf_ptr + rd_off, to_read)
+                                    target.write32(cb_address + 40, wr_off)
+                                else:
+                                    to_read1 = up_buf_size - rd_off
+                                    d1 = target.read_memory_block8(up_buf_ptr + rd_off, to_read1)
+                                    d2 = target.read_memory_block8(up_buf_ptr, wr_off) if wr_off > 0 else []
+                                    data = d1 + d2
+                                    target.write32(cb_address + 40, wr_off)
+
+                                if data:
+                                    client.sendall(bytes(data))
+                        except Exception as e:
+                            logger.debug(f"PyOCD RTT read cycle: {e}")
+
+                # B. Read incoming data from TCP Client -> write into Target MCU RTT Down Buffer
+                try:
+                    client_data = client.recv(1024)
+                    if client_data:
+                        if cls._mode == "jlink" and cls._jlink:
+                            cls._jlink.rtt_write(0, list(client_data))
+                except (BlockingIOError, socket.error):
+                    pass
+
+                time.sleep(0.01)  # 10ms polling interval
+            except Exception as e:
+                logger.error(f"RTT streaming loop exception: {e}")
+                break
+
+        logger.info("RTT worker loop finished.")
+        cls.stop_rtt()
+
+    @classmethod
+    def stop_rtt(cls) -> Dict[str, Any]:
+        with cls._lock:
+            cls._running = False
+            if cls._client_sock:
+                try:
+                    cls._client_sock.close()
+                except Exception:
+                    pass
+                cls._client_sock = None
+
+            if cls._server_sock:
+                try:
+                    cls._server_sock.close()
+                except Exception:
+                    pass
+                cls._server_sock = None
+
+            if cls._jlink:
+                try:
+                    cls._jlink.rtt_stop()
+                    cls._jlink.close()
+                except Exception:
+                    pass
+                cls._jlink = None
+
+            if cls._session:
+                try:
+                    cls._session.close()
+                except Exception:
+                    pass
+                cls._session = None
+
+            cls._tcp_port = 0
+            cls._mode = None
+            trim_process_memory()
+            return {"status": "stopped"}
+
+
 # MCP Tools Definitions
 MCP_TOOLS = [
     {
@@ -459,6 +713,27 @@ MCP_TOOLS = [
                 "target_override": {"type": "string", "description": "目标芯片型号"}
             }
         }
+    },
+    {
+        "name": "start_rtt",
+        "description": "启动 SEGGER RTT 实时数据传输引擎 (支持 J-Link 及 DAPLink 探针)，建立本地高速双向流通信",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "probe_id": {"type": "string", "description": "探针 Unique ID (可选)"},
+                "target_override": {"type": "string", "description": "目标芯片型号 (如 Cortex-M4)"},
+                "probe_type": {"type": "string", "description": "探针驱动类型: 'jlink' 或 'daplink'"},
+                "block_address": {"type": "integer", "description": "SEGGER RTT 控制块在 RAM 中的起始物理地址 (可选)"}
+            }
+        }
+    },
+    {
+        "name": "stop_rtt",
+        "description": "停止 SEGGER RTT 传输并释放调试探针句柄与网络端口",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
     }
 ]
 
@@ -476,6 +751,8 @@ DIRECT_TOOL_METHODS = [
     "flash_firmware",
     "reset_target",
     "diagnose_hardfault",
+    "start_rtt",
+    "stop_rtt",
 ]
 
 
@@ -521,6 +798,14 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         return PyOCDController.reset_target(halt, probe_id, target_override)
     elif name == "diagnose_hardfault":
         return PyOCDController.diagnose_hardfault(probe_id, target_override)
+    elif name == "start_rtt":
+        probe_type = arguments.get("probe_type")
+        block_addr = arguments.get("block_address")
+        if isinstance(block_addr, str):
+            block_addr = int(block_addr, 16 if block_addr.startswith("0x") else 10)
+        return RTTController.start_rtt(probe_id, target_override, block_addr, probe_type)
+    elif name == "stop_rtt":
+        return RTTController.stop_rtt()
     else:
         raise ValueError(f"Unknown MCP tool: {name}")
 

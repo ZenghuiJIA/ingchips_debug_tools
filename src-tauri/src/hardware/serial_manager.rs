@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serialport::{SerialPort, SerialPortType, UsbPortInfo};
 use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -28,6 +29,7 @@ pub struct SerialRxPayload {
 
 pub struct SerialManager {
     port: Arc<Mutex<Option<Box<dyn SerialPort>>>>,
+    rtt_stream: Arc<Mutex<Option<TcpStream>>>,
     active_port_name: Arc<Mutex<Option<String>>>,
     active_is_daplink: Arc<AtomicBool>,
     is_running: Arc<AtomicBool>,
@@ -39,6 +41,7 @@ impl SerialManager {
     pub fn new() -> Self {
         Self {
             port: Arc::new(Mutex::new(None)),
+            rtt_stream: Arc::new(Mutex::new(None)),
             active_port_name: Arc::new(Mutex::new(None)),
             active_is_daplink: Arc::new(AtomicBool::new(false)),
             is_running: Arc::new(AtomicBool::new(false)),
@@ -49,7 +52,7 @@ impl SerialManager {
 
     pub fn list_ports() -> Vec<PortInfo> {
         let ports = serialport::available_ports().unwrap_or_default();
-        ports
+        let mut result: Vec<PortInfo> = ports
             .into_iter()
             .map(|p| {
                 let mut vid = None;
@@ -116,7 +119,107 @@ impl SerialManager {
                     device_type,
                 }
             })
-            .collect()
+            .collect();
+
+        // Add virtual SEGGER RTT options for unified monitoring
+        result.push(PortInfo {
+            port_name: "RTT (J-Link 实时传输)".to_string(),
+            description: "SEGGER J-Link 高速 RTT 虚拟串口通道".to_string(),
+            vid: Some(0x1366),
+            pid: None,
+            manufacturer: Some("SEGGER".to_string()),
+            product: Some("J-Link RTT Stream".to_string()),
+            serial_number: None,
+            is_daplink: false,
+            device_type: "rtt_jlink".to_string(),
+        });
+
+        result.push(PortInfo {
+            port_name: "RTT (DAPLink 实时传输)".to_string(),
+            description: "DAPLink / CMSIS-DAP SWD 内存轮询 RTT 通道".to_string(),
+            vid: Some(0x0D28),
+            pid: None,
+            manufacturer: Some("ARM".to_string()),
+            product: Some("DAPLink RTT Stream".to_string()),
+            serial_number: None,
+            is_daplink: false,
+            device_type: "rtt_daplink".to_string(),
+        });
+
+        result
+    }
+
+    pub fn open_rtt(
+        &self,
+        app: AppHandle,
+        port_name: &str,
+        tcp_port: u16,
+    ) -> Result<(), String> {
+        self.close()?;
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+            .map_err(|e| format!("Failed to connect to RTT TCP bridge (port {}): {}", tcp_port, e))?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .map_err(|e| e.to_string())?;
+
+        let reader_stream = stream.try_clone().map_err(|e| e.to_string())?;
+
+        {
+            let mut stream_guard = self.rtt_stream.lock().unwrap();
+            *stream_guard = Some(stream);
+            let mut name_guard = self.active_port_name.lock().unwrap();
+            *name_guard = Some(port_name.to_string());
+        }
+
+        self.is_running.store(true, Ordering::SeqCst);
+        let is_running_clone = Arc::clone(&self.is_running);
+        let current_port_name = port_name.to_string();
+
+        // Background reader thread for RTT TCP stream
+        std::thread::spawn(move || {
+            let mut reader = reader_stream;
+            let mut batch_buffer: Vec<u8> = Vec::with_capacity(4096);
+            let mut read_buf = [0u8; 1024];
+            let mut last_flush = Instant::now();
+
+            while is_running_clone.load(Ordering::SeqCst) {
+                match reader.read(&mut read_buf) {
+                    Ok(n) if n > 0 => {
+                        batch_buffer.extend_from_slice(&read_buf[..n]);
+                    }
+                    Ok(_) => {}
+                    Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => {
+                        // Socket closed or target reset
+                        break;
+                    }
+                }
+
+                let should_flush = !batch_buffer.is_empty()
+                    && (batch_buffer.len() >= 2048 || last_flush.elapsed() >= Duration::from_millis(30));
+
+                if should_flush {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+
+                    let payload = SerialRxPayload {
+                        port: current_port_name.clone(),
+                        data: std::mem::take(&mut batch_buffer),
+                        timestamp_ms: now_ms,
+                    };
+
+                    let _ = app.emit("serial-rx", payload);
+                    last_flush = Instant::now();
+                }
+
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+
+        Ok(())
     }
 
     pub fn open(
@@ -217,23 +320,44 @@ impl SerialManager {
     pub fn close(&self) -> Result<(), String> {
         self.is_running.store(false, Ordering::SeqCst);
         self.active_is_daplink.store(false, Ordering::SeqCst);
-        let mut port_guard = self.port.lock().unwrap();
-        *port_guard = None;
+        {
+            let mut port_guard = self.port.lock().unwrap();
+            *port_guard = None;
+        }
+        {
+            let mut rtt_guard = self.rtt_stream.lock().unwrap();
+            *rtt_guard = None;
+        }
         let mut name_guard = self.active_port_name.lock().unwrap();
         *name_guard = None;
         Ok(())
     }
 
     pub fn write_data(&self, data: &[u8]) -> Result<usize, String> {
-        let mut port_guard = self.port.lock().unwrap();
-        if let Some(ref mut port) = *port_guard {
-            port.write_all(data)
-                .map_err(|e| format!("Write failed: {}", e))?;
-            port.flush().map_err(|e| format!("Flush failed: {}", e))?;
-            Ok(data.len())
-        } else {
-            Err("Port is not open".to_string())
+        // 1. Try writing to physical serial port if active
+        {
+            let mut port_guard = self.port.lock().unwrap();
+            if let Some(ref mut port) = *port_guard {
+                port.write_all(data)
+                    .map_err(|e| format!("Write failed: {}", e))?;
+                port.flush().map_err(|e| format!("Flush failed: {}", e))?;
+                return Ok(data.len());
+            }
         }
+
+        // 2. Try writing to RTT TCP bridge if active
+        {
+            let mut rtt_guard = self.rtt_stream.lock().unwrap();
+            if let Some(ref mut stream) = *rtt_guard {
+                stream
+                    .write_all(data)
+                    .map_err(|e| format!("RTT Write failed: {}", e))?;
+                stream.flush().map_err(|e| format!("RTT Flush failed: {}", e))?;
+                return Ok(data.len());
+            }
+        }
+
+        Err("Port is not open".to_string())
     }
 
     pub fn set_dtr(&self, level: bool) -> Result<(), String> {

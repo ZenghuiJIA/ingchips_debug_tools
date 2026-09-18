@@ -22,11 +22,33 @@ pub fn open_serial_port(
     port_name: String,
     baud_rate: u32,
 ) -> Result<(), String> {
-    state.serial.open(app, &port_name, baud_rate)
+    if port_name.starts_with("RTT") {
+        state.daemon.ensure_started(&app)?;
+        let probe_type = if port_name.contains("J-Link") {
+            "jlink"
+        } else {
+            "daplink"
+        };
+        let rtt_res = state.daemon.call_rpc(
+            "start_rtt",
+            json!({
+                "probe_type": probe_type,
+            }),
+        )?;
+        let tcp_port = rtt_res
+            .get("tcp_port")
+            .and_then(|p| p.as_u64())
+            .ok_or_else(|| "Failed to get RTT TCP bridge port".to_string())? as u16;
+
+        state.serial.open_rtt(app, &port_name, tcp_port)
+    } else {
+        state.serial.open(app, &port_name, baud_rate)
+    }
 }
 
 #[tauri::command]
 pub fn close_serial_port(state: State<'_, AppState>) -> Result<(), String> {
+    let _ = state.daemon.call_rpc("stop_rtt", json!({}));
     state.serial.close()
 }
 

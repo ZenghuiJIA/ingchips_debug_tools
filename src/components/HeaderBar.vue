@@ -58,6 +58,12 @@ const resetTooltipText = computed(() => {
 });
 
 function getPortBadge(p: PortInfo) {
+  if (p.device_type === 'rtt_jlink') {
+    return '🚀 [SEGGER RTT]';
+  }
+  if (p.device_type === 'rtt_daplink') {
+    return '🛰️ [DAPLink RTT]';
+  }
   if (p.device_type === 'daplink' || p.is_daplink) {
     return '⚡ [DAPLink]';
   }
@@ -229,8 +235,9 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <!-- Baud Rate Selector -->
+      <!-- Baud Rate Selector (Hidden if RTT) -->
       <select
+        v-if="!selectedPort.startsWith('RTT')"
         v-model="selectedBaud"
         class="bg-zinc-950 border border-zinc-800 text-xs text-zinc-200 py-1.5 px-2.5 rounded-md outline-none cursor-pointer"
         :disabled="isConnected"
@@ -239,6 +246,12 @@ onUnmounted(() => {
           {{ b }} 波特率 {{ b === 921600 ? '⚡' : '' }}
         </option>
       </select>
+      <div
+        v-else
+        class="px-2.5 py-1.5 rounded-md bg-purple-950/60 border border-purple-800/60 text-purple-300 text-xs font-mono font-semibold"
+      >
+        SWD 内存高速通道
+      </div>
 
       <!-- Connect/Disconnect Button -->
       <button
