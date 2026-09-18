@@ -150,6 +150,71 @@ pub fn pyocd_write_memory(
 }
 
 #[tauri::command]
+pub fn pyocd_write_memory_byte(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    address: String,
+    value: u8,
+    probe_id: Option<String>,
+    target_override: Option<String>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "write_memory_byte",
+        json!({
+            "address": address,
+            "value": value,
+            "probe_id": probe_id,
+            "target_override": target_override
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn pyocd_dump_memory_to_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    address: String,
+    count: u32,
+    file_path: String,
+    probe_id: Option<String>,
+    target_override: Option<String>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "dump_memory_to_file",
+        json!({
+            "address": address,
+            "count": count,
+            "file_path": file_path,
+            "probe_id": probe_id,
+            "target_override": target_override
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn pyocd_load_file_to_memory(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    address: String,
+    file_path: String,
+    probe_id: Option<String>,
+    target_override: Option<String>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "load_file_to_memory",
+        json!({
+            "address": address,
+            "file_path": file_path,
+            "probe_id": probe_id,
+            "target_override": target_override
+        }),
+    )
+}
+
+#[tauri::command]
 pub fn pyocd_flash_firmware(
     app: AppHandle,
     state: State<'_, AppState>,

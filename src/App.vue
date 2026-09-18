@@ -6,19 +6,21 @@ import SerialTerminal from './components/SerialTerminal.vue';
 import WaveformPlotter from './components/WaveformPlotter.vue';
 import PyocdFlasher from './components/PyocdFlasher.vue';
 import HardFaultInspector from './components/HardFaultInspector.vue';
+import MemoryInspector from './components/MemoryInspector.vue';
 import AiCopilot from './components/AiCopilot.vue';
 import {
   Terminal,
   Activity,
   Zap,
   AlertOctagon,
+  Database,
   Sparkles,
   Info
 } from '@lucide/vue';
 
 const isConnected = ref<boolean>(false);
 const activePort = ref<string | null>(null);
-const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'hardfault' | 'ai'>('terminal');
+const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'hardfault' | 'memory' | 'ai'>('terminal');
 const runningInBrowser = ref<boolean>(!isTauri());
 
 async function handleConnect(port: string, baudRate: number) {
@@ -115,6 +117,17 @@ function handleResetTriggered(seq: string) {
           </button>
 
           <button
+            @click="currentTab = 'memory'"
+            class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
+            :class="currentTab === 'memory' 
+              ? 'border-emerald-500 text-emerald-400 bg-zinc-800/40' 
+              : 'border-transparent text-zinc-400 hover:text-zinc-200'"
+          >
+            <Database class="w-3.5 h-3.5 text-emerald-400" />
+            <span>内存查看与Dump</span>
+          </button>
+
+          <button
             @click="currentTab = 'ai'"
             class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
             :class="currentTab === 'ai' 
@@ -140,6 +153,7 @@ function handleResetTriggered(seq: string) {
               currentTab === 'plotter' ? WaveformPlotter :
               currentTab === 'flasher' ? PyocdFlasher :
               currentTab === 'hardfault' ? HardFaultInspector :
+              currentTab === 'memory' ? MemoryInspector :
               AiCopilot
             "
             :is-connected="isConnected"

@@ -16,6 +16,7 @@ import {
   Crosshair,
   Search,
   RefreshCw,
+  RotateCcw,
   X
 } from '@lucide/vue';
 
@@ -102,6 +103,25 @@ const yAxisMode = ref<'auto' | 'fixed'>('auto');
 const fixedMinY = ref<number>(-50);
 const fixedMaxY = ref<number>(50);
 
+// Zoom & Pan state
+const MAX_BUFFER_POINTS = 50000;
+const viewportSpan = ref<number>(500);
+const viewportOffset = ref<number>(0);
+const autoFollow = ref<boolean>(true);
+const yZoomFactor = ref<number>(1.0);
+const yPanOffset = ref<number>(0);
+const isDragging = ref<boolean>(false);
+let dragStartX = 0;
+let dragStartY = 0;
+let dragStartOffset = 0;
+let dragStartYPan = 0;
+let lastYRange = 10;
+
+function onMaxPointsChange() {
+  viewportSpan.value = Number(maxPoints.value);
+  autoFollow.value = true;
+}
+
 const channels = ref<PlotterChannel[]>([]);
 const receivedSamplesCount = ref<number>(0);
 const fps = ref<number>(60);
@@ -153,7 +173,7 @@ function ingestDataPoint(record: Record<string, number>, timestamp: number) {
 
     if (!isPaused.value) {
       ch.points.push({ t: timestamp, v: val });
-      if (ch.points.length > maxPoints.value) {
+      if (ch.points.length > MAX_BUFFER_POINTS) {
         ch.points.shift();
       }
     }
@@ -296,7 +316,26 @@ function renderCanvas() {
     return;
   }
 
-  // Determine Y range
+  // Calculate max channel length
+  let maxChannelLen = 0;
+  for (const ch of channels.value) {
+    if (ch.points.length > maxChannelLen) maxChannelLen = ch.points.length;
+  }
+
+  // Update viewport offset
+  if (autoFollow.value) {
+    viewportOffset.value = Math.max(0, maxChannelLen - viewportSpan.value);
+  } else {
+    const maxPossibleOffset = Math.max(0, maxChannelLen - 5);
+    if (viewportOffset.value > maxPossibleOffset) {
+      viewportOffset.value = maxPossibleOffset;
+    }
+  }
+
+  const curOffset = viewportOffset.value;
+  const curSpan = Math.max(10, viewportSpan.value);
+
+  // Determine Y range from currently visible points
   let minY = Infinity;
   let maxY = -Infinity;
 
@@ -306,9 +345,12 @@ function renderCanvas() {
   } else {
     for (const ch of channels.value) {
       if (!ch.visible || ch.points.length === 0) continue;
-      for (const p of ch.points) {
-        if (p.v < minY) minY = p.v;
-        if (p.v > maxY) maxY = p.v;
+      const pStart = Math.max(0, Math.floor(curOffset));
+      const pEnd = Math.min(ch.points.length, Math.ceil(curOffset + curSpan));
+      for (let i = pStart; i < pEnd; i++) {
+        const v = ch.points[i].v;
+        if (v < minY) minY = v;
+        if (v > maxY) maxY = v;
       }
     }
     if (minY === Infinity || maxY === -Infinity) {
@@ -318,16 +360,22 @@ function renderCanvas() {
       minY -= 1;
       maxY += 1;
     } else {
-      // Add 10% padding
+      // Add 8% padding
       const diff = maxY - minY;
       minY -= diff * 0.08;
       maxY += diff * 0.08;
     }
   }
 
-  const yRange = maxY - minY || 1;
+  const rawYDiff = maxY - minY || 2;
+  const yCenter = (minY + maxY) / 2 + yPanOffset.value;
+  const halfRange = (rawYDiff / 2) / yZoomFactor.value;
+  const curMinY = yCenter - halfRange;
+  const curMaxY = yCenter + halfRange;
+  const yRange = curMaxY - curMinY || 1;
+  lastYRange = yRange;
 
-  // 1. Draw Grid Lines
+  // 1. Draw Grid Lines (Horizontal)
   const numGridLines = 6;
   ctx.strokeStyle = '#27272a';
   ctx.lineWidth = 1 * dpr;
@@ -339,7 +387,7 @@ function renderCanvas() {
   for (let i = 0; i <= numGridLines; i++) {
     const ratio = i / numGridLines;
     const y = padTop + ratio * plotH;
-    const val = maxY - ratio * yRange;
+    const val = curMaxY - ratio * yRange;
 
     ctx.beginPath();
     ctx.moveTo(padLeft, y);
@@ -350,8 +398,8 @@ function renderCanvas() {
   }
 
   // Zero-line if visible
-  if (minY < 0 && maxY > 0) {
-    const zeroY = padTop + (maxY / yRange) * plotH;
+  if (curMinY < 0 && curMaxY > 0) {
+    const zeroY = padTop + (curMaxY / yRange) * plotH;
     ctx.strokeStyle = '#52525b';
     ctx.lineWidth = 1.5 * dpr;
     ctx.setLineDash([4 * dpr, 4 * dpr]);
@@ -362,7 +410,34 @@ function renderCanvas() {
     ctx.setLineDash([]);
   }
 
-  // 2. Draw Waveforms
+  // Vertical Grid Lines (Time / Sample Index)
+  const numXGridLines = 5;
+  ctx.strokeStyle = '#1e1e24';
+  ctx.lineWidth = 1 * dpr;
+  ctx.fillStyle = '#71717a';
+  ctx.font = `${9 * dpr}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+
+  for (let i = 0; i <= numXGridLines; i++) {
+    const ratio = i / numXGridLines;
+    const x = padLeft + ratio * plotW;
+    const sampleIdx = Math.round(curOffset + ratio * curSpan);
+
+    ctx.beginPath();
+    ctx.moveTo(x, padTop);
+    ctx.lineTo(x, height - padBottom);
+    ctx.stroke();
+
+    ctx.fillText(`#${sampleIdx}`, x, height - padBottom + 6 * dpr);
+  }
+
+  // 2. Draw Waveforms (Clipped to plot area)
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(padLeft, padTop, plotW, plotH);
+  ctx.clip();
+
   const visibleChannels = channels.value.filter(c => c.visible && c.points.length > 1);
 
   for (const ch of visibleChannels) {
@@ -372,20 +447,24 @@ function renderCanvas() {
     ctx.beginPath();
 
     const pts = ch.points;
-    const count = pts.length;
+    const pStart = Math.max(0, Math.floor(curOffset) - 1);
+    const pEnd = Math.min(pts.length - 1, Math.ceil(curOffset + curSpan) + 1);
 
-    for (let i = 0; i < count; i++) {
-      const px = padLeft + (i / (maxPoints.value - 1)) * plotW;
-      const py = padTop + ((maxY - pts[i].v) / yRange) * plotH;
+    let isFirst = true;
+    for (let i = pStart; i <= pEnd; i++) {
+      const px = padLeft + ((i - curOffset) / (curSpan - 1)) * plotW;
+      const py = padTop + ((curMaxY - pts[i].v) / yRange) * plotH;
 
-      if (i === 0) {
+      if (isFirst) {
         ctx.moveTo(px, py);
+        isFirst = false;
       } else {
         ctx.lineTo(px, py);
       }
     }
     ctx.stroke();
   }
+  ctx.restore();
 
   // 3. Draw Hover Crosshair & Values
   if (mouseX.value !== null && mouseX.value >= padLeft && mouseX.value <= width - padRight) {
@@ -399,13 +478,13 @@ function renderCanvas() {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Calculate nearest index
+    // Calculate nearest index in visible data
     const relX = (hoverX - padLeft) / plotW;
-    const targetIdx = Math.round(relX * (maxPoints.value - 1));
+    const targetIdx = Math.round(curOffset + relX * (curSpan - 1));
 
     const hoverVals: { name: string; color: string; val: number }[] = [];
     for (const ch of visibleChannels) {
-      if (targetIdx < ch.points.length) {
+      if (targetIdx >= 0 && targetIdx < ch.points.length) {
         hoverVals.push({
           name: ch.name,
           color: ch.color,
@@ -430,7 +509,7 @@ function renderCanvas() {
   animFrameId = requestAnimationFrame(renderCanvas);
 }
 
-// --- Canvas Resizing ---
+// --- Canvas Resizing & Mouse Interaction ---
 function resizeCanvas() {
   const canvas = canvasRef.value;
   const container = containerRef.value;
@@ -442,6 +521,62 @@ function resizeCanvas() {
   canvas.height = rect.height * dpr;
 }
 
+function handleWheel(e: WheelEvent) {
+  e.preventDefault();
+  const canvas = canvasRef.value;
+  if (!canvas) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const padLeft = 60 * dpr;
+  const padRight = 20 * dpr;
+  const plotW = (rect.width * dpr) - padLeft - padRight;
+  if (plotW <= 0) return;
+
+  const mouseCanvasX = (e.clientX - rect.left) * dpr;
+  const mouseRelX = mouseCanvasX - padLeft;
+  const ratio = Math.max(0, Math.min(1, mouseRelX / plotW));
+
+  if (e.shiftKey) {
+    // Shift + Wheel = Zoom Y axis
+    const factor = e.deltaY < 0 ? 1.2 : 0.833;
+    yZoomFactor.value = Math.max(0.05, Math.min(50, yZoomFactor.value * factor));
+    return;
+  }
+
+  // Normal Wheel = Zoom X axis (time) centered at mouse cursor!
+  const zoomFactor = e.deltaY < 0 ? 0.8 : 1.25;
+  const oldSpan = viewportSpan.value;
+  const newSpan = Math.max(10, Math.min(MAX_BUFFER_POINTS, Math.round(oldSpan * zoomFactor)));
+
+  if (newSpan !== oldSpan) {
+    const newOffset = viewportOffset.value + ratio * (oldSpan - newSpan);
+    viewportSpan.value = newSpan;
+    viewportOffset.value = Math.max(0, Math.round(newOffset));
+    autoFollow.value = false;
+  }
+}
+
+function handleMouseDown(e: MouseEvent) {
+  if (e.button !== 0 && e.button !== 1) return;
+  const canvas = canvasRef.value;
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const padLeft = 60 * dpr;
+  const padRight = 20 * dpr;
+  const mouseCanvasX = (e.clientX - rect.left) * dpr;
+
+  if (mouseCanvasX >= padLeft && mouseCanvasX <= (rect.width * dpr) - padRight) {
+    isDragging.value = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    dragStartOffset = viewportOffset.value;
+    dragStartYPan = yPanOffset.value;
+    autoFollow.value = false;
+  }
+}
+
 function handleMouseMove(e: MouseEvent) {
   const canvas = canvasRef.value;
   if (!canvas) return;
@@ -449,12 +584,54 @@ function handleMouseMove(e: MouseEvent) {
   const dpr = window.devicePixelRatio || 1;
   mouseX.value = (e.clientX - rect.left) * dpr;
   mouseY.value = (e.clientY - rect.top) * dpr;
+
+  if (isDragging.value) {
+    const deltaX = e.clientX - dragStartX;
+    const deltaY = e.clientY - dragStartY;
+    const padLeft = 60 * dpr;
+    const padRight = 20 * dpr;
+    const padTop = 20 * dpr;
+    const padBottom = 30 * dpr;
+    const plotW = (rect.width * dpr) - padLeft - padRight;
+    const plotH = (rect.height * dpr) - padTop - padBottom;
+
+    if (plotW > 0) {
+      const pointsShift = (deltaX * dpr / plotW) * viewportSpan.value;
+      viewportOffset.value = Math.max(0, Math.round(dragStartOffset - pointsShift));
+    }
+
+    if (plotH > 0 && lastYRange > 0) {
+      const valShift = (deltaY * dpr / plotH) * (lastYRange / yZoomFactor.value);
+      yPanOffset.value = dragStartYPan + valShift;
+    }
+  }
+}
+
+function handleMouseUp() {
+  isDragging.value = false;
 }
 
 function handleMouseLeave() {
+  isDragging.value = false;
   mouseX.value = null;
   mouseY.value = null;
   hoveredData.value = null;
+}
+
+function handleDoubleClick() {
+  resetView();
+}
+
+function resumeAutoFollow() {
+  autoFollow.value = true;
+  yPanOffset.value = 0;
+}
+
+function resetView() {
+  viewportSpan.value = maxPoints.value;
+  yPanOffset.value = 0;
+  yZoomFactor.value = 1.0;
+  autoFollow.value = true;
 }
 
 // --- Lifecycle ---
@@ -555,6 +732,16 @@ onUnmounted(() => {
           <Download class="w-3 h-3 text-zinc-400" />
           <span>导出CSV</span>
         </button>
+
+        <!-- Reset View / Zoom -->
+        <button
+          @click="resetView"
+          class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 rounded text-xs flex items-center gap-1 transition-colors"
+          title="双击画布或点击此按钮重置缩放与平移"
+        >
+          <RotateCcw class="w-3 h-3 text-zinc-400" />
+          <span>复位视图</span>
+        </button>
       </div>
 
       <!-- Right: Settings & Stats -->
@@ -564,12 +751,14 @@ onUnmounted(() => {
           <span>点数:</span>
           <select
             v-model="maxPoints"
+            @change="onMaxPointsChange"
             class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200 focus:outline-none"
           >
             <option :value="200">200 点</option>
             <option :value="500">500 点</option>
             <option :value="1000">1000 点</option>
             <option :value="2000">2000 点</option>
+            <option :value="5000">5000 点</option>
           </select>
         </div>
 
@@ -631,11 +820,30 @@ onUnmounted(() => {
     <!-- Main Canvas Area -->
     <div
       ref="containerRef"
-      class="flex-1 relative overflow-hidden cursor-crosshair"
+      class="flex-1 relative overflow-hidden select-none"
+      :class="isDragging ? 'cursor-grabbing' : 'cursor-crosshair'"
+      @wheel.prevent="handleWheel"
+      @mousedown="handleMouseDown"
       @mousemove="handleMouseMove"
+      @mouseup="handleMouseUp"
       @mouseleave="handleMouseLeave"
+      @dblclick="handleDoubleClick"
     >
       <canvas ref="canvasRef" class="absolute inset-0 w-full h-full block"></canvas>
+
+      <!-- Floating HUD when autoFollow is paused by dragging/zooming -->
+      <div
+        v-if="!autoFollow"
+        class="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-950/90 border border-cyan-700 text-cyan-300 text-xs shadow-xl backdrop-blur"
+      >
+        <span>🔍 自由浏览模式 (已暂停自动跟随)</span>
+        <button
+          @click.stop="resumeAutoFollow"
+          class="px-2 py-0.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-full text-[10px] font-semibold transition-colors shadow-sm"
+        >
+          恢复跟随最新
+        </button>
+      </div>
 
       <!-- Hover Tooltip Floating HUD -->
       <div
@@ -662,7 +870,7 @@ onUnmounted(() => {
 
     <!-- Bottom Instructions Footer -->
     <div class="bg-zinc-900 border-t border-zinc-800 px-4 py-1 text-[10px] text-zinc-500 flex items-center justify-between">
-      <span>💡 支持协议: <code>CSV (v1,v2,v3)</code> | <code>键值对 (roll:12.3,pitch:45.6)</code> | <code>JSON ({"a":1,"b":2})</code></span>
+      <span>💡 交互: <code>滚轮缩放时间轴</code> | <code>Shift+滚轮缩放Y轴</code> | <code>左键拖拽平移</code> | <code>双击复位</code></span>
       <span v-if="!isConnected && !isSampling" class="text-amber-500">⚠ 串口未连接，可点击 [🎯 J-Scope 变量捕获] 直连单片机 RAM 采样</span>
       <span v-else-if="isSampling" class="text-purple-400 font-semibold animate-pulse">● J-Scope SWD 高速变量监视中...</span>
       <span v-else class="text-emerald-400">● 串口已就绪，正在监听数据流</span>

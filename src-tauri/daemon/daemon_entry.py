@@ -303,6 +303,81 @@ class PyOCDController:
             return {"address": f"0x{address:08X}", "value": f"0x{value:08X}", "status": "success"}
 
     @staticmethod
+    def write_memory_byte(address: int, value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
+        if not PYOCD_AVAILABLE:
+            raise RuntimeError("PyOCD is not available.")
+        kwargs = {"auto_open": True}
+        if probe_id:
+            kwargs["unique_id"] = probe_id
+        if target_override:
+            kwargs["target_override"] = target_override
+
+        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        with session:
+            target = session.board.target
+            target.write8(address, value & 0xFF)
+            return {"address": f"0x{address:08X}", "value": f"0x{value & 0xFF:02X}", "status": "success"}
+
+    @staticmethod
+    def dump_memory_to_file(address: int, count: int, file_path: str, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
+        if not PYOCD_AVAILABLE:
+            raise RuntimeError("PyOCD is not available.")
+        kwargs = {"auto_open": True}
+        if probe_id:
+            kwargs["unique_id"] = probe_id
+        if target_override:
+            kwargs["target_override"] = target_override
+
+        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        with session:
+            target = session.board.target
+            chunk_size = 4096
+            bytes_written = 0
+            with open(file_path, "wb") as f:
+                while bytes_written < count:
+                    to_read = min(chunk_size, count - bytes_written)
+                    chunk = target.read_memory_block8(address + bytes_written, to_read)
+                    f.write(bytes(chunk))
+                    bytes_written += to_read
+
+            return {
+                "status": "success",
+                "address": f"0x{address:08X}",
+                "count": bytes_written,
+                "file_path": file_path
+            }
+
+    @staticmethod
+    def load_file_to_memory(address: int, file_path: str, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
+        if not PYOCD_AVAILABLE:
+            raise RuntimeError("PyOCD is not available.")
+        kwargs = {"auto_open": True}
+        if probe_id:
+            kwargs["unique_id"] = probe_id
+        if target_override:
+            kwargs["target_override"] = target_override
+
+        with open(file_path, "rb") as f:
+            data = f.read()
+
+        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        with session:
+            target = session.board.target
+            chunk_size = 4096
+            written = 0
+            while written < len(data):
+                chunk = list(data[written:written + chunk_size])
+                target.write_memory_block8(address + written, chunk)
+                written += len(chunk)
+
+            return {
+                "status": "success",
+                "address": f"0x{address:08X}",
+                "count": len(data),
+                "file_path": file_path
+            }
+
+    @staticmethod
     def reset_target(halt: bool = False, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
         if not PYOCD_AVAILABLE:
             raise RuntimeError("PyOCD is not available.")
@@ -1079,6 +1154,49 @@ MCP_TOOLS = [
             "type": "object",
             "properties": {}
         }
+    },
+    {
+        "name": "write_memory_byte",
+        "description": "写入单个字节 (8位数值) 到目标单片机指定内存地址",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": "integer", "description": "内存物理地址"},
+                "value": {"type": "integer", "description": "8位无符号数值 (0-255)"},
+                "probe_id": {"type": "string", "description": "探针 ID"},
+                "target_override": {"type": "string", "description": "目标芯片型号"}
+            },
+            "required": ["address", "value"]
+        }
+    },
+    {
+        "name": "dump_memory_to_file",
+        "description": "将目标单片机指定内存地址范围 (Flash 或 RAM) 转储导出为本地 .bin 文件",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": "integer", "description": "起始内存地址，例如 0x08000000 或 0x20000000"},
+                "count": {"type": "integer", "description": "导出的总字节数"},
+                "file_path": {"type": "string", "description": "输出 .bin 文件的绝对物理路径"},
+                "probe_id": {"type": "string", "description": "探针 ID"},
+                "target_override": {"type": "string", "description": "目标芯片型号"}
+            },
+            "required": ["address", "count", "file_path"]
+        }
+    },
+    {
+        "name": "load_file_to_memory",
+        "description": "将本地二进制文件 (.bin) 加载写入至单片机指定 RAM 地址",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": "integer", "description": "目标 RAM 起始物理地址"},
+                "file_path": {"type": "string", "description": "本地 .bin 文件物理路径"},
+                "probe_id": {"type": "string", "description": "探针 ID"},
+                "target_override": {"type": "string", "description": "目标芯片型号"}
+            },
+            "required": ["address", "file_path"]
+        }
     }
 ]
 
@@ -1093,6 +1211,9 @@ DIRECT_TOOL_METHODS = [
     "read_core_registers",
     "read_memory",
     "write_memory",
+    "write_memory_byte",
+    "dump_memory_to_file",
+    "load_file_to_memory",
     "flash_firmware",
     "reset_target",
     "diagnose_hardfault",
@@ -1138,6 +1259,27 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         if isinstance(value, str):
             value = int(value, 16 if value.startswith("0x") else 10)
         return PyOCDController.write_memory(address, value, probe_id, target_override)
+    elif name == "write_memory_byte":
+        address = arguments["address"]
+        if isinstance(address, str):
+            address = int(address, 16 if address.startswith("0x") else 10)
+        value = arguments["value"]
+        if isinstance(value, str):
+            value = int(value, 16 if value.startswith("0x") else 10)
+        return PyOCDController.write_memory_byte(address, value, probe_id, target_override)
+    elif name == "dump_memory_to_file":
+        address = arguments["address"]
+        if isinstance(address, str):
+            address = int(address, 16 if address.startswith("0x") else 10)
+        count = int(arguments["count"])
+        file_path = arguments["file_path"]
+        return PyOCDController.dump_memory_to_file(address, count, file_path, probe_id, target_override)
+    elif name == "load_file_to_memory":
+        address = arguments["address"]
+        if isinstance(address, str):
+            address = int(address, 16 if address.startswith("0x") else 10)
+        file_path = arguments["file_path"]
+        return PyOCDController.load_file_to_memory(address, file_path, probe_id, target_override)
     elif name == "flash_firmware":
         file_path = arguments["file_path"]
         return PyOCDController.flash_firmware(file_path, target_override, probe_id)
