@@ -157,12 +157,67 @@ async function handleSendMessage(customPrompt?: string) {
 
       addMessage('assistant', '⚡ 单片机已成功切换至 System Bootloader (ISP) 引导模式 (RTS 1 维持 500ms 后复位触发)！');
 
+    } else if ((lower.includes('读') || lower.includes('read')) && (lower.includes('ram') || lower.includes('mem') || lower.includes('内存') || lower.includes('0x'))) {
+      // Parse address if specified
+      const addrMatch = prompt.match(/0x[0-9a-fA-F]+/);
+      const targetAddr = addrMatch ? addrMatch[0] : '0x20000000';
+      const count = 16;
+
+      addMessage('assistant', `正在调用 MCP 工具 \`read_memory\` 读取内存地址 ${targetAddr}...`, {
+        name: 'read_memory',
+        arguments: { address: targetAddr, count, target_override: 'cortex_m' },
+        status: 'running'
+      });
+
+      const res: any = await safeInvoke('pyocd_read_memory', {
+        address: targetAddr,
+        count,
+        probeId: null,
+        targetOverride: 'cortex_m'
+      });
+
+      messages.value[messages.value.length - 1].tool_call = {
+        name: 'read_memory',
+        arguments: { address: targetAddr, count },
+        result: res,
+        status: 'success'
+      };
+
+      addMessage('assistant', `✅ 成功通过 MCP 读取内存 **${res.address || targetAddr}** (16 字节):\n\`\`\`\nHEX: ${res.hex_dump || 'N/A'}\n\`\`\`\n原始字节: \`[${res.bytes?.join(', ')}]\``);
+
+    } else if ((lower.includes('写') || lower.includes('write') || lower.includes('修改')) && (lower.includes('ram') || lower.includes('mem') || lower.includes('内存') || lower.includes('0x'))) {
+      const allHex = prompt.match(/0x[0-9a-fA-F]+/g) || [];
+      const targetAddr = allHex[0] || '0x20000000';
+      const valStr = allHex.length > 1 ? allHex[1] : '0x12345678';
+
+      addMessage('assistant', `正在调用 MCP 工具 \`write_memory\` 向地址 ${targetAddr} 写入 ${valStr}...`, {
+        name: 'write_memory',
+        arguments: { address: targetAddr, value: valStr, target_override: 'cortex_m' },
+        status: 'running'
+      });
+
+      const res: any = await safeInvoke('pyocd_write_memory', {
+        address: targetAddr,
+        value: valStr,
+        probeId: null,
+        targetOverride: 'cortex_m'
+      });
+
+      messages.value[messages.value.length - 1].tool_call = {
+        name: 'write_memory',
+        arguments: { address: targetAddr, value: valStr },
+        result: res,
+        status: 'success'
+      };
+
+      addMessage('assistant', `✅ 成功通过 MCP 向内存 **${res.address || targetAddr}** 写入 **${res.value || valStr}**！状态: \`${res.status}\``);
+
     } else {
       // General Embedded AI guidance
       setTimeout(() => {
         addMessage(
           'assistant',
-          `您好！我是您的嵌入式 HIL 硬件智能助手。我已经通过 MCP (Model Context Protocol) 直连您的 DAPLink 调试器。\n\n您可以随时指示我执行：\n- 🔍 **“分析当前单片机 HardFault 崩溃原因”**\n- 🔄 **“复位单片机并重启”**\n- ⚡ **“切换至 ISP Bootloader 引导模式”**\n- 📡 **“检测当前调试探针信息”**`
+          `您好！我是您的嵌入式 HIL 硬件智能助手。我已经通过 MCP (Model Context Protocol) 直连您的 DAPLink 调试器。\n\n您可以随时指示我执行：\n- 🔍 **“检测当前连接的硬件调试探针”**\n- 📖 **“读取 RAM 内存 0x20000000”**\n- ✏️ **“写入 RAM 内存 0x20000000 0x12345678”**\n- 🔍 **“分析当前单片机 HardFault 崩溃原因”**\n- 🔄 **“复位单片机并重启”**\n- ⚡ **“切换至 ISP Bootloader 引导模式”**`
         );
       }, 500);
     }
@@ -291,6 +346,22 @@ onMounted(() => {
       >
         <Cpu class="w-3.5 h-3.5 text-emerald-400" />
         <span>扫描调试探针</span>
+      </button>
+
+      <button
+        @click="handleSendMessage('读取 RAM 内存 0x20000000')"
+        class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
+      >
+        <Binary class="w-3.5 h-3.5 text-emerald-400" />
+        <span>读取 RAM (0x20000000)</span>
+      </button>
+
+      <button
+        @click="handleSendMessage('写入 RAM 内存 0x20000000 0x12345678')"
+        class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
+      >
+        <Binary class="w-3.5 h-3.5 text-indigo-400" />
+        <span>写入 RAM (0x20000000)</span>
       </button>
     </div>
 

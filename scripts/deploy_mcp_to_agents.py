@@ -5,17 +5,28 @@ import sqlite3
 import shutil
 from pathlib import Path
 
-DAEMON_EXE = r"C:\ming\source\tools\test_tools\bin\hil-daemon-x86_64-pc-windows-msvc.exe"
-DAEMON_FALLBACK_PY = r"C:\ming\source\tools\test_tools\src-tauri\daemon\daemon_entry.py"
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = SCRIPT_DIR.parent
+
+candidates = [
+    ROOT_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe",
+    ROOT_DIR / "hil-daemon-x86_64-pc-windows-msvc.exe",
+    Path(r"C:\ming\source\tools\test_tools\bin\hil-daemon-x86_64-pc-windows-msvc.exe"),
+]
+
+found_exe = next((p for p in candidates if p.exists()), candidates[0])
+DAEMON_EXE = str(found_exe)
+DAEMON_FALLBACK_PY = str(ROOT_DIR / "src-tauri" / "daemon" / "daemon_entry.py")
 
 SERVER_ID = "embedded-hil-debugger"
 SERVER_NAME = "embedded-hil-debugger"
 SERVER_DESC = "AI 嵌入式硬件在环(HIL)测试与调试系统 (DAPLink串口/SWD烧录/寄存器分析/HardFault自动诊断)"
 
-# Ensure target executable exists
 if not os.path.exists(DAEMON_EXE):
     print(f"[WARN] Daemon binary not found at: {DAEMON_EXE}")
     print(f"[WARN] Will fallback to Python entry point if needed.")
+else:
+    print(f"[INFO] Using daemon executable: {DAEMON_EXE}")
 
 def backup_file(path: Path):
     if path.exists():

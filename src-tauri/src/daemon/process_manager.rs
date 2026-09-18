@@ -37,8 +37,20 @@ impl DaemonManager {
 
     pub fn ensure_started(&self, _app: &AppHandle) -> Result<(), String> {
         let mut child_guard = self.child.lock().unwrap();
-        if child_guard.is_some() {
-            return Ok(());
+        if let Some(ref mut child) = *child_guard {
+            match child.try_wait() {
+                Ok(None) => {
+                    // Daemon process is running normally
+                    return Ok(());
+                }
+                _ => {
+                    println!("[DaemonManager] Previous daemon exited. Re-spawning clean instance...");
+                }
+            }
+            *child_guard = None;
+            *self.stdin_writer.lock().unwrap() = None;
+            *self.stdout_reader.lock().unwrap() = None;
+            *self.child_pid.lock().unwrap() = None;
         }
 
         // Determine launch target: candidate paths in order of preference
@@ -46,15 +58,27 @@ impl DaemonManager {
 
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
+                // Same directory as AI-HIL-Debugger.exe
                 candidates.push(exe_dir.join("hil-daemon-x86_64-pc-windows-msvc.exe"));
                 candidates.push(exe_dir.join("hil-daemon.exe"));
+                // bin/ subdirectory (Release structure)
+                candidates.push(exe_dir.join("bin").join("hil-daemon-x86_64-pc-windows-msvc.exe"));
+                candidates.push(exe_dir.join("bin").join("hil-daemon.exe"));
+                // binaries/ subdirectory
                 candidates.push(exe_dir.join("binaries").join("hil-daemon-x86_64-pc-windows-msvc.exe"));
+                // Parent directory structures (e.g. if run from bin/ or target/release/)
+                if let Some(parent) = exe_dir.parent() {
+                    candidates.push(parent.join("bin").join("hil-daemon-x86_64-pc-windows-msvc.exe"));
+                    candidates.push(parent.join("hil-daemon-x86_64-pc-windows-msvc.exe"));
+                    candidates.push(parent.join("binaries").join("hil-daemon-x86_64-pc-windows-msvc.exe"));
+                }
             }
         }
 
+        candidates.push(PathBuf::from("bin/hil-daemon-x86_64-pc-windows-msvc.exe"));
+        candidates.push(PathBuf::from("hil-daemon-x86_64-pc-windows-msvc.exe"));
         candidates.push(PathBuf::from("src-tauri/binaries/hil-daemon-x86_64-pc-windows-msvc.exe"));
         candidates.push(PathBuf::from("binaries/hil-daemon-x86_64-pc-windows-msvc.exe"));
-        candidates.push(PathBuf::from("hil-daemon-x86_64-pc-windows-msvc.exe"));
 
         let mut cmd = if let Some(found_bin) = candidates.into_iter().find(|p| p.exists()) {
             println!("[DaemonManager] Found standalone binary: {:?}", found_bin);
@@ -72,8 +96,13 @@ impl DaemonManager {
         };
 
         cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stdout(Stdio::piped());
+
+        #[cfg(debug_assertions)]
+        cmd.stderr(Stdio::inherit());
+
+        #[cfg(not(debug_assertions))]
+        cmd.stderr(Stdio::null());
 
         #[cfg(target_os = "windows")]
         {
@@ -122,10 +151,11 @@ impl DaemonManager {
         {
             let mut writer_guard = self.stdin_writer.lock().unwrap();
             if let Some(ref mut writer) = *writer_guard {
-                writer
-                    .write_all(req_str.as_bytes())
-                    .map_err(|e| format!("Daemon write error: {}", e))?;
-                writer.flush().map_err(|e| format!("Daemon flush error: {}", e))?;
+                if let Err(e) = writer.write_all(req_str.as_bytes()).and_then(|_| writer.flush()) {
+                    drop(writer_guard);
+                    self.stop();
+                    return Err(format!("Daemon write error: {}", e));
+                }
             } else {
                 return Err("Daemon stdin not available".to_string());
             }
@@ -136,16 +166,19 @@ impl DaemonManager {
         {
             let mut reader_guard = self.stdout_reader.lock().unwrap();
             if let Some(ref mut reader) = *reader_guard {
-                reader
-                    .read_line(&mut resp_line)
-                    .map_err(|e| format!("Daemon read error: {}", e))?;
+                if let Err(e) = reader.read_line(&mut resp_line) {
+                    drop(reader_guard);
+                    self.stop();
+                    return Err(format!("Daemon read error: {}", e));
+                }
             } else {
                 return Err("Daemon stdout not available".to_string());
             }
         }
 
         if resp_line.trim().is_empty() {
-            return Err("Daemon returned empty response".to_string());
+            self.stop();
+            return Err("Daemon returned empty response (process may have terminated)".to_string());
         }
 
         let resp_val: Value = serde_json::from_str(&resp_line)

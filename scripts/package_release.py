@@ -58,6 +58,7 @@ def package():
     daemon_exe = ROOT_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe"
     if daemon_exe.exists():
         shutil.copy2(daemon_exe, TARGET_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe")
+        shutil.copy2(daemon_exe, TARGET_DIR / "hil-daemon-x86_64-pc-windows-msvc.exe")
         print(f"  [OK] Copied {daemon_exe.name} ({daemon_exe.stat().st_size / 1024 / 1024:.1f} MB)")
 
     # Copy batch scripts
