@@ -5,6 +5,7 @@ Packages the AI-HIL Debugger into a standalone Windows release archive (ZIP).
 """
 
 import os
+import sys
 import shutil
 import zipfile
 from pathlib import Path
@@ -20,11 +21,25 @@ def package():
     print(f" Packaging Release: {PKG_NAME}")
     print("=" * 60)
 
+    # Stop any running instances locking files in release directory
+    if sys.platform == "win32":
+        try:
+            import subprocess
+            subprocess.run(["taskkill", "/f", "/im", "AI-HIL-Debugger.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["taskkill", "/f", "/im", "hil-daemon-x86_64-pc-windows-msvc.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import time
+            time.sleep(0.5)
+        except Exception:
+            pass
+
     # Clean previous output
     if TARGET_DIR.exists():
-        shutil.rmtree(TARGET_DIR)
+        shutil.rmtree(TARGET_DIR, ignore_errors=True)
     if ZIP_PATH.exists():
-        ZIP_PATH.unlink()
+        try:
+            ZIP_PATH.unlink()
+        except Exception:
+            pass
 
     TARGET_DIR.mkdir(parents=True, exist_ok=True)
     (TARGET_DIR / "bin").mkdir(exist_ok=True)

@@ -14,10 +14,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [2/3] Checking standalone Python daemon binary...
-if not exist "%~dp0src-tauri\binaries\hil-daemon-x86_64-pc-windows-msvc.exe" (
-    echo Building Python standalone daemon...
-    python scripts\build_daemon_windows.py
+echo [2/4] Checking standalone Python daemon binary...
+if not exist "%~dp0bin\hil-daemon-x86_64-pc-windows-msvc.exe" (
+    echo [INFO] Python daemon binary missing, building standalone daemon...
+    call "%~dp0build_daemon.bat"
+) else (
+    echo [INFO] Standalone daemon binary ready. (Tip: run build_daemon.bat to force rebuild daemon)
 )
 
 echo [3/3] Assembling distribution files into bin/ and root...

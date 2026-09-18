@@ -106,10 +106,13 @@ python scripts/install_skill.py
 ## 📦 开发者编译与打包
 
 ```powershell
-# 1. 前端与后端完整构建
+# 1. 重新编译独立 MCP 守护进程与自测流水线 (当修改了 daemon_entry.py 时)
+.\build_daemon.bat
+
+# 2. 前端与桌面端完整构建
 .\build.bat
 
-# 2. 自动化回归测试
+# 3. 自动化协议与功能回归测试
 node scripts/verify_features_regression.js
 ```
 
