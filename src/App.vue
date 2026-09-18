@@ -47,7 +47,7 @@ function handleResetTriggered(seq: string) {
 </script>
 
 <template>
-  <div class="h-screen w-screen flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden select-none font-sans">
+  <div class="h-screen w-screen flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden font-sans">
     <!-- Web Browser Notice if opened in Chrome/Edge instead of Tauri -->
     <div v-if="runningInBrowser" class="bg-amber-950/80 border-b border-amber-800 text-amber-300 px-4 py-1.5 flex items-center justify-between text-xs">
       <div class="flex items-center gap-2">

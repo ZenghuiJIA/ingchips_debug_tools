@@ -9,7 +9,9 @@ import {
   Search,
   AlertTriangle,
   Lightbulb,
-  Binary
+  Binary,
+  Copy,
+  Check
 } from '@lucide/vue';
 
 const isCapturing = ref<boolean>(false);
@@ -23,6 +25,50 @@ const cfsrDecoded = ref<CfsrDecoded | null>(null);
 const hfsrDecoded = ref<HfsrDecoded | null>(null);
 const aiRecommendations = ref<string[]>([]);
 const errorMsg = ref<string>('');
+
+// Copy state
+const isCopiedReport = ref<boolean>(false);
+const isCopiedMemory = ref<boolean>(false);
+
+function copyDiagnosticReport() {
+  const parts: string[] = ['=== ARM Cortex-M HardFault 诊断报告 ==='];
+  if (faultRegisters.value) {
+    parts.push('\n[SCB 故障寄存器]');
+    parts.push(`CFSR: ${faultRegisters.value.CFSR}`);
+    parts.push(`HFSR: ${faultRegisters.value.HFSR}`);
+    parts.push(`BFAR: ${faultRegisters.value.BFAR}`);
+    parts.push(`MMFAR: ${faultRegisters.value.MMFAR}`);
+  }
+  if (cfsrDecoded.value && cfsrDecoded.value.flags.length > 0) {
+    parts.push('\n[故障标志位]');
+    parts.push(cfsrDecoded.value.flags.join(', '));
+    parts.push('\n[原因解析]');
+    parts.push(cfsrDecoded.value.explanations.join('\n'));
+  }
+  if (coreRegisters.value) {
+    parts.push('\n[核心寄存器现场]');
+    for (const [k, v] of Object.entries(coreRegisters.value)) {
+      parts.push(`${k}: ${v}`);
+    }
+  }
+  if (aiRecommendations.value.length > 0) {
+    parts.push('\n[排查建议]');
+    aiRecommendations.value.forEach((rec, idx) => parts.push(`${idx + 1}. ${rec}`));
+  }
+
+  navigator.clipboard.writeText(parts.join('\n'));
+  isCopiedReport.value = true;
+  setTimeout(() => isCopiedReport.value = false, 2000);
+}
+
+function copyMemoryDump() {
+  if (!memoryDump.value) return;
+  const rows = formatHexGrid(memoryDump.value.bytes, parseInt(memoryDump.value.address, 16));
+  const text = rows.map(r => `${r.offset}:  ${r.hex.padEnd(48, ' ')}  |${r.ascii}|`).join('\n');
+  navigator.clipboard.writeText(text);
+  isCopiedMemory.value = true;
+  setTimeout(() => isCopiedMemory.value = false, 2000);
+}
 
 // Memory Inspector State
 const memAddress = ref<string>('0x20000000');
@@ -149,6 +195,16 @@ function formatHexGrid(bytes: number[], startAddr: number) {
         >
           <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': isCapturing }" />
           <span>{{ isCapturing ? '正在抓取寄存器...' : '一键抓取现场并诊断' }}</span>
+        </button>
+
+        <button
+          v-if="coreRegisters || faultRegisters"
+          @click="copyDiagnosticReport"
+          class="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded font-medium border border-zinc-700 transition-colors shadow-sm"
+          title="复制当前完整的硬故障诊断分析与寄存器"
+        >
+          <component :is="isCopiedReport ? Check : Copy" class="w-3.5 h-3.5 text-emerald-400" />
+          <span>{{ isCopiedReport ? '已复制诊断' : '复制诊断' }}</span>
         </button>
       </div>
     </div>
@@ -282,11 +338,20 @@ function formatHexGrid(bytes: number[], startAddr: number) {
             <Search class="w-3.5 h-3.5" :class="{ 'animate-spin': isReadingMem }" />
             <span>读取内存</span>
           </button>
+          <button
+            v-if="memoryDump"
+            @click="copyMemoryDump"
+            class="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded border border-zinc-700 font-medium transition-colors"
+            title="复制 Hex 与 ASCII 内存数据"
+          >
+            <component :is="isCopiedMemory ? Check : Copy" class="w-3 h-3 text-emerald-400" />
+            <span>{{ isCopiedMemory ? '已复制' : '复制数据' }}</span>
+          </button>
         </div>
       </div>
 
       <!-- Hex View Table -->
-      <div v-if="memoryDump" class="bg-zinc-950 border border-zinc-800/80 rounded p-2.5 font-mono text-[11px] overflow-x-auto space-y-1">
+      <div v-if="memoryDump" class="bg-zinc-950 border border-zinc-800/80 rounded p-2.5 font-mono text-[11px] overflow-x-auto space-y-1 select-text">
         <div
           v-for="row in formatHexGrid(memoryDump.bytes, parseInt(memoryDump.address, 16))"
           :key="row.offset"

@@ -13,7 +13,9 @@ import {
   Terminal,
   Layers,
   Zap,
-  Activity
+  Activity,
+  Copy,
+  Check
 } from '@lucide/vue';
 import CommandGroupPanel from './CommandGroupPanel.vue';
 import TriggerPanel from './TriggerPanel.vue';
@@ -27,6 +29,16 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'switch-tab', tab: string): void;
 }>();
+
+const isCopiedAll = ref<boolean>(false);
+
+function copyAllLogs() {
+  if (logs.value.length === 0) return;
+  const text = logs.value.map(l => (showTimestamps.value ? `[${l.timestamp}] ` : '') + `[${l.type.toUpperCase()}] ` + l.text).join('\n');
+  navigator.clipboard.writeText(text);
+  isCopiedAll.value = true;
+  setTimeout(() => isCopiedAll.value = false, 2000);
+}
 
 const isCommandPanelOpen = ref<boolean>(true);
 const isTriggerPanelOpen = ref<boolean>(false);
@@ -305,6 +317,15 @@ onUnmounted(() => {
         </div>
 
         <div class="h-3 w-px bg-zinc-800"></div>
+
+        <button
+          @click="copyAllLogs"
+          :disabled="logs.length === 0"
+          :title="isCopiedAll ? '已复制到剪贴板' : '复制终端全部日志'"
+          class="p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors disabled:opacity-40"
+        >
+          <component :is="isCopiedAll ? Check : Copy" class="w-3.5 h-3.5" :class="{ 'text-emerald-400': isCopiedAll }" />
+        </button>
 
         <button
           @click="exportLogs"

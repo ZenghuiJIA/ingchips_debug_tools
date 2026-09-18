@@ -11,13 +11,26 @@ import {
   RefreshCw,
   Cpu,
   Zap,
-  RotateCcw
+  RotateCcw,
+  Copy,
+  Check
 } from '@lucide/vue';
 
 const messages = ref<ChatMessage[]>([]);
 const userInput = ref<string>('');
 const isThinking = ref<boolean>(false);
 const chatContainer = ref<HTMLElement | null>(null);
+const copiedId = ref<string | null>(null);
+
+function copyMessage(id: string, text: string) {
+  navigator.clipboard.writeText(text);
+  copiedId.value = id;
+  setTimeout(() => {
+    if (copiedId.value === id) {
+      copiedId.value = null;
+    }
+  }, 2000);
+}
 
 function scrollToBottom() {
   nextTick(() => {
@@ -294,22 +307,43 @@ onMounted(() => {
           </div>
 
           <div class="text-zinc-400 text-[11px]">
-            <div>入参: <code class="text-zinc-300">{{ JSON.stringify(msg.tool_call.arguments) }}</code></div>
+            <div>入参: <code class="text-zinc-300 select-text">{{ JSON.stringify(msg.tool_call.arguments) }}</code></div>
             <div v-if="msg.tool_call.result" class="mt-1">
-              返回数据:
-              <pre class="bg-zinc-950 p-2 rounded mt-1 max-h-36 overflow-y-auto text-[10px] text-zinc-300">{{ JSON.stringify(msg.tool_call.result, null, 2) }}</pre>
+              <div class="flex items-center justify-between">
+                <span>返回数据:</span>
+                <button
+                  @click="copyMessage(msg.id + '_tool', JSON.stringify(msg.tool_call.result, null, 2))"
+                  class="flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-200 px-1.5 py-0.5 rounded hover:bg-zinc-800 transition-colors"
+                  title="复制工具返回结果"
+                >
+                  <component :is="copiedId === msg.id + '_tool' ? Check : Copy" class="w-3 h-3 text-emerald-400" />
+                  <span>{{ copiedId === msg.id + '_tool' ? '已复制' : '复制结果' }}</span>
+                </button>
+              </div>
+              <pre class="bg-zinc-950 p-2 rounded mt-1 max-h-36 overflow-y-auto text-[10px] text-zinc-300 select-text">{{ JSON.stringify(msg.tool_call.result, null, 2) }}</pre>
             </div>
           </div>
         </div>
 
         <!-- Text Bubble -->
-        <div
-          class="rounded-xl px-4 py-2.5 leading-relaxed text-[12px]"
-          :class="msg.role === 'user' 
-            ? 'bg-emerald-600 text-white rounded-br-none shadow' 
-            : 'bg-zinc-900 border border-zinc-800/80 text-zinc-200 rounded-bl-none shadow-sm whitespace-pre-wrap'"
-        >
-          {{ msg.content }}
+        <div class="relative group/msg max-w-full">
+          <div
+            class="rounded-xl px-4 py-2.5 leading-relaxed text-[12px] select-text"
+            :class="msg.role === 'user' 
+              ? 'bg-emerald-600 text-white rounded-br-none shadow' 
+              : 'bg-zinc-900 border border-zinc-800/80 text-zinc-200 rounded-bl-none shadow-sm whitespace-pre-wrap'"
+          >
+            {{ msg.content }}
+          </div>
+          <!-- Copy button on hover -->
+          <button
+            @click="copyMessage(msg.id, msg.content)"
+            class="absolute top-1 right-1 opacity-0 group-hover/msg:opacity-100 p-1 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition-all shadow-sm"
+            :class="{ '!opacity-100': copiedId === msg.id }"
+            title="复制消息内容"
+          >
+            <component :is="copiedId === msg.id ? Check : Copy" class="w-3 h-3 text-emerald-400" />
+          </button>
         </div>
       </div>
     </div>

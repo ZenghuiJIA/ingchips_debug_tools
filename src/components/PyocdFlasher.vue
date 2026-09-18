@@ -6,12 +6,25 @@ import {
   Zap,
   RotateCcw,
   Pause,
-  RefreshCw
+  RefreshCw,
+  Copy,
+  Check
 } from '@lucide/vue';
 
 const probes = ref<ProbeInfo[]>([]);
 const selectedProbeId = ref<string>('');
 const isScanningProbes = ref<boolean>(false);
+const isCopied = ref<boolean>(false);
+
+function copyLogs() {
+  if (flashLogs.value.length === 0) return;
+  const text = flashLogs.value.map(l => `[${l.time}] ${l.text}`).join('\n');
+  navigator.clipboard.writeText(text);
+  isCopied.value = true;
+  setTimeout(() => {
+    isCopied.value = false;
+  }, 2000);
+}
 
 const targetMcu = ref<string>('cortex_m');
 const targetPresets = [
@@ -217,15 +230,26 @@ onMounted(() => {
     <div class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg p-4 flex flex-col min-h-[220px]">
       <div class="flex items-center justify-between pb-2 border-b border-zinc-800 mb-2">
         <span class="font-semibold text-zinc-300">烧录与调试事务日志</span>
-        <button
-          @click="flashLogs = []"
-          class="text-[11px] text-zinc-500 hover:text-zinc-300"
-        >
-          清空日志
-        </button>
+        <div class="flex items-center gap-2">
+          <button
+            @click="copyLogs"
+            :disabled="flashLogs.length === 0"
+            class="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors disabled:opacity-40"
+            title="复制全部日志到剪贴板"
+          >
+            <component :is="isCopied ? Check : Copy" class="w-3 h-3 text-emerald-400" />
+            <span>{{ isCopied ? '已复制' : '复制日志' }}</span>
+          </button>
+          <button
+            @click="flashLogs = []"
+            class="text-[11px] text-zinc-500 hover:text-zinc-300"
+          >
+            清空日志
+          </button>
+        </div>
       </div>
 
-      <div class="flex-1 overflow-y-auto space-y-1.5 font-mono text-[11px] p-2 bg-zinc-950 rounded border border-zinc-800/60">
+      <div class="flex-1 overflow-y-auto space-y-1.5 font-mono text-[11px] p-2 bg-zinc-950 rounded border border-zinc-800/60 select-text">
         <div v-if="flashLogs.length === 0" class="text-zinc-600 text-center py-6">
           暂无烧录日志记录
         </div>
