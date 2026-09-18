@@ -2,7 +2,7 @@
 name: embedded-hil-debugger
 description: >-
   Expert skill for Embedded Hardware-in-the-Loop (HIL) debugging and testing.
-  Use when interacting with DAPLink/CMSIS-DAP hardware probes, diagnosing Cortex-M HardFault crashes,
+  Use when interacting with DAPLink/CMSIS-DAP/J-Link hardware probes, diagnosing Cortex-M HardFault crashes,
   reading/writing MCU registers or RAM, flashing firmware over SWD, or controlling target hardware resets via MCP tools.
 ---
 
@@ -10,7 +10,7 @@ description: >-
 
 本 Skill 为 AI 助手提供针对 ARM Cortex-M 单片机硬件在环（Hardware-in-the-Loop, HIL）调试、固件烧录、寄存器级状态提取与硬故障（HardFault）根因分析的专业指引与标准操作规程。
 
-通过连接至宿主机的 **DAPLink / CMSIS-DAP** 调试器，AI 助手可以直接通过 MCP 工具调用底层硬件物理接口，执行无侵入式的 SWD 调试与自动化测试。
+通过连接至宿主机的 **DAPLink / CMSIS-DAP / J-Link** 调试器（均使用 PyOCD 引擎驱动），AI 助手可以直接通过 MCP 工具调用底层硬件物理接口，执行无侵入式的 SWD 调试与自动化测试。
 
 ---
 

@@ -36,17 +36,27 @@ function logMsg(text: string, status: 'info' | 'success' | 'error' = 'info') {
   if (flashLogs.value.length > 100) flashLogs.value.pop();
 }
 
+function getProbeBadge(p: ProbeInfo) {
+  if (p.probe_type === 'jlink' || p.description.toLowerCase().includes('j-link') || p.description.toLowerCase().includes('jlink')) {
+    return '🔗 [J-Link]';
+  }
+  if (p.probe_type === 'daplink' || p.description.toLowerCase().includes('cmsis') || p.description.toLowerCase().includes('dap')) {
+    return '⚡ [CMSIS-DAP]';
+  }
+  return '🔌 [探针]';
+}
+
 async function scanProbes() {
   isScanningProbes.value = true;
-  logMsg('正在扫描 SWD/JTAG 硬件调试器 (PyOCD)...');
+  logMsg('正在扫描 SWD/JTAG 硬件调试器 (PyOCD CMSIS-DAP / J-Link)...');
   try {
     const list: ProbeInfo[] = await safeInvoke('pyocd_list_probes');
     probes.value = list;
     if (list.length > 0) {
       selectedProbeId.value = list[0].unique_id;
-      logMsg(`成功发现 ${list.length} 个调试器探针: ${list[0].description} (ID: ${list[0].unique_id})`, 'success');
+      logMsg(`成功发现 ${list.length} 个调试器探针: ${getProbeBadge(list[0])} ${list[0].description} (ID: ${list[0].unique_id})`, 'success');
     } else {
-      logMsg('未检测到 CMSIS-DAP / DAPLink 调试器探针，请确认 USB 连接', 'error');
+      logMsg('未检测到 DAPLink / J-Link / CMSIS-DAP 调试器探针，请确认 USB 连接', 'error');
     }
   } catch (err: any) {
     logMsg(`探针扫描异常: ${err}`, 'error');
@@ -108,7 +118,7 @@ onMounted(() => {
       <div class="flex items-center justify-between border-b border-zinc-800 pb-2.5">
         <div class="flex items-center gap-2 font-semibold text-zinc-200">
           <Zap class="w-4 h-4 text-emerald-400" />
-          <span>SWD 硬件在环固件烧录器 (PyOCD CMSIS-Pack)</span>
+          <span>SWD 硬件在环固件烧录器 (PyOCD CMSIS-DAP / J-Link)</span>
         </div>
         <button
           @click="scanProbes"
@@ -123,14 +133,14 @@ onMounted(() => {
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
         <!-- Probe Selection -->
         <div>
-          <label class="block text-zinc-400 mb-1 text-[11px] font-medium">调试器硬件探针 (DAPLink / CMSIS-DAP)</label>
+          <label class="block text-zinc-400 mb-1 text-[11px] font-medium">调试器硬件探针 (DAPLink / J-Link / CMSIS-DAP)</label>
           <select
             v-model="selectedProbeId"
             class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 text-zinc-200 outline-none focus:border-emerald-500"
           >
             <option v-if="probes.length === 0" value="">(未找到探针)</option>
             <option v-for="p in probes" :key="p.unique_id" :value="p.unique_id">
-              {{ p.description }} (ID: {{ p.unique_id }})
+              {{ getProbeBadge(p) }} {{ p.description }} (ID: {{ p.unique_id }})
             </option>
           </select>
         </div>

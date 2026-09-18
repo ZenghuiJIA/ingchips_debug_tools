@@ -157,11 +157,31 @@ class PyOCDController:
             probes = ConnectHelper.get_all_connected_probes()
             result = []
             for p in probes:
+                cls_name = type(p).__name__.lower()
+                desc = getattr(p, "description", "").lower()
+                vendor = getattr(p, "vendor_name", "").lower()
+                product = getattr(p, "product_name", "").lower()
+
+                if "jlink" in cls_name or "jlink" in desc or "segger" in vendor or "segger" in desc:
+                    probe_type = "jlink"
+                    type_label = "J-Link"
+                elif "cmsis" in cls_name or "dap" in cls_name or "cmsis" in desc or "dap" in desc:
+                    probe_type = "daplink"
+                    type_label = "CMSIS-DAP"
+                elif "stlink" in cls_name or "stlink" in desc:
+                    probe_type = "stlink"
+                    type_label = "ST-Link"
+                else:
+                    probe_type = "generic"
+                    type_label = "SWD/JTAG Probe"
+
                 result.append({
                     "unique_id": p.unique_id,
                     "description": p.description,
                     "vendor_name": getattr(p, "vendor_name", ""),
                     "product_name": getattr(p, "product_name", ""),
+                    "probe_type": probe_type,
+                    "type_label": type_label,
                 })
             return result
         except Exception as e:

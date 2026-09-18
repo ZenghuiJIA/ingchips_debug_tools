@@ -7,6 +7,7 @@ export interface PortInfo {
   product: string | null;
   serial_number: string | null;
   is_daplink: boolean;
+  device_type?: 'daplink' | 'jlink' | 'generic' | string;
 }
 
 export interface SystemMetrics {
@@ -24,6 +25,8 @@ export interface ProbeInfo {
   description: string;
   vendor_name: string;
   product_name: string;
+  probe_type?: 'daplink' | 'jlink' | 'stlink' | 'generic' | string;
+  type_label?: string;
 }
 
 export interface SerialRxPayload {

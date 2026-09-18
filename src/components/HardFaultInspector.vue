@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
-import type { CoreRegisters, FaultRegisters, CfsrDecoded, HfsrDecoded } from '../types';
+import type { CoreRegisters, FaultRegisters, CfsrDecoded, HfsrDecoded, ProbeInfo } from '../types';
 import {
   AlertOctagon,
   Cpu,
@@ -14,6 +14,8 @@ import {
 
 const isCapturing = ref<boolean>(false);
 const targetChip = ref<string>('cortex_m');
+const probes = ref<ProbeInfo[]>([]);
+const selectedProbeId = ref<string>('');
 
 const coreRegisters = ref<CoreRegisters | null>(null);
 const faultRegisters = ref<FaultRegisters | null>(null);
@@ -28,13 +30,35 @@ const memCount = ref<number>(64);
 const isReadingMem = ref<boolean>(false);
 const memoryDump = ref<{ address: string; hex_dump: string; bytes: number[] } | null>(null);
 
+function getProbeBadge(p: ProbeInfo) {
+  if (p.probe_type === 'jlink' || p.description.toLowerCase().includes('j-link') || p.description.toLowerCase().includes('jlink')) {
+    return '🔗 [J-Link]';
+  }
+  if (p.probe_type === 'daplink' || p.description.toLowerCase().includes('cmsis') || p.description.toLowerCase().includes('dap')) {
+    return '⚡ [CMSIS-DAP]';
+  }
+  return '🔌 [探针]';
+}
+
+async function scanProbes() {
+  try {
+    const list: ProbeInfo[] = await safeInvoke('pyocd_list_probes');
+    probes.value = list;
+    if (list.length > 0 && !selectedProbeId.value) {
+      selectedProbeId.value = list[0].unique_id;
+    }
+  } catch (err) {
+    console.error('Scan probes failed in HardFaultInspector:', err);
+  }
+}
+
 async function captureRegistersAndDiagnose() {
   isCapturing.value = true;
   errorMsg.value = '';
   try {
     const res: any = await safeInvoke('pyocd_diagnose_hardfault', {
       targetOverride: targetChip.value || null,
-      probeId: null
+      probeId: selectedProbeId.value || null
     });
 
     const raw = res.raw_dump;
@@ -57,7 +81,7 @@ async function handleReadMemory() {
       address: memAddress.value,
       count: Number(memCount.value),
       targetOverride: targetChip.value || null,
-      probeId: null
+      probeId: selectedProbeId.value || null
     });
     memoryDump.value = res;
   } catch (err: any) {
@@ -66,6 +90,10 @@ async function handleReadMemory() {
     isReadingMem.value = false;
   }
 }
+
+onMounted(() => {
+  scanProbes();
+});
 
 function formatHexGrid(bytes: number[], startAddr: number) {
   const rows: Array<{ offset: string; hex: string; ascii: string }> = [];
@@ -95,11 +123,23 @@ function formatHexGrid(bytes: number[], startAddr: number) {
       </div>
 
       <div class="flex items-center gap-2">
+        <!-- Probe Selection (PyOCD CMSIS-DAP / J-Link) -->
+        <select
+          v-if="probes.length > 0"
+          v-model="selectedProbeId"
+          class="bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-zinc-200 outline-none focus:border-rose-500 font-mono text-xs max-w-[200px]"
+          title="选择调试探针 (DAPLink / J-Link)"
+        >
+          <option v-for="p in probes" :key="p.unique_id" :value="p.unique_id">
+            {{ getProbeBadge(p) }} {{ p.description }}
+          </option>
+        </select>
+
         <input
           v-model="targetChip"
           type="text"
           placeholder="芯片型号 (如 stm32f407vg)"
-          class="bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 text-zinc-200 outline-none focus:border-rose-500 font-mono w-48"
+          class="bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 text-zinc-200 outline-none focus:border-rose-500 font-mono w-44"
         />
 
         <button

@@ -6,13 +6,13 @@
 
 ## 🎯 核心特性清单
 
-1. **硬件串口与精准时序状态机控制**：
-   - 基于 Rust `serialport` crate 实现底层操作系统直连。
-   - 支持 9600 至 **921600 高波特率**无损通信。
-   - **硬件时序状态机**：
+1. **硬件串口支持与智能分类安全控制**：
+   - 支持全类型串口设备：自动识别 **DAPLink** (`⚡ [DAPLink]`)、**J-Link CDC 虚拟串口** (`🔗 [J-Link CDC]`) 以及 **通用串口设备** (`🔌 [通用串口]`, 包括 CH340, CP210x, FTDI, PL2303, USB CDC 等)。
+   - 基于 Rust `serialport` crate 实现底层操作系统直连，支持 9600 至 **921600 高波特率**无损通信。
+   - **硬件时序安全隔离（仅 DAPLink 支持硬件复位）**：
      - **普通复位 (Normal Reset)**：RTS=0 $\to$ 延迟 50ms $\to$ DTR 脉冲 100ms (复位低电平有效) $\to$ 释放 DTR。
      - **引导模式 (ISP Bootloader Reset)**：RTS=1 (拉高进入Boot) $\to$ 稳定等待 **500ms** $\to$ DTR 脉冲 100ms (拉低复位) $\to$ 释放 DTR。
-     - 支持独立引脚手动电平控制（DTR/RTS 带实时 LED 状态指示）。
+     - **安全限制**：由于仅 DAPLink 具备标准 HIL RTS/DTR 硬件引脚接线，**J-Link CDC 及其他通用串口设备不支持一键进入 BOOT 和硬件复位功能**。前端界面将自动禁用复位按键并给予提示，Rust 后端同样实施严格的硬件校验与状态拦截。
 
 2. **串口命令组与多格式编码**：
    - 支持为每条命令配置独立的换行符与格式：`+CRLF (\r\n)`、`+LF (\n)`、`+CR (\r)`、`RAW (无换行)`、`HEX (十六进制字节流)`。
@@ -30,8 +30,9 @@
    - 命中后自动在指定延时后回传设定命令（支持配置换行格式）。
    - 支持 `持续触发` 与 `仅单次触发`（防死循环），界面实时统计命中次数并记录触发时间。
 
-5. **SWD 固件烧录与调试 (PyOCD Engine)**：
-   - 自动扫描总线上连接的 **DAPLink / CMSIS-DAP / J-Link** 硬件探针（已实测兼容 `INGCHIPS CMSIS-DAP` 等）。
+5. **SWD 固件烧录与硬件在环调试 (PyOCD 驱动 DAPLink & J-Link)**：
+   - 探针驱动全面基于 **PyOCD**（集成 CMSIS-DAP 与 J-Link `pylink` 原生驱动链路）。
+   - 自动扫描总线上连接的 **DAPLink / CMSIS-DAP / J-Link** 硬件探针，并在烧录器与 HardFault 智能诊断器中提供自由切换选择。
    - 支持通过 CMSIS-Pack 对 STM32、RP2040、NRF52、通用 Cortex-M 进行一键烧录（`.bin` / `.hex` / `.elf`）。
    - 提供 SWD 硬件复位与复位并挂起 (Reset & Halt)。
 

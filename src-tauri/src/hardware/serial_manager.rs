@@ -16,6 +16,7 @@ pub struct PortInfo {
     pub product: Option<String>,
     pub serial_number: Option<String>,
     pub is_daplink: bool,
+    pub device_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +29,7 @@ pub struct SerialRxPayload {
 pub struct SerialManager {
     port: Arc<Mutex<Option<Box<dyn SerialPort>>>>,
     active_port_name: Arc<Mutex<Option<String>>>,
+    active_is_daplink: Arc<AtomicBool>,
     is_running: Arc<AtomicBool>,
     pub dtr_state: Arc<AtomicBool>,
     pub rts_state: Arc<AtomicBool>,
@@ -38,6 +40,7 @@ impl SerialManager {
         Self {
             port: Arc::new(Mutex::new(None)),
             active_port_name: Arc::new(Mutex::new(None)),
+            active_is_daplink: Arc::new(AtomicBool::new(false)),
             is_running: Arc::new(AtomicBool::new(false)),
             dtr_state: Arc::new(AtomicBool::new(false)),
             rts_state: Arc::new(AtomicBool::new(false)),
@@ -55,27 +58,44 @@ impl SerialManager {
                 let mut product = None;
                 let mut serial_number = None;
                 let mut is_daplink = false;
+                let mut device_type = "generic".to_string();
 
                 if let SerialPortType::UsbPort(UsbPortInfo {
                     vid: v,
                     pid: pi,
                     serial_number: s,
-                    manufacturer: m,
-                    product: pr,
+                    manufacturer: ref m,
+                    product: ref pr,
                 }) = p.port_type
                 {
                     vid = Some(v);
                     pid = Some(pi);
                     serial_number = s;
-                    manufacturer = m;
+                    manufacturer = m.clone();
                     product = pr.clone();
 
-                    // Check if DAPLink (VID 0x0D28 is ARM DAPLink, or product string matches)
+                    let pr_lower = pr.as_deref().unwrap_or("").to_lowercase();
+                    let m_lower = m.as_deref().unwrap_or("").to_lowercase();
+
+                    // Check if DAPLink (VID 0x0D28 is ARM DAPLink, or product/mfg string matches)
                     if v == 0x0D28
-                        || pr.as_deref().unwrap_or("").to_lowercase().contains("cmsis")
-                        || pr.as_deref().unwrap_or("").to_lowercase().contains("dap")
+                        || pr_lower.contains("cmsis")
+                        || pr_lower.contains("daplink")
+                        || pr_lower.contains("dap")
+                        || m_lower.contains("cmsis")
+                        || m_lower.contains("dap")
                     {
                         is_daplink = true;
+                        device_type = "daplink".to_string();
+                    }
+                    // Check if J-Link (VID 0x1366 is SEGGER, or product/mfg string matches)
+                    else if v == 0x1366
+                        || pr_lower.contains("j-link")
+                        || pr_lower.contains("jlink")
+                        || pr_lower.contains("segger")
+                        || m_lower.contains("segger")
+                    {
+                        device_type = "jlink".to_string();
                     }
                 }
 
@@ -93,6 +113,7 @@ impl SerialManager {
                     product,
                     serial_number,
                     is_daplink,
+                    device_type,
                 }
             })
             .collect()
@@ -124,6 +145,15 @@ impl SerialManager {
 
         // Try clone port for the background reader thread
         let reader_port = port.try_clone().map_err(|e| e.to_string())?;
+
+        // Determine if target port is DAPLink
+        let port_list = Self::list_ports();
+        let is_daplink = port_list
+            .iter()
+            .find(|p| p.port_name.eq_ignore_ascii_case(port_name))
+            .map(|p| p.is_daplink)
+            .unwrap_or(false);
+        self.active_is_daplink.store(is_daplink, Ordering::SeqCst);
 
         {
             let mut port_guard = self.port.lock().unwrap();
@@ -186,6 +216,7 @@ impl SerialManager {
 
     pub fn close(&self) -> Result<(), String> {
         self.is_running.store(false, Ordering::SeqCst);
+        self.active_is_daplink.store(false, Ordering::SeqCst);
         let mut port_guard = self.port.lock().unwrap();
         *port_guard = None;
         let mut name_guard = self.active_port_name.lock().unwrap();
@@ -230,6 +261,17 @@ impl SerialManager {
     }
 
     pub async fn execute_reset(&self, is_bootloader: bool) -> Result<(), String> {
+        let (is_open, _, _, _, is_daplink) = self.get_status();
+        if !is_open {
+            return Err("串口未打开，无法执行硬件复位。".to_string());
+        }
+        if !is_daplink {
+            return Err(
+                "当前串口设备不是 DAPLink 探针，仅 DAPLink 硬件支持通过 RTS/DTR 硬件引脚控制复位与进入 BOOT。"
+                    .to_string(),
+            );
+        }
+
         if is_bootloader {
             // Enter Bootloader State Machine:
             // 1. RTS = 1 -> 设置进入 BOOT 模式
@@ -259,11 +301,12 @@ impl SerialManager {
         Ok(())
     }
 
-    pub fn get_status(&self) -> (bool, Option<String>, bool, bool) {
+    pub fn get_status(&self) -> (bool, Option<String>, bool, bool, bool) {
         let name = self.active_port_name.lock().unwrap().clone();
         let is_open = name.is_some();
         let dtr = self.dtr_state.load(Ordering::SeqCst);
         let rts = self.rts_state.load(Ordering::SeqCst);
-        (is_open, name, dtr, rts)
+        let is_dap = self.active_is_daplink.load(Ordering::SeqCst);
+        (is_open, name, dtr, rts, is_dap)
     }
 }

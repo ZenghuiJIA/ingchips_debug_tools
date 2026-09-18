@@ -55,7 +55,7 @@ pub async fn execute_reset_sequence(
 }
 
 #[tauri::command]
-pub fn get_serial_status(state: State<'_, AppState>) -> (bool, Option<String>, bool, bool) {
+pub fn get_serial_status(state: State<'_, AppState>) -> (bool, Option<String>, bool, bool, bool) {
     state.serial.get_status()
 }
 

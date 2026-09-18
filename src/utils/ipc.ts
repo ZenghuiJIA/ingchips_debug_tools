@@ -22,7 +22,19 @@ export async function safeInvoke<T = any>(cmd: string, args: Record<string, any>
         manufacturer: 'INGCHIPS',
         product: 'CMSIS-DAP',
         serial_number: '6E197F26',
-        is_daplink: true
+        is_daplink: true,
+        device_type: 'daplink'
+      },
+      {
+        port_name: 'COM5',
+        description: 'J-Link CDC UART Port',
+        vid: 0x1366,
+        pid: 0x1051,
+        manufacturer: 'SEGGER',
+        product: 'J-Link',
+        serial_number: '000123456',
+        is_daplink: false,
+        device_type: 'jlink'
       },
       {
         port_name: 'COM3',
@@ -32,7 +44,8 @@ export async function safeInvoke<T = any>(cmd: string, args: Record<string, any>
         manufacturer: 'wch.cn',
         product: 'CH340',
         serial_number: null,
-        is_daplink: false
+        is_daplink: false,
+        device_type: 'generic'
       }
     ] as any;
   }
@@ -50,7 +63,7 @@ export async function safeInvoke<T = any>(cmd: string, args: Record<string, any>
   }
 
   if (cmd === 'get_serial_status') {
-    return [false, null, false, true] as any;
+    return [false, null, false, true, false] as any;
   }
 
   if (cmd === 'open_serial_port') {
@@ -75,7 +88,17 @@ export async function safeInvoke<T = any>(cmd: string, args: Record<string, any>
         unique_id: '6E197F26',
         description: 'INGCHIPS CMSIS-DAP',
         vendor_name: 'INGCHIPS',
-        product_name: 'CMSIS-DAP'
+        product_name: 'CMSIS-DAP',
+        probe_type: 'daplink',
+        type_label: 'CMSIS-DAP'
+      },
+      {
+        unique_id: '000123456',
+        description: 'SEGGER J-Link V11',
+        vendor_name: 'SEGGER',
+        product_name: 'J-Link',
+        probe_type: 'jlink',
+        type_label: 'J-Link'
       }
     ] as any;
   }

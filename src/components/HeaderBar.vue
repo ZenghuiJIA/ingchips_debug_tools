@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
 import type { PortInfo, SystemMetrics } from '../types';
 import {
@@ -34,6 +34,39 @@ const rtsState = ref<boolean>(false);
 const isRefreshing = ref<boolean>(false);
 const isResetting = ref<boolean>(false);
 
+const currentPortInfo = computed(() => {
+  const target = props.isConnected ? props.activePort : selectedPort.value;
+  return ports.value.find(p => p.port_name === target);
+});
+
+const isDaplinkDevice = computed(() => {
+  return currentPortInfo.value?.is_daplink ?? false;
+});
+
+const canHardwareReset = computed(() => {
+  return props.isConnected && isDaplinkDevice.value;
+});
+
+const resetTooltipText = computed(() => {
+  if (!props.isConnected) {
+    return '请先连接 DAPLink 串口以使用硬件复位';
+  }
+  if (!isDaplinkDevice.value) {
+    return '当前串口设备不是 DAPLink 探针，不支持硬件引脚复位 (仅 DAPLink 具备 RTS/DTR 硬件引脚控制)';
+  }
+  return '';
+});
+
+function getPortBadge(p: PortInfo) {
+  if (p.device_type === 'daplink' || p.is_daplink) {
+    return '⚡ [DAPLink]';
+  }
+  if (p.device_type === 'jlink') {
+    return '🔗 [J-Link CDC]';
+  }
+  return '🔌 [通用串口]';
+}
+
 const metrics = ref<SystemMetrics>({
   tauri_rss_mb: 0,
   daemon_rss_mb: 0,
@@ -52,7 +85,7 @@ async function refreshPorts() {
     const list: PortInfo[] = await safeInvoke('list_serial_ports');
     ports.value = list;
     
-    // Auto-select DAPLink if available
+    // Auto-select DAPLink if available, otherwise first port
     const daplink = list.find(p => p.is_daplink);
     if (daplink) {
       selectedPort.value = daplink.port_name;
@@ -105,16 +138,21 @@ async function toggleRts() {
 }
 
 async function triggerReset(seqType: string) {
+  if (!canHardwareReset.value) {
+    alert(resetTooltipText.value || '当前设备不支持硬件复位');
+    return;
+  }
   isResetting.value = true;
   try {
     await safeInvoke('execute_reset_sequence', { seqType });
     emit('resetTriggered', seqType);
     // Refresh pin states
-    const [_, __, dtr, rts]: [boolean, string | null, boolean, boolean] = await safeInvoke('get_serial_status');
+    const [_, __, dtr, rts]: [boolean, string | null, boolean, boolean, boolean] = await safeInvoke('get_serial_status');
     dtrState.value = dtr;
     rtsState.value = rts;
   } catch (err) {
     console.error('Reset sequence failed:', err);
+    alert(`复位执行失败: ${err}`);
   } finally {
     isResetting.value = false;
   }
@@ -146,7 +184,7 @@ onUnmounted(() => {
           </div>
           <div class="text-[11px] text-zinc-400 flex items-center gap-1">
             <span class="inline-block w-1.5 h-1.5 rounded-full" :class="isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'"></span>
-            <span>{{ isConnected ? `已连接 (${activePort})` : '等待连接硬件' }}</span>
+            <span>{{ isConnected ? `已连接 (${activePort} · ${isDaplinkDevice ? 'DAPLink' : currentPortInfo?.device_type === 'jlink' ? 'J-Link CDC' : '通用串口'})` : '等待连接硬件' }}</span>
           </div>
         </div>
       </div>
@@ -172,12 +210,12 @@ onUnmounted(() => {
       <div class="flex items-center rounded-md bg-zinc-950 border border-zinc-800 p-0.5">
         <select
           v-model="selectedPort"
-          class="bg-transparent text-xs text-zinc-200 py-1 px-2.5 outline-none cursor-pointer max-w-[200px]"
+          class="bg-transparent text-xs text-zinc-200 py-1 px-2.5 outline-none cursor-pointer max-w-[220px]"
           :disabled="isConnected"
         >
           <option v-if="ports.length === 0" value="">未检测到串口</option>
           <option v-for="p in ports" :key="p.port_name" :value="p.port_name" class="bg-zinc-900 text-zinc-200">
-            {{ p.port_name }} {{ p.is_daplink ? '⚡ [DAPLink]' : '' }} ({{ p.description }})
+            {{ p.port_name }} {{ getPortBadge(p) }} ({{ p.description }})
           </option>
         </select>
         
@@ -246,11 +284,19 @@ onUnmounted(() => {
 
       <!-- Hardware Action Buttons -->
       <div class="flex items-center gap-1.5">
+        <span
+          v-if="isConnected && !isDaplinkDevice"
+          class="text-[10px] text-amber-400/90 bg-amber-950/40 border border-amber-800/40 px-1.5 py-0.5 rounded cursor-help"
+          :title="resetTooltipText"
+        >
+          复位需DAPLink
+        </span>
+
         <button
           @click="triggerReset('normal_reset')"
-          :disabled="!isConnected || isResetting"
-          class="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700 transition-colors disabled:opacity-40"
-          title="普通复位: RTS 0 (正常态) -> DTR 产生 100ms 复位脉冲"
+          :disabled="!canHardwareReset || isResetting"
+          class="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+          :title="!canHardwareReset ? resetTooltipText : '普通复位: RTS 0 (正常态) -> DTR 产生 100ms 复位脉冲'"
         >
           <RotateCcw class="w-3.5 h-3.5" :class="{ 'animate-spin': isResetting }" />
           <span>普通复位</span>
@@ -258,9 +304,9 @@ onUnmounted(() => {
 
         <button
           @click="triggerReset('bootloader_reset')"
-          :disabled="!isConnected || isResetting"
-          class="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 text-xs font-medium border border-amber-500/40 transition-colors disabled:opacity-40"
-          title="引导复位: RTS 1 -> 延时 500ms 建立电平 -> DTR 产生 100ms 复位脉冲"
+          :disabled="!canHardwareReset || isResetting"
+          class="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 text-xs font-medium border border-amber-500/40 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+          :title="!canHardwareReset ? resetTooltipText : '引导复位: RTS 1 -> 延时 500ms 建立电平 -> DTR 产生 100ms 复位脉冲'"
         >
           <Zap class="w-3.5 h-3.5" />
           <span>进入 BOOT</span>
