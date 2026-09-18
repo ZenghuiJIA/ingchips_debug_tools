@@ -147,3 +147,13 @@ export interface TriggerRule {
   lastTriggerTime?: string;
 }
 
+export interface JScopeSymbol {
+  name: string;
+  address: string;
+  raw_address: number;
+  size: number;
+  type: string;
+  bind?: string;
+  selected?: boolean;
+}
+

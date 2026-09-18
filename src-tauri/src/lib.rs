@@ -120,6 +120,9 @@ pub fn run() {
             commands::pyocd_diagnose_hardfault,
             commands::call_mcp_tool,
             commands::get_system_metrics,
+            commands::jscope_parse_axf,
+            commands::jscope_start_sampling,
+            commands::jscope_stop_sampling,
         ])
         .build(tauri::generate_context!()) {
             Ok(a) => {

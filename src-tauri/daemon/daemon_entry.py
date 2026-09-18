@@ -15,6 +15,7 @@ from typing import Dict, Any, List, Optional
 import threading
 import socket
 import time
+import struct
 
 # Configure stderr logging (stdout is reserved strictly for JSON-RPC)
 logging.basicConfig(
@@ -632,6 +633,314 @@ class RTTController:
             return {"status": "stopped"}
 
 
+class AxfSymbolParser:
+    """
+    Parser for Keil MDK .axf and GCC .elf files using pyelftools.
+    Extracts global and static variables located in RAM with name, address, size and suggested type.
+    """
+    @staticmethod
+    def parse_symbols(file_path: str, filter_keyword: Optional[str] = None, max_results: int = 200) -> Dict[str, Any]:
+        try:
+            from elftools.elf.elffile import ELFFile
+            from elftools.elf.sections import SymbolTableSection
+        except ImportError:
+            raise RuntimeError("pyelftools is not installed in Python daemon.")
+
+        symbols = []
+        filter_kw = (filter_keyword or "").lower()
+
+        with open(file_path, "rb") as f:
+            elffile = ELFFile(f)
+            
+            # Locate symbol table
+            symtab = None
+            for section in elffile.iter_sections():
+                if isinstance(section, SymbolTableSection):
+                    symtab = section
+                    break
+
+            if not symtab:
+                return {"file_path": file_path, "symbols": [], "count": 0, "message": "No symbol table found in AXF/ELF file."}
+
+            for sym in symtab.iter_symbols():
+                name = sym.name
+                if not name or name.startswith("$") or name.startswith("."):
+                    continue
+
+                # Filter global/object variables (STT_OBJECT or STB_GLOBAL/STB_LOCAL located in RAM)
+                addr = sym['st_value']
+                size = sym['st_size']
+                sym_type = sym['st_info']['type']
+                sym_bind = sym['st_info']['bind']
+
+                # Typically ARM Cortex-M SRAM is 0x20000000 - 0x200FFFFF or 0x10000000 - 0x100FFFFF or 0x30000000
+                is_ram = (
+                    (0x20000000 <= addr < 0x20100000) or
+                    (0x10000000 <= addr < 0x10100000) or
+                    (0x30000000 <= addr < 0x30100000)
+                )
+
+                if is_ram and size > 0 and sym_type in ('STT_OBJECT', 'STT_NOTYPE', 'STT_COMMON'):
+                    if filter_kw and filter_kw not in name.lower():
+                        continue
+
+                    # Suggest format by size
+                    suggested_type = "uint32"
+                    if size == 1:
+                        suggested_type = "uint8"
+                    elif size == 2:
+                        suggested_type = "uint16"
+                    elif size == 4:
+                        # If name contains float/temp/speed/angle, could default to float32
+                        lower_n = name.lower()
+                        if any(k in lower_n for k in ["flt", "float", "speed", "temp", "cur", "vol", "angle"]):
+                            suggested_type = "float32"
+                        else:
+                            suggested_type = "int32"
+                    elif size == 8:
+                        suggested_type = "float64"
+
+                    symbols.append({
+                        "name": name,
+                        "address": f"0x{addr:08X}",
+                        "raw_address": addr,
+                        "size": size,
+                        "type": suggested_type,
+                        "bind": sym_bind
+                    })
+
+                    if len(symbols) >= max_results:
+                        break
+
+        # Sort by address
+        symbols.sort(key=lambda s: s["raw_address"])
+        return {
+            "file_path": file_path,
+            "count": len(symbols),
+            "symbols": symbols
+        }
+
+
+class JScopeController:
+    """
+    JScope-like background memory sampling engine.
+    Periodically polls watched RAM variables over SWD and streams telemetry text to a local TCP socket.
+    """
+    _lock = threading.Lock()
+    _running = False
+    _thread = None
+    _server_sock = None
+    _client_sock = None
+    _tcp_port = 0
+    _interval_ms = 20
+    _vars = []  # [{name, address, size, type}]
+
+    _mode = None
+    _jlink = None
+    _session = None
+
+    @classmethod
+    def start_sampling(cls, variables: List[Dict[str, Any]], interval_ms: int = 20,
+                       probe_id: Optional[str] = None, target_override: Optional[str] = None,
+                       probe_type: Optional[str] = None) -> Dict[str, Any]:
+        with cls._lock:
+            if cls._running:
+                cls.stop_sampling()
+
+            if not variables:
+                raise ValueError("No variables specified for JScope sampling")
+
+            cls._vars = variables
+            cls._interval_ms = max(5, interval_ms)
+
+            # Create TCP server
+            cls._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            cls._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            cls._server_sock.bind(("127.0.0.1", 0))
+            cls._server_sock.listen(1)
+            cls._tcp_port = cls._server_sock.getsockname()[1]
+
+            chosen_type = (probe_type or "").lower()
+            if not chosen_type:
+                for p in PyOCDController.list_probes():
+                    if not probe_id or p["unique_id"] == probe_id:
+                        chosen_type = p.get("probe_type", "generic")
+                        break
+
+            cls._running = True
+
+            if chosen_type == "jlink" and PYLINK_AVAILABLE:
+                try:
+                    cls._jlink = pylink.JLink()
+                    if probe_id and probe_id.isdigit():
+                        cls._jlink.open(int(probe_id))
+                    else:
+                        cls._jlink.open()
+                    cls._jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+                    cls._jlink.connect(target_override or "Cortex-M4")
+                    cls._mode = "jlink"
+                except Exception as e:
+                    logger.warning(f"JScope JLink connect failed, fallback to PyOCD: {e}")
+                    kwargs = {"auto_open": True}
+                    if probe_id:
+                        kwargs["unique_id"] = probe_id
+                    if target_override:
+                        kwargs["target_override"] = target_override
+                    cls._session = ConnectHelper.session_with_chosen_probe(**kwargs)
+                    cls._session.open()
+                    cls._mode = "pyocd"
+            else:
+                if not PYOCD_AVAILABLE:
+                    raise RuntimeError("PyOCD not available for sampling")
+                kwargs = {"auto_open": True}
+                if probe_id:
+                    kwargs["unique_id"] = probe_id
+                if target_override:
+                    kwargs["target_override"] = target_override
+                cls._session = ConnectHelper.session_with_chosen_probe(**kwargs)
+                cls._session.open()
+                cls._mode = "pyocd"
+
+            cls._thread = threading.Thread(target=cls._sample_worker_loop, daemon=True)
+            cls._thread.start()
+
+            return {
+                "status": "started",
+                "tcp_port": cls._tcp_port,
+                "interval_ms": cls._interval_ms,
+                "mode": cls._mode,
+                "variable_count": len(cls._vars)
+            }
+
+    @classmethod
+    def _sample_worker_loop(cls):
+        logger.info(f"JScope sampling TCP bridge listening on port {cls._tcp_port}")
+        cls._server_sock.settimeout(3.0)
+
+        client = None
+        while cls._running:
+            try:
+                client, addr = cls._server_sock.accept()
+                logger.info(f"JScope client connected from {addr}")
+                cls._client_sock = client
+                break
+            except socket.timeout:
+                continue
+            except Exception as e:
+                logger.error(f"JScope accept error: {e}")
+                break
+
+        if not client:
+            cls.stop_sampling()
+            return
+
+        interval_sec = cls._interval_ms / 1000.0
+
+        while cls._running:
+            try:
+                start_time = time.time()
+                # Read all watched variables
+                line_parts = []
+
+                for v in cls._vars:
+                    name = v["name"]
+                    addr = v["raw_address"] if "raw_address" in v else int(v["address"], 16)
+                    size = int(v.get("size", 4))
+                    vtype = v.get("type", "int32")
+
+                    raw_bytes = None
+                    try:
+                        if cls._mode == "jlink" and cls._jlink:
+                            raw_bytes = bytes(cls._jlink.memory_read8(addr, size))
+                        elif cls._mode == "pyocd" and cls._session:
+                            target = cls._session.board.target
+                            raw_bytes = bytes(target.read_memory_block8(addr, size))
+                    except Exception as err:
+                        logger.debug(f"Read var {name} failed: {err}")
+
+                    if raw_bytes and len(raw_bytes) >= size:
+                        val = 0
+                        try:
+                            if vtype == "float32" and size == 4:
+                                val = struct.unpack("<f", raw_bytes[:4])[0]
+                            elif vtype == "float64" and size == 8:
+                                val = struct.unpack("<d", raw_bytes[:8])[0]
+                            elif vtype == "int32" and size == 4:
+                                val = struct.unpack("<i", raw_bytes[:4])[0]
+                            elif vtype == "uint32" and size == 4:
+                                val = struct.unpack("<I", raw_bytes[:4])[0]
+                            elif vtype == "int16" and size >= 2:
+                                val = struct.unpack("<h", raw_bytes[:2])[0]
+                            elif vtype == "uint16" and size >= 2:
+                                val = struct.unpack("<H", raw_bytes[:2])[0]
+                            elif vtype == "int8" and size >= 1:
+                                val = struct.unpack("<b", raw_bytes[:1])[0]
+                            elif vtype == "uint8" and size >= 1:
+                                val = struct.unpack("<B", raw_bytes[:1])[0]
+                            else:
+                                val = struct.unpack("<I", raw_bytes[:4])[0]
+                        except Exception:
+                            val = 0
+
+                        # Format as Telemetry protocol key:value
+                        if isinstance(val, float):
+                            line_parts.append(f"{name}:{val:.3f}")
+                        else:
+                            line_parts.append(f"{name}:{val}")
+
+                if line_parts:
+                    # e.g. "motor_speed:1200 temp:38.5\n"
+                    telemetry_line = " ".join(line_parts) + "\n"
+                    client.sendall(telemetry_line.encode("utf-8"))
+
+                elapsed = time.time() - start_time
+                remain = interval_sec - elapsed
+                if remain > 0:
+                    time.sleep(remain)
+            except Exception as e:
+                logger.error(f"JScope sampling loop error: {e}")
+                break
+
+        cls.stop_sampling()
+
+    @classmethod
+    def stop_sampling(cls) -> Dict[str, Any]:
+        with cls._lock:
+            cls._running = False
+            if cls._client_sock:
+                try:
+                    cls._client_sock.close()
+                except Exception:
+                    pass
+                cls._client_sock = None
+
+            if cls._server_sock:
+                try:
+                    cls._server_sock.close()
+                except Exception:
+                    pass
+                cls._server_sock = None
+
+            if cls._jlink:
+                try:
+                    cls._jlink.close()
+                except Exception:
+                    pass
+                cls._jlink = None
+
+            if cls._session:
+                try:
+                    cls._session.close()
+                except Exception:
+                    pass
+                cls._session = None
+
+            cls._tcp_port = 0
+            cls._mode = None
+            trim_process_memory()
+            return {"status": "stopped"}
+
+
 # MCP Tools Definitions
 MCP_TOOLS = [
     {
@@ -734,6 +1043,42 @@ MCP_TOOLS = [
             "type": "object",
             "properties": {}
         }
+    },
+    {
+        "name": "parse_axf_symbols",
+        "description": "解析 Keil MDK .axf 或 GCC .elf 固件，提取 SRAM 全局变量符号 (名称/地址/大小/类型)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": ".axf 或 .elf 绝对物理路径"},
+                "filter_keyword": {"type": "string", "description": "变量名过滤关键字 (可选)"},
+                "max_results": {"type": "integer", "description": "最大提取符号数", "default": 200}
+            },
+            "required": ["file_path"]
+        }
+    },
+    {
+        "name": "start_jscope_sampling",
+        "description": "启动后台 SWD 高速无侵入周期变量采样 (类似 J-Scope)，通过本地 TCP 桥接输出波形数据",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "variables": {"type": "array", "description": "待监视变量列表"},
+                "interval_ms": {"type": "integer", "description": "采样周期毫秒 (如 20)", "default": 20},
+                "probe_id": {"type": "string", "description": "探针 ID"},
+                "target_override": {"type": "string", "description": "目标芯片型号"},
+                "probe_type": {"type": "string", "description": "探针类型: 'jlink' 或 'daplink'"}
+            },
+            "required": ["variables"]
+        }
+    },
+    {
+        "name": "stop_jscope_sampling",
+        "description": "停止 J-Scope 变量采样",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
     }
 ]
 
@@ -753,6 +1098,9 @@ DIRECT_TOOL_METHODS = [
     "diagnose_hardfault",
     "start_rtt",
     "stop_rtt",
+    "parse_axf_symbols",
+    "start_jscope_sampling",
+    "stop_jscope_sampling",
 ]
 
 
@@ -806,6 +1154,18 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         return RTTController.start_rtt(probe_id, target_override, block_addr, probe_type)
     elif name == "stop_rtt":
         return RTTController.stop_rtt()
+    elif name == "parse_axf_symbols":
+        file_path = arguments["file_path"]
+        kw = arguments.get("filter_keyword")
+        max_r = int(arguments.get("max_results", 200))
+        return AxfSymbolParser.parse_symbols(file_path, kw, max_r)
+    elif name == "start_jscope_sampling":
+        variables = arguments["variables"]
+        interval = int(arguments.get("interval_ms", 20))
+        probe_type = arguments.get("probe_type")
+        return JScopeController.start_sampling(variables, interval, probe_id, target_override, probe_type)
+    elif name == "stop_jscope_sampling":
+        return JScopeController.stop_sampling()
     else:
         raise ValueError(f"Unknown MCP tool: {name}")
 

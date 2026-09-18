@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue';
-import { isTauri } from '../utils/ipc';
+import { isTauri, safeInvoke } from '../utils/ipc';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { SerialRxPayload, PlotterChannel } from '../types';
+import type { SerialRxPayload, PlotterChannel, JScopeSymbol } from '../types';
 import { parseTelemetryLine, PRESET_CHANNEL_COLORS } from '../utils/telemetryParser';
 import {
   Activity,
@@ -12,12 +12,84 @@ import {
   Download,
   Dices,
   Eye,
-  EyeOff
+  EyeOff,
+  Crosshair,
+  Search,
+  RefreshCw,
+  X
 } from '@lucide/vue';
 
 defineProps<{
   isConnected: boolean;
 }>();
+
+// --- J-Scope State ---
+const isJScopeModalOpen = ref<boolean>(false);
+const axfFilePath = ref<string>('');
+const isParsingAxf = ref<boolean>(false);
+const axfSymbols = ref<JScopeSymbol[]>([]);
+const searchKeyword = ref<string>('');
+const isSampling = ref<boolean>(false);
+const sampleIntervalMs = ref<number>(20);
+const jscopeError = ref<string>('');
+
+async function handleParseAxf() {
+  if (!axfFilePath.value.trim()) return;
+  isParsingAxf.value = true;
+  jscopeError.value = '';
+  try {
+    const res: any = await safeInvoke('jscope_parse_axf', {
+      filePath: axfFilePath.value.trim(),
+      filterKeyword: searchKeyword.value.trim() || null,
+      maxResults: 300
+    });
+    axfSymbols.value = (res.symbols || []).map((s: any) => ({
+      ...s,
+      selected: false
+    }));
+  } catch (err: any) {
+    jscopeError.value = `解析 AXF 失败: ${err}`;
+  } finally {
+    isParsingAxf.value = false;
+  }
+}
+
+function selectAllSymbols(select: boolean) {
+  axfSymbols.value.forEach(s => s.selected = select);
+}
+
+async function handleToggleJScopeSampling() {
+  if (isSampling.value) {
+    // Stop
+    try {
+      await safeInvoke('jscope_stop_sampling');
+    } catch (err) {
+      console.error('Stop sampling error:', err);
+    }
+    isSampling.value = false;
+  } else {
+    // Start
+    const selected = axfSymbols.value.filter(s => s.selected);
+    if (selected.length === 0) {
+      alert('请至少勾选一个变量进行采样监视');
+      return;
+    }
+    jscopeError.value = '';
+    try {
+      await safeInvoke('jscope_start_sampling', {
+        variables: selected,
+        intervalMs: Number(sampleIntervalMs.value) || 20,
+        probeId: null,
+        targetOverride: 'Cortex-M4',
+        probeType: null
+      });
+      isSampling.value = true;
+      isJScopeModalOpen.value = false;
+    } catch (err: any) {
+      jscopeError.value = `启动 J-Scope 采样失败: ${err}`;
+    }
+  }
+}
 
 // --- Plotter State ---
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -451,6 +523,19 @@ onUnmounted(() => {
           <span>{{ isSimulating ? '仿真测试中 (50Hz)' : '🎲 启动仿真信号' }}</span>
         </button>
 
+        <!-- J-Scope Variable Sampling Button -->
+        <button
+          @click="isJScopeModalOpen = true"
+          class="px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors border shadow-sm"
+          :class="isSampling
+            ? 'bg-purple-950 text-purple-300 border-purple-600 animate-pulse'
+            : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
+          title="导入 Keil MDK .axf 符号表，周期无侵入读取单片机 RAM 变量绘制波形"
+        >
+          <Crosshair class="w-3.5 h-3.5 text-purple-400" />
+          <span>{{ isSampling ? '🎯 J-Scope 采样中...' : '🎯 J-Scope 变量捕获' }}</span>
+        </button>
+
         <!-- Clear -->
         <button
           @click="clearPlot"
@@ -578,8 +663,190 @@ onUnmounted(() => {
     <!-- Bottom Instructions Footer -->
     <div class="bg-zinc-900 border-t border-zinc-800 px-4 py-1 text-[10px] text-zinc-500 flex items-center justify-between">
       <span>💡 支持协议: <code>CSV (v1,v2,v3)</code> | <code>键值对 (roll:12.3,pitch:45.6)</code> | <code>JSON ({"a":1,"b":2})</code></span>
-      <span v-if="!isConnected" class="text-amber-500">⚠ 串口未连接，可点击 [🎲 启动仿真信号] 进行界面回归体验</span>
+      <span v-if="!isConnected && !isSampling" class="text-amber-500">⚠ 串口未连接，可点击 [🎯 J-Scope 变量捕获] 直连单片机 RAM 采样</span>
+      <span v-else-if="isSampling" class="text-purple-400 font-semibold animate-pulse">● J-Scope SWD 高速变量监视中...</span>
       <span v-else class="text-emerald-400">● 串口已就绪，正在监听数据流</span>
+    </div>
+
+    <!-- J-Scope Variable Sampling Modal Dialog -->
+    <div
+      v-if="isJScopeModalOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+    >
+      <div class="bg-zinc-900 border border-zinc-700 rounded-xl w-full max-w-2xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden">
+        <!-- Dialog Header -->
+        <div class="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/60">
+          <div class="flex items-center gap-2 text-zinc-100 font-bold text-sm">
+            <Crosshair class="w-4 h-4 text-purple-400" />
+            <span>J-Scope 变量捕获设置 (SWD 硬件实时监视)</span>
+          </div>
+          <button
+            @click="isJScopeModalOpen = false"
+            class="text-zinc-400 hover:text-zinc-200 p-1 rounded hover:bg-zinc-800 transition-colors"
+          >
+            <X class="w-4 h-4" />
+          </button>
+        </div>
+
+        <!-- Dialog Body -->
+        <div class="p-5 flex-1 overflow-y-auto space-y-4">
+          <!-- File selection -->
+          <div class="space-y-1.5">
+            <label class="block text-[11px] text-zinc-400 font-medium">
+              Keil MDK 固件可执行文件物理路径 (.axf / .elf)
+            </label>
+            <div class="flex items-center gap-2">
+              <input
+                v-model="axfFilePath"
+                type="text"
+                placeholder="例如: D:\Projects\MyMCU\Objects\firmware.axf"
+                class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 text-zinc-200 text-xs outline-none focus:border-purple-500 font-mono"
+              />
+              <button
+                @click="handleParseAxf"
+                :disabled="isParsingAxf || !axfFilePath.trim()"
+                class="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded text-xs font-medium transition-colors disabled:opacity-40"
+              >
+                <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': isParsingAxf }" />
+                <span>解析符号表</span>
+              </button>
+            </div>
+            <div class="text-[10px] text-zinc-500">
+              通过解析 DWARF 符号表自动定位 SRAM 中的全局和静态变量地址与数据类型，零侵入无须单片机串口打印。
+            </div>
+          </div>
+
+          <!-- Error message if any -->
+          <div v-if="jscopeError" class="p-2.5 rounded bg-rose-950/60 border border-rose-800 text-rose-300 text-xs">
+            {{ jscopeError }}
+          </div>
+
+          <!-- Symbols List & Filter -->
+          <div v-if="axfSymbols.length > 0" class="space-y-2">
+            <div class="flex items-center justify-between pt-2 border-t border-zinc-800">
+              <div class="flex items-center gap-2">
+                <span class="font-semibold text-zinc-300">找到的 RAM 变量 ({{ axfSymbols.length }} 个):</span>
+                <button
+                  @click="selectAllSymbols(true)"
+                  class="text-[11px] text-purple-400 hover:text-purple-300"
+                >
+                  全选
+                </button>
+                <span class="text-zinc-600">|</span>
+                <button
+                  @click="selectAllSymbols(false)"
+                  class="text-[11px] text-zinc-400 hover:text-zinc-300"
+                >
+                  全不选
+                </button>
+              </div>
+
+              <!-- Search filter input -->
+              <div class="flex items-center gap-1.5">
+                <Search class="w-3.5 h-3.5 text-zinc-500" />
+                <input
+                  v-model="searchKeyword"
+                  @keyup.enter="handleParseAxf"
+                  placeholder="过滤变量名..."
+                  class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-[11px] text-zinc-200 outline-none focus:border-purple-500 w-32"
+                />
+              </div>
+            </div>
+
+            <!-- Table of Symbols -->
+            <div class="border border-zinc-800 rounded-lg overflow-hidden max-h-56 overflow-y-auto bg-zinc-950">
+              <table class="w-full text-left text-xs font-mono">
+                <thead class="bg-zinc-900/80 text-zinc-400 text-[10px] border-b border-zinc-800">
+                  <tr>
+                    <th class="p-2 w-8">选</th>
+                    <th class="p-2">变量名称</th>
+                    <th class="p-2">SRAM物理地址</th>
+                    <th class="p-2">大小</th>
+                    <th class="p-2">解析类型</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-zinc-800/60">
+                  <tr
+                    v-for="sym in axfSymbols"
+                    :key="sym.name"
+                    @click="sym.selected = !sym.selected"
+                    class="hover:bg-zinc-900/60 cursor-pointer transition-colors"
+                    :class="{ 'bg-purple-950/20': sym.selected }"
+                  >
+                    <td class="p-2" @click.stop>
+                      <input
+                        type="checkbox"
+                        v-model="sym.selected"
+                        class="accent-purple-500 rounded cursor-pointer"
+                      />
+                    </td>
+                    <td class="p-2 font-bold text-zinc-200">{{ sym.name }}</td>
+                    <td class="p-2 text-emerald-400">{{ sym.address }}</td>
+                    <td class="p-2 text-zinc-400">{{ sym.size }} 字节</td>
+                    <td class="p-2">
+                      <select
+                        v-model="sym.type"
+                        @click.stop
+                        class="bg-zinc-900 border border-zinc-700 rounded px-1.5 py-0.5 text-[10.5px] text-zinc-300 outline-none"
+                      >
+                        <option value="int32">int32</option>
+                        <option value="uint32">uint32</option>
+                        <option value="float32">float32</option>
+                        <option value="int16">int16</option>
+                        <option value="uint16">uint16</option>
+                        <option value="int8">int8</option>
+                        <option value="uint8">uint8</option>
+                        <option value="float64">float64</option>
+                      </select>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Sampling Settings -->
+          <div class="pt-2 border-t border-zinc-800 flex items-center justify-between gap-4">
+            <div class="flex items-center gap-2">
+              <label class="text-[11px] text-zinc-400">采样周期:</label>
+              <select
+                v-model.number="sampleIntervalMs"
+                class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-200 outline-none focus:border-purple-500"
+              >
+                <option :value="10">10 毫秒 (100 Hz 极速)</option>
+                <option :value="20">20 毫秒 (50 Hz 推荐)</option>
+                <option :value="50">50 毫秒 (20 Hz)</option>
+                <option :value="100">100 毫秒 (10 Hz)</option>
+              </select>
+            </div>
+
+            <div class="text-[11px] text-zinc-400">
+              已选: <strong class="text-purple-400">{{ axfSymbols.filter(s => s.selected).length }}</strong> 个监视变量
+            </div>
+          </div>
+        </div>
+
+        <!-- Dialog Footer -->
+        <div class="px-5 py-3 border-t border-zinc-800 bg-zinc-950/60 flex items-center justify-end gap-2">
+          <button
+            @click="isJScopeModalOpen = false"
+            class="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
+          >
+            取消
+          </button>
+
+          <button
+            @click="handleToggleJScopeSampling"
+            class="px-4 py-1.5 rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+            :class="isSampling
+              ? 'bg-rose-600 hover:bg-rose-500 text-white'
+              : 'bg-purple-600 hover:bg-purple-500 text-white'"
+          >
+            <Crosshair class="w-3.5 h-3.5" />
+            <span>{{ isSampling ? '停止当前采样' : '开始 J-Scope 实时监视' }}</span>
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>

@@ -220,3 +220,63 @@ pub fn get_system_metrics(state: State<'_, AppState>) -> SystemMetrics {
     let daemon_pid = *state.daemon.child_pid.lock().unwrap();
     collect_metrics(daemon_pid)
 }
+
+#[tauri::command]
+pub fn jscope_parse_axf(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    file_path: String,
+    filter_keyword: Option<String>,
+    max_results: Option<u32>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "parse_axf_symbols",
+        json!({
+            "file_path": file_path,
+            "filter_keyword": filter_keyword,
+            "max_results": max_results.unwrap_or(200),
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn jscope_start_sampling(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    variables: Value,
+    interval_ms: u32,
+    probe_id: Option<String>,
+    target_override: Option<String>,
+    probe_type: Option<String>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    let res = state.daemon.call_rpc(
+        "start_jscope_sampling",
+        json!({
+            "variables": variables,
+            "interval_ms": interval_ms,
+            "probe_id": probe_id,
+            "target_override": target_override,
+            "probe_type": probe_type,
+        }),
+    )?;
+
+    let tcp_port = res
+        .get("tcp_port")
+        .and_then(|p| p.as_u64())
+        .ok_or_else(|| "Failed to get JScope TCP port".to_string())? as u16;
+
+    // Open RTT / JScope stream through serial manager so frontend receives serial-rx
+    state
+        .serial
+        .open_rtt(app, "JScope 变量采样", tcp_port)?;
+
+    Ok(res)
+}
+
+#[tauri::command]
+pub fn jscope_stop_sampling(state: State<'_, AppState>) -> Result<Value, String> {
+    let _ = state.serial.close();
+    state.daemon.call_rpc("stop_jscope_sampling", json!({}))
+}
