@@ -112,3 +112,10 @@ python scripts/install_skill.py
 # 2. 自动化回归测试
 node scripts/verify_features_regression.js
 ```
+
+---
+
+## 📄 开源许可证 (License)
+
+本项目遵循 [Apache License 2.0](LICENSE) 开源许可证。
+您可以自由商用、修改与分发，详情请阅读根目录下的 [LICENSE](LICENSE) 协议文本。

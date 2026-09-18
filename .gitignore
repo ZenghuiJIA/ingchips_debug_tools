@@ -1,44 +1,143 @@
-# Logs
-logs
-*.log
+# ========================================================
+# AI-HIL Debugger - Comprehensive .gitignore
+# Covers: Rust/Cargo, Vue3/Vite/Node, Python/PyOCD, Tauri v2, OS & IDEs
+# ========================================================
+
+# --------------------------------------------------------
+# 1. Operating System Files
+# --------------------------------------------------------
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# --------------------------------------------------------
+# 2. Node.js, Frontend & Build Artifacts (Vite / Vue 3)
+# --------------------------------------------------------
+node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+.pnpm-store/
 
-# Node dependencies & web builds
-node_modules/
+# Web asset compilation output
 dist/
 dist-ssr/
 *.local
+.turbo/
 
-# Rust & Cargo builds
+# --------------------------------------------------------
+# 3. Rust & Tauri v2 Build Artifacts
+# --------------------------------------------------------
 target/
 src-tauri/target/
 src-tauri/gen/schemas/
+**/*.rs.bk
 
-# Large compiled executables and releases (source tracked in git, binaries in release package)
+# --------------------------------------------------------
+# 4. Large Executables & Release Distribution Packages
+# (Source code is tracked; compiled binaries go to releases)
+# --------------------------------------------------------
 *.exe
 bin/*.exe
+bin/*.dll
 bin/*.log
 release/
 *.zip
+*.tar.gz
+*.7z
 
-# Python caches
+# --------------------------------------------------------
+# 5. Python & PyInstaller Caches
+# --------------------------------------------------------
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist-py/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# Editor directories and files
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# PyInstaller temporary spec / build folders
+*.manifest
+*.spec
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --------------------------------------------------------
+# 6. Application Logs & WebView2 Runtime Data
+# --------------------------------------------------------
+*.log
+crash.log
+app_debug.log
+EBWebView/
+*.bak
+
+# --------------------------------------------------------
+# 7. IDE, Editor & Workspace Configs
+# --------------------------------------------------------
 .vscode/*
 !.vscode/extensions.json
-.idea
-.DS_Store
+!.vscode/settings.json
+.idea/
+*.sublime-project
+*.sublime-workspace
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+*.swo
+*.swp

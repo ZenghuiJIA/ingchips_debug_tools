@@ -78,6 +78,11 @@ def package():
         shutil.copy2(root_readme, TARGET_DIR / "README.md")
         print(f"  [OK] Copied README.md")
 
+    license_file = ROOT_DIR / "LICENSE"
+    if license_file.exists():
+        shutil.copy2(license_file, TARGET_DIR / "LICENSE")
+        print(f"  [OK] Copied LICENSE")
+
     # Compress into zip
     print(f"[5/5] Compressing package into {ZIP_PATH.name}...")
     with zipfile.ZipFile(ZIP_PATH, 'w', zipfile.ZIP_DEFLATED) as zf:

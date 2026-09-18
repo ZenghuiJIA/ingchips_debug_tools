@@ -1,7 +1,8 @@
 {
-  "name": "test_tools",
-  "private": true,
-  "version": "0.0.0",
+  "name": "ai-hil-debugger",
+  "version": "1.0.0",
+  "description": "AI-Driven Embedded Hardware-in-the-Loop (HIL) Testing & Debugging Desktop Tool",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
