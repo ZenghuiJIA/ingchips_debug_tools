@@ -71,7 +71,7 @@ def package():
 
     # Copy batch scripts
     print("[2/5] Copying batch launchers and installers...")
-    for bat_file in ["start.bat", "install_mcp.bat", "install_skill.bat"]:
+    for bat_file in ["start.bat", "install_mcp.bat", "install_skill.bat", "diagnose.bat"]:
         src = ROOT_DIR / bat_file
         if src.exists():
             shutil.copy2(src, TARGET_DIR / bat_file)

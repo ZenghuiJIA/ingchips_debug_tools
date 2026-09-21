@@ -11,16 +11,11 @@ use std::sync::Arc;
 use tauri::Manager;
 
 fn log_debug(msg: &str) {
-    use std::io::Write;
-    let pid = std::process::id();
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("app_debug.log") {
-        let _ = writeln!(file, "[PID {}] {}", pid, msg);
+    #[cfg(target_os = "windows")]
+    {
+        platform::windows::environment::log_to_file(msg);
     }
-    println!("[PID {}] {}", pid, msg);
-}
-
-pub fn configure_webview_environment() {
-    // Keep WebView2 default flags to ensure stable initialization across all Windows & Edge versions
+    println!("[PID {}] {}", std::process::id(), msg);
 }
 
 #[cfg(debug_assertions)]
@@ -56,14 +51,23 @@ fn ensure_dev_server_running() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    {
+        if !platform::windows::environment::ensure_environment_ready() {
+            // Missing runtime and user was prompted, exit cleanly without hanging
+            return;
+        }
+    }
+
     log_debug("[INIT] app_lib::run started");
-    configure_webview_environment();
 
     #[cfg(debug_assertions)]
     ensure_dev_server_running();
 
-    // 1. Pre-launch cleanup: kill any lingering background daemons or orphans before starting
-    daemon::process_manager::kill_all_daemons();
+    // 1. Asynchronously cleanup lingering background daemons so main UI thread is NEVER blocked
+    std::thread::spawn(|| {
+        daemon::process_manager::kill_all_daemons();
+    });
 
     let serial = Arc::new(SerialManager::new());
     let daemon = Arc::new(DaemonManager::new());
@@ -134,8 +138,27 @@ pub fn run() {
             },
             Err(e) => {
                 let msg = format!("BUILD ERROR: {:?}", e);
-                let _ = std::fs::write("crash.log", &msg);
                 log_debug(&msg);
+
+                #[cfg(target_os = "windows")]
+                {
+                    let log_dir = platform::windows::environment::get_app_log_dir();
+                    let _ = std::fs::write(log_dir.join("crash.log"), &msg);
+                    let title_w: Vec<u16> = "AI-HIL Debugger - 窗口初始化失败\0".encode_utf16().collect();
+                    let err_display = format!(
+                        "图形界面引擎初始化失败：\n\n{:?}\n\n常见原因：系统缺少 Edge WebView2 运行时或缓存权限受限。\n日志目录：{:?}",
+                        e, log_dir
+                    );
+                    let msg_w: Vec<u16> = err_display.encode_utf16().chain(std::iter::once(0)).collect();
+                    unsafe {
+                        windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                            0 as _,
+                            msg_w.as_ptr(),
+                            title_w.as_ptr(),
+                            windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR | windows_sys::Win32::UI::WindowsAndMessaging::MB_OK,
+                        );
+                    }
+                }
                 return;
             }
         };

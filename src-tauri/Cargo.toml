@@ -26,5 +26,11 @@ tauri-plugin-log = "2"
 serialport = "4.7"
 tokio = { version = "1", features = ["full"] }
 sysinfo = "0.33"
-windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_System_JobObjects",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging"
+] }
 
