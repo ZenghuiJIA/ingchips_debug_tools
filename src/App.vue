@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { safeInvoke, isTauri } from './utils/ipc';
+import { isTauri } from './utils/ipc';
 import HeaderBar from './components/HeaderBar.vue';
 import SerialTerminal from './components/SerialTerminal.vue';
 import WaveformPlotter from './components/WaveformPlotter.vue';
@@ -22,41 +22,10 @@ import {
   Sliders
 } from '@lucide/vue';
 
-const isConnected = ref<boolean>(false);
-const activePort = ref<string | null>(null);
+const activeSessionsCount = ref<number>(0);
 const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'analyzer' | 'svd' | 'hardfault' | 'memory' | 'ai'>('terminal');
 const sharedFirmwarePath = ref<string>('');
 const runningInBrowser = ref<boolean>(!isTauri());
-
-async function handleConnect(port: string, baudRate: number, ramStart?: number, ramSize?: number, blockAddress?: number) {
-  try {
-    await safeInvoke('open_serial_port', {
-      portName: port,
-      baudRate,
-      ramStart: ramStart !== undefined ? ramStart : null,
-      ramSize: ramSize !== undefined ? ramSize : null,
-      blockAddress: blockAddress !== undefined ? blockAddress : null,
-    });
-    isConnected.value = true;
-    activePort.value = port;
-  } catch (err: any) {
-    alert(`打开串口失败: ${err}`);
-  }
-}
-
-async function handleDisconnect() {
-  try {
-    await safeInvoke('close_serial_port');
-    isConnected.value = false;
-    activePort.value = null;
-  } catch (err: any) {
-    console.error('关闭串口失败:', err);
-  }
-}
-
-function handleResetTriggered(seq: string) {
-  console.log('Reset sequence executed:', seq);
-}
 </script>
 
 <template>
@@ -71,11 +40,7 @@ function handleResetTriggered(seq: string) {
 
     <!-- Top Navigation & Control Bar -->
     <HeaderBar
-      :is-connected="isConnected"
-      :active-port="activePort"
-      @connect="handleConnect"
-      @disconnect="handleDisconnect"
-      @reset-triggered="handleResetTriggered"
+      :active-sessions-count="activeSessionsCount"
     />
 
     <!-- Main Workspace with Tabs -->
@@ -191,11 +156,9 @@ function handleResetTriggered(seq: string) {
               currentTab === 'memory' ? MemoryInspector :
               AiCopilot
             "
-            :is-connected="isConnected"
-            :active-port="activePort"
+            :is-connected="activeSessionsCount > 0"
             :initial-file-path="sharedFirmwarePath"
-            @request-connect="handleConnect"
-            @request-disconnect="handleDisconnect"
+            @update-active-count="(cnt: number) => activeSessionsCount = cnt"
             @switch-tab="(t: any, payload?: any) => {
               currentTab = t;
               if (payload && payload.filePath) sharedFirmwarePath = payload.filePath;

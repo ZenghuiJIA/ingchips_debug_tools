@@ -13,15 +13,13 @@ import {
 } from '@lucide/vue';
 
 const props = defineProps<{
-  // Initial / main connection props from HeaderBar
-  isConnected: boolean;
-  activePort: string | null;
+  // Optional initial file path for tools
+  initialFilePath?: string;
 }>();
 
 const emit = defineEmits<{
   (e: 'switch-tab', tab: string): void;
-  (e: 'request-connect', port: string, baud: number): void;
-  (e: 'request-disconnect', port?: string): void;
+  (e: 'update-active-count', count: number): void;
 }>();
 
 // Available system ports
@@ -189,34 +187,14 @@ async function refreshPortList() {
   }
 }
 
-// Synchronize main activePort from HeaderBar
-watch([() => props.activePort, () => props.isConnected], ([newPort, connected]) => {
-  if (connected && newPort) {
-    let existing = tabs.value.find(t => t.portName === newPort);
-    if (!existing) {
-      const isDap = availablePorts.value.find(p => p.port_name === newPort)?.is_daplink ?? false;
-      const newTab: TerminalSessionTab = {
-        id: `tab_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
-        portName: newPort,
-        baudRate: 115200,
-        isConnected: true,
-        isDaplink: isDap,
-        rxBytesCount: 0,
-        txBytesCount: 0
-      };
-      tabs.value.push(newTab);
-      activeTabId.value = newTab.id;
-    } else {
-      existing.isConnected = true;
-      activeTabId.value = existing.id;
-    }
-  } else if (!connected && newPort) {
-    const existing = tabs.value.find(t => t.portName === newPort);
-    if (existing) {
-      existing.isConnected = false;
-    }
-  }
-}, { immediate: true });
+// Watch connected tabs to notify parent and auto-update active count
+watch(
+  () => tabs.value.filter(t => t.isConnected).length,
+  (activeCount) => {
+    emit('update-active-count', activeCount);
+  },
+  { immediate: true }
+);
 
 function openNewPortDialog() {
   refreshPortList();
