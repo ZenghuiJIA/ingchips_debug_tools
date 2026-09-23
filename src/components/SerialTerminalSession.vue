@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, shallowRef, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, shallowRef, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { safeInvoke, isTauri } from '../utils/ipc';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SerialRxPayload, SerialLogItem } from '../types';
@@ -12,6 +12,7 @@ import {
   Clock,
   Terminal,
   Layers,
+  RotateCcw,
   Zap,
   Activity,
   Copy,
@@ -21,20 +22,83 @@ import {
 import CommandGroupPanel from './CommandGroupPanel.vue';
 import TriggerPanel from './TriggerPanel.vue';
 import { encodeCommand } from '../utils/commandEncoder';
-import type { CommandGroup, CommandItem, TriggerRule } from '../types';
+import type { CommandGroup, CommandItem, TriggerRule, PortInfo } from '../types';
 
 const props = defineProps<{
   portName: string;
   baudRate: number;
   isConnected: boolean;
   isDaplink: boolean;
+  availablePorts?: PortInfo[];
 }>();
 
 const emit = defineEmits<{
   (e: 'switch-tab', tab: string): void;
   (e: 'update-stats', stats: { rx: number; tx: number }): void;
   (e: 'toggle-connection'): void;
+  (e: 'change-baud', baud: number): void;
+  (e: 'change-port', port: string): void;
 }>();
+
+const dtrState = ref<boolean>(false);
+const rtsState = ref<boolean>(false);
+const isResetting = ref<boolean>(false);
+const baudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+
+async function refreshPinStates() {
+  if (!props.isConnected || props.portName.startsWith('RTT')) return;
+  try {
+    const [_, __, dtr, rts]: [boolean, string | null, boolean, boolean, boolean] = await safeInvoke('get_serial_status', {
+      portName: props.portName
+    });
+    dtrState.value = dtr;
+    rtsState.value = rts;
+  } catch (err) {
+    // Ignore error if port is disconnected
+  }
+}
+
+async function toggleDtr() {
+  if (!props.isConnected) return;
+  const next = !dtrState.value;
+  try {
+    await safeInvoke('set_dtr', { level: next, portName: props.portName });
+    dtrState.value = next;
+    appendLog(`[硬件引脚] DTR(RST) -> ${next ? '1 (拉低复位)' : '0 (释放)'}`, 'info');
+  } catch (err) {
+    appendLog(`设置 DTR 失败: ${err}`, 'error');
+  }
+}
+
+async function toggleRts() {
+  if (!props.isConnected) return;
+  const next = !rtsState.value;
+  try {
+    await safeInvoke('set_rts', { level: next, portName: props.portName });
+    rtsState.value = next;
+    appendLog(`[硬件引脚] RTS(BOOT) -> ${next ? '1 (进入BOOT模式)' : '0 (正常模式)'}`, 'info');
+  } catch (err) {
+    appendLog(`设置 RTS 失败: ${err}`, 'error');
+  }
+}
+
+async function triggerReset(seqType: string) {
+  if (!props.isConnected) return;
+  if (!props.isDaplink) {
+    alert('当前串口设备不是 DAPLink 探针，仅 DAPLink 具备 DTR/RTS 硬件引脚控制能力。');
+    return;
+  }
+  isResetting.value = true;
+  try {
+    await safeInvoke('execute_reset_sequence', { seqType, portName: props.portName });
+    appendLog(`[硬件复位] 已向 ${props.portName} 发送 ${seqType === 'bootloader_reset' ? '进入 BOOT 引导复位' : '普通系统复位'} 序列`, 'info');
+    await refreshPinStates();
+  } catch (err) {
+    appendLog(`硬件复位执行失败: ${err}`, 'error');
+  } finally {
+    isResetting.value = false;
+  }
+}
 
 const isCopiedAll = ref<boolean>(false);
 
@@ -249,6 +313,19 @@ onMounted(async () => {
       console.warn('Failed to attach serial-rx listener:', err);
     }
   }
+
+  if (props.isConnected) {
+    refreshPinStates();
+  }
+});
+
+watch(() => props.isConnected, (connected: boolean) => {
+  if (connected) {
+    refreshPinStates();
+  } else {
+    dtrState.value = false;
+    rtsState.value = false;
+  }
 });
 
 onUnmounted(() => {
@@ -261,31 +338,100 @@ onUnmounted(() => {
   <div class="h-full flex flex-col bg-zinc-950 text-zinc-100 font-mono text-xs">
     <!-- Terminal Header Toolbar -->
     <div class="bg-zinc-900 border-b border-zinc-800 px-3 py-1.5 flex items-center justify-between gap-3 select-none">
-      <!-- Left: Title & Mode Selector -->
-      <div class="flex items-center gap-2">
+      <!-- Left: Title, Port & Baud Selectors, Connect Toggle & Hardware Pin Controls -->
+      <div class="flex items-center gap-2 flex-wrap">
         <div class="flex items-center gap-1.5 text-zinc-300 font-semibold">
-          <Terminal class="w-4 h-4 text-emerald-400" />
-          <span class="text-zinc-200">{{ portName }}</span>
-          <span class="text-[10px] px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-400 font-normal">@{{ baudRate }}</span>
-          <span
-            class="text-[9px] px-1.5 py-0.2 rounded font-bold"
-            :class="isConnected ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/40' : 'bg-zinc-800 text-zinc-500'"
+          <Terminal class="w-4 h-4 text-emerald-400 shrink-0" />
+          
+          <!-- Switch Port Dropdown (Enabled if disconnected, or available ports provided) -->
+          <select
+            v-if="availablePorts && availablePorts.length > 0 && !portName.startsWith('RTT')"
+            :value="portName"
+            @change="(e: any) => emit('change-port', e.target.value)"
+            :disabled="isConnected"
+            class="bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-200 py-0.5 px-1.5 rounded outline-none font-mono cursor-pointer disabled:opacity-75 disabled:cursor-not-allowed hover:border-zinc-700"
+            title="选择切换端口 (断开状态下可直接换COM口)"
           >
-            {{ isConnected ? '已连接' : '已断开' }}
-          </span>
+            <option v-for="p in availablePorts" :key="p.port_name" :value="p.port_name">
+              {{ p.port_name }} {{ p.is_daplink ? '[DAPLink]' : '' }}
+            </option>
+          </select>
+          <span v-else class="text-zinc-200 font-mono">{{ portName }}</span>
+
+          <!-- Switch Baud Rate Dropdown (Enabled even if connected, supports runtime adjustment) -->
+          <select
+            v-if="!portName.startsWith('RTT')"
+            :value="baudRate"
+            @change="(e: any) => emit('change-baud', Number(e.target.value))"
+            class="bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-300 py-0.5 px-1.5 rounded outline-none font-mono cursor-pointer hover:border-zinc-700"
+            :title="isConnected ? '在线调整波特率 (自动重连以新波特率生效)' : '设置该会话波特率'"
+          >
+            <option v-for="b in baudRates" :key="b" :value="b">
+              {{ b }}
+            </option>
+          </select>
 
           <!-- Direct Open / Close Port Button inside Tab -->
           <button
             @click="emit('toggle-connection')"
-            class="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold transition-colors border shadow-xs ml-1"
+            class="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold transition-colors border shadow-xs ml-0.5 cursor-pointer"
             :class="isConnected 
               ? 'bg-rose-950/80 text-rose-300 border-rose-800 hover:bg-rose-900' 
               : 'bg-emerald-950/90 text-emerald-300 border-emerald-700 hover:bg-emerald-900'"
-            :title="isConnected ? '关闭当前端口连接 (保留会话标签)' : '打开/重新连接当前端口'"
+            :title="isConnected ? '关闭当前端口连接 (保留历史日志与会话标签)' : '打开/重新连接当前端口'"
           >
             <Power class="w-3 h-3" />
-            <span>{{ isConnected ? '关闭端口' : '打开端口' }}</span>
+            <span>{{ isConnected ? '关闭' : '打开' }}</span>
           </button>
+        </div>
+
+        <!-- Hardware Pin Controls inside Tab (DTR / RTS / Reset) -->
+        <div v-if="!portName.startsWith('RTT')" class="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5">
+          <!-- DTR Button: DTR 1 = RESET low, DTR 0 = release -->
+          <button
+            @click="toggleDtr"
+            :disabled="!isConnected"
+            title="DTR 控制 (RESET引脚: 1=拉低复位, 0=释放)"
+            class="flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] font-mono transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+            :class="dtrState ? 'bg-rose-950 text-rose-300 border border-rose-800 font-bold' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'"
+          >
+            <span class="w-1.5 h-1.5 rounded-full" :class="dtrState ? 'bg-rose-500 animate-pulse' : 'bg-zinc-500'"></span>
+            <span>DTR:{{ dtrState ? '1' : '0' }}</span>
+          </button>
+
+          <!-- RTS Button: RTS 1 = BOOT mode, RTS 0 = Normal mode -->
+          <button
+            @click="toggleRts"
+            :disabled="!isConnected"
+            title="RTS 控制 (BOOT引脚: 1=BOOT模式, 0=正常运行)"
+            class="flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] font-mono transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+            :class="rtsState ? 'bg-amber-950 text-amber-300 border border-amber-800 font-bold' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'"
+          >
+            <span class="w-1.5 h-1.5 rounded-full" :class="rtsState ? 'bg-amber-500 animate-pulse' : 'bg-zinc-500'"></span>
+            <span>RTS:{{ rtsState ? '1' : '0' }}</span>
+          </button>
+
+          <!-- Hardware Reset for DAPLink -->
+          <div v-if="isDaplink" class="flex items-center gap-1 pl-1 border-l border-zinc-800">
+            <button
+              @click="triggerReset('normal_reset')"
+              :disabled="!isConnected || isResetting"
+              class="flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              title="普通复位: RTS 0 (正常态) -> DTR 产生 100ms 复位脉冲"
+            >
+              <RotateCcw class="w-2.5 h-2.5" :class="{ 'animate-spin': isResetting }" />
+              <span>复位</span>
+            </button>
+            <button
+              @click="triggerReset('bootloader_reset')"
+              :disabled="!isConnected || isResetting"
+              class="flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] bg-amber-950/60 hover:bg-amber-900 text-amber-300 border border-amber-800/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              title="进入 BOOT 引导复位: RTS 1 -> 延时 500ms 建立电平 -> DTR 产生 100ms 复位脉冲"
+            >
+              <Zap class="w-2.5 h-2.5 text-amber-400" />
+              <span>BOOT</span>
+            </button>
+          </div>
         </div>
 
         <div class="flex items-center bg-zinc-950 border border-zinc-800 rounded p-0.5 ml-2">

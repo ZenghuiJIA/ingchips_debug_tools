@@ -6,8 +6,6 @@ import {
   Cpu,
   RefreshCw,
   Power,
-  RotateCcw,
-  Zap,
   Activity,
   CheckCircle2,
   AlertCircle,
@@ -61,10 +59,7 @@ const filteredPackDevices = computed(() => {
   return packDevices.value.filter(d => d.name.toLowerCase().includes(kw));
 });
 
-const dtrState = ref<boolean>(false);
-const rtsState = ref<boolean>(false);
 const isRefreshing = ref<boolean>(false);
-const isResetting = ref<boolean>(false);
 
 const currentPortInfo = computed(() => {
   const target = props.isConnected ? props.activePort : selectedPort.value;
@@ -73,20 +68,6 @@ const currentPortInfo = computed(() => {
 
 const isDaplinkDevice = computed(() => {
   return currentPortInfo.value?.is_daplink ?? false;
-});
-
-const canHardwareReset = computed(() => {
-  return props.isConnected && isDaplinkDevice.value;
-});
-
-const resetTooltipText = computed(() => {
-  if (!props.isConnected) {
-    return '请先连接 DAPLink 串口以使用硬件复位';
-  }
-  if (!isDaplinkDevice.value) {
-    return '当前串口设备不是 DAPLink 探针，不支持硬件引脚复位 (仅 DAPLink 具备 RTS/DTR 硬件引脚控制)';
-  }
-  return '';
 });
 
 function getPortBadge(p: PortInfo) {
@@ -206,47 +187,6 @@ function handleToggleConnect() {
     } else {
       emit('connect', selectedPort.value, Number(selectedBaud.value));
     }
-  }
-}
-
-async function toggleDtr() {
-  const next = !dtrState.value;
-  try {
-    await safeInvoke('set_dtr', { level: next });
-    dtrState.value = next;
-  } catch (err) {
-    console.error('Toggle DTR failed:', err);
-  }
-}
-
-async function toggleRts() {
-  const next = !rtsState.value;
-  try {
-    await safeInvoke('set_rts', { level: next });
-    rtsState.value = next;
-  } catch (err) {
-    console.error('Toggle RTS failed:', err);
-  }
-}
-
-async function triggerReset(seqType: string) {
-  if (!canHardwareReset.value) {
-    alert(resetTooltipText.value || '当前设备不支持硬件复位');
-    return;
-  }
-  isResetting.value = true;
-  try {
-    await safeInvoke('execute_reset_sequence', { seqType });
-    emit('resetTriggered', seqType);
-    // Refresh pin states
-    const [_, __, dtr, rts]: [boolean, string | null, boolean, boolean, boolean] = await safeInvoke('get_serial_status');
-    dtrState.value = dtr;
-    rtsState.value = rts;
-  } catch (err) {
-    console.error('Reset sequence failed:', err);
-    alert(`复位执行失败: ${err}`);
-  } finally {
-    isResetting.value = false;
   }
 }
 
@@ -380,64 +320,16 @@ onUnmounted(() => {
       </button>
     </div>
 
-    <!-- Right: Hardware Pin Controls (RTS/DTR State Machine) -->
-    <div class="flex items-center gap-2">
-      <!-- Pin Status / Toggles -->
-      <div class="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded-md p-1">
-        <!-- DTR Button: DTR 1 = RESET low, DTR 0 = release -->
-        <button
-          @click="toggleDtr"
-          :disabled="!isConnected"
-          title="DTR 控制 (RESET引脚: 1=拉低复位, 0=释放)"
-          class="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono transition-colors"
-          :class="dtrState ? 'bg-rose-950/80 text-rose-300 border border-rose-800' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'"
-        >
-          <span class="w-2 h-2 rounded-full" :class="dtrState ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'"></span>
-          <span>DTR(RST): {{ dtrState ? '1' : '0' }}</span>
-        </button>
-
-        <!-- RTS Button: RTS 1 = BOOT mode, RTS 0 = Normal mode -->
-        <button
-          @click="toggleRts"
-          :disabled="!isConnected"
-          title="RTS 控制 (BOOT引脚: 1=BOOT模式, 0=正常运行)"
-          class="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono transition-colors"
-          :class="rtsState ? 'bg-amber-950/80 text-amber-300 border border-amber-800' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'"
-        >
-          <span class="w-2 h-2 rounded-full" :class="rtsState ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'"></span>
-          <span>RTS(BOOT): {{ rtsState ? '1' : '0' }}</span>
-        </button>
+    <!-- Right: System Info & Global Session Counter -->
+    <div class="flex items-center gap-3">
+      <div v-if="isConnected" class="flex items-center gap-2 bg-emerald-950/40 border border-emerald-800/40 px-2.5 py-1 rounded-md text-xs font-mono">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span class="text-emerald-300">活跃串口: {{ activePort }}</span>
+        <span v-if="isDaplinkDevice" class="text-[10px] bg-emerald-900/60 text-emerald-200 px-1 py-0.2 rounded border border-emerald-700/60">DAPLink</span>
       </div>
 
-      <!-- Hardware Action Buttons -->
-      <div class="flex items-center gap-1.5">
-        <span
-          v-if="isConnected && !isDaplinkDevice"
-          class="text-[10px] text-amber-400/90 bg-amber-950/40 border border-amber-800/40 px-1.5 py-0.5 rounded cursor-help"
-          :title="resetTooltipText"
-        >
-          复位需DAPLink
-        </span>
-
-        <button
-          @click="triggerReset('normal_reset')"
-          :disabled="!canHardwareReset || isResetting"
-          class="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-          :title="!canHardwareReset ? resetTooltipText : '普通复位: RTS 0 (正常态) -> DTR 产生 100ms 复位脉冲'"
-        >
-          <RotateCcw class="w-3.5 h-3.5" :class="{ 'animate-spin': isResetting }" />
-          <span>普通复位</span>
-        </button>
-
-        <button
-          @click="triggerReset('bootloader_reset')"
-          :disabled="!canHardwareReset || isResetting"
-          class="flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 text-xs font-medium border border-amber-500/40 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-          :title="!canHardwareReset ? resetTooltipText : '引导复位: RTS 1 -> 延时 500ms 建立电平 -> DTR 产生 100ms 复位脉冲'"
-        >
-          <Zap class="w-3.5 h-3.5" />
-          <span>进入 BOOT</span>
-        </button>
+      <div class="text-[11px] text-zinc-500 font-sans hidden sm:flex items-center gap-1">
+        <span>多串口与硬件引脚已在各标签页独立管理</span>
       </div>
     </div>
   </header>

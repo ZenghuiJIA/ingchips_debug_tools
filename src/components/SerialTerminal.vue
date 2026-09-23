@@ -117,9 +117,9 @@ async function toggleTabConnection(tab: TerminalSessionTab) {
         await safeInvoke('open_serial_port', {
           portName: tab.portName,
           baudRate: tab.baudRate,
-          ramStart: newPortRttRamPreset.value !== -1 ? newPortRttRamPreset.value : parseInt(newPortRttCustomStartHex.value.trim(), 16),
-          ramSize: newPortRttRamPreset.value !== -1 ? newPortRttRamSize.value : parseInt(newPortRttCustomSizeHex.value.trim(), 16),
-          blockAddress: newPortRttBlockAddrHex.value.trim() ? parseInt(newPortRttBlockAddrHex.value.trim(), 16) : null,
+          ramStart: tab.rttRamStart !== undefined ? tab.rttRamStart : (newPortRttRamPreset.value !== -1 ? newPortRttRamPreset.value : parseInt(newPortRttCustomStartHex.value.trim(), 16)),
+          ramSize: tab.rttRamSize !== undefined ? tab.rttRamSize : (newPortRttRamPreset.value !== -1 ? newPortRttRamSize.value : parseInt(newPortRttCustomSizeHex.value.trim(), 16)),
+          blockAddress: tab.rttBlockAddress !== undefined ? tab.rttBlockAddress : (newPortRttBlockAddrHex.value.trim() ? parseInt(newPortRttBlockAddrHex.value.trim(), 16) : null),
         });
       } else {
         await safeInvoke('open_serial_port', {
@@ -135,6 +135,43 @@ async function toggleTabConnection(tab: TerminalSessionTab) {
       alert(`打开端口 ${tab.portName} 失败: ${err}`);
     }
   }
+}
+
+async function handleTabBaudChange(tab: TerminalSessionTab, newBaud: number) {
+  tab.baudRate = newBaud;
+  // If currently connected, reconnect with the new baud rate seamlessly
+  if (tab.isConnected && !tab.portName.startsWith('RTT')) {
+    try {
+      await safeInvoke('close_serial_port', { portName: tab.portName });
+      await safeInvoke('open_serial_port', {
+        portName: tab.portName,
+        baudRate: newBaud,
+        ramStart: null,
+        ramSize: null,
+        blockAddress: null,
+      });
+      tab.isConnected = true;
+    } catch (err: any) {
+      alert(`调整波特率至 ${newBaud} 失败: ${err}`);
+      tab.isConnected = false;
+    }
+  }
+}
+
+async function handleTabPortChange(tab: TerminalSessionTab, newPort: string) {
+  if (tab.portName === newPort) return;
+  // Disconnect previous port if still connected
+  if (tab.isConnected) {
+    try {
+      await safeInvoke('close_serial_port', { portName: tab.portName });
+      tab.isConnected = false;
+    } catch (err) {
+      console.error(`关闭原端口 ${tab.portName} 失败:`, err);
+    }
+  }
+  tab.portName = newPort;
+  const isDap = availablePorts.value.find(p => p.port_name === newPort)?.is_daplink ?? false;
+  tab.isDaplink = isDap;
 }
 
 async function refreshPortList() {
@@ -359,9 +396,12 @@ onMounted(() => {
             :baud-rate="tab.baudRate"
             :is-connected="tab.isConnected"
             :is-daplink="tab.isDaplink"
+            :available-ports="availablePorts"
             @switch-tab="(t) => emit('switch-tab', t)"
             @update-stats="(s) => handleTabStatsUpdate(tab.id, s)"
             @toggle-connection="toggleTabConnection(tab)"
+            @change-baud="(b) => handleTabBaudChange(tab, b)"
+            @change-port="(p) => handleTabPortChange(tab, p)"
           />
         </div>
       </template>

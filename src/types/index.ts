@@ -529,8 +529,13 @@ export interface TerminalSessionTab {
   baudRate: number;
   isConnected: boolean;
   isDaplink: boolean;
+  dtrState?: boolean;
+  rtsState?: boolean;
   rxBytesCount: number;
   txBytesCount: number;
+  rttRamStart?: number;
+  rttRamSize?: number;
+  rttBlockAddress?: number | null;
 }
 
 
