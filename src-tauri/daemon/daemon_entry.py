@@ -6,10 +6,12 @@ Communicates with Tauri Rust backend over JSON-RPC 2.0 via stdin/stdout.
 """
 
 import sys
+import os
 import json
 import logging
 import gc
 import traceback
+from collections import defaultdict
 from typing import Dict, Any, List, Optional
 
 import threading
@@ -28,6 +30,7 @@ logger = logging.getLogger("hil_daemon")
 try:
     import pyocd
     from pyocd.core.helpers import ConnectHelper
+    from pyocd.core.session import Session
     from pyocd.core.target import Target
     from pyocd.flash.file_programmer import FileProgrammer
     PYOCD_AVAILABLE = True
@@ -41,6 +44,69 @@ try:
 except Exception as e:
     logger.warning(f"PyLink import warning: {e}")
     PYLINK_AVAILABLE = False
+
+try:
+    from pyocd.target.pack.cmsis_pack import CmsisPack
+    from pyocd.target.pack.pack_target import PackTargets
+    from pyocd.target import TARGET
+    CMSIS_PACK_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"CMSIS Pack import warning: {e}")
+    CMSIS_PACK_AVAILABLE = False
+
+_DISCOVERED_PACKS = []
+_PACKS_LOCK = threading.Lock()
+
+def discover_and_load_packs() -> List[str]:
+    """Find and dynamically populate targets & algorithms from .pack files in packs/ directories."""
+    global _DISCOVERED_PACKS
+    if not CMSIS_PACK_AVAILABLE:
+        return []
+
+    with _PACKS_LOCK:
+        candidates = []
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            candidates.append(os.path.join(exe_dir, "packs"))
+            candidates.append(os.path.join(exe_dir, "..", "packs"))
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates.append(os.path.join(script_dir, "packs"))
+        candidates.append(os.path.join(script_dir, "..", "packs"))
+        candidates.append(os.path.join(script_dir, "..", "..", "packs"))
+        cwd = os.getcwd()
+        candidates.append(os.path.join(cwd, "packs"))
+        candidates.append(os.path.join(cwd, "release", "AI-HIL-Debugger-v1.0.0-windows-x64", "packs"))
+        candidates.append(r"C:\ming\python\get_svd")
+
+        for d in candidates:
+            if not os.path.isdir(d):
+                continue
+            for fname in os.listdir(d):
+                if fname.lower().endswith(".pack"):
+                    p = os.path.abspath(os.path.join(d, fname))
+                    if p not in _DISCOVERED_PACKS and os.path.isfile(p):
+                        try:
+                            PackTargets.populate_targets_from_pack(p)
+                            _DISCOVERED_PACKS.append(p)
+                            logger.info(f"Loaded CMSIS-Pack: {p}")
+                        except Exception as e:
+                            logger.error(f"Failed to populate targets from pack {p}: {e}")
+
+        return list(_DISCOVERED_PACKS)
+
+
+def normalize_target(target_name: Optional[str]) -> Optional[str]:
+    """
+    Normalize target MCU string to match PyOCD or J-Link supported targets.
+    Fixes cases like 'cortex-m4', 'cortex_m4', 'cortex_m3', 'cortex-m0+' by mapping to 'cortex_m'.
+    """
+    if not target_name:
+        return None
+    raw = target_name.strip().lower().replace("-", "_")
+    # Universal ARM Cortex-M targets
+    if raw.startswith("cortex_m") or raw == "cortex_m" or raw in ("cortexm", "cortexm0", "cortexm3", "cortexm4", "cortexm7"):
+        return "cortex_m"
+    return raw
 
 
 def trim_process_memory():
@@ -161,12 +227,39 @@ def decode_hfsr(hfsr: int) -> Dict[str, Any]:
 class PyOCDController:
     """Controller for PyOCD hardware operations."""
 
+    @classmethod
+    def _create_session(cls, probe_id: Optional[str] = None, target_override: Optional[str] = None,
+                        auto_open: bool = True, pack: Optional[str] = None, frequency: Optional[int] = None):
+        if not PYOCD_AVAILABLE:
+            raise RuntimeError("PyOCD is not available.")
+        discover_and_load_packs()
+        if pack and os.path.isfile(pack):
+            try:
+                from pyocd.target.pack.pack_target import PackTargets
+                PackTargets.populate_targets_from_pack(pack)
+                logger.info(f"Session populating targets from pack: {pack}")
+            except Exception as e:
+                logger.warning(f"Could not populate targets from pack {pack}: {e}")
+        probes = ConnectHelper.get_all_connected_probes(blocking=False, unique_id=probe_id)
+        if not probes:
+            target_msg = f" matching ID '{probe_id}'" if probe_id else ""
+            raise RuntimeError(f"No debug probe connected{target_msg}.")
+        probe = probes[0]
+        options = {}
+        if target_override:
+            options["target_override"] = normalize_target(target_override)
+        if pack:
+            options["pack"] = pack
+        if frequency:
+            options["frequency"] = int(frequency)
+        return Session(probe, auto_open=auto_open, options=options)
+
     @staticmethod
     def list_probes() -> List[Dict[str, Any]]:
         if not PYOCD_AVAILABLE:
             return []
         try:
-            probes = ConnectHelper.get_all_connected_probes()
+            probes = ConnectHelper.get_all_connected_probes(blocking=False)
             result = []
             for p in probes:
                 cls_name = type(p).__name__.lower()
@@ -202,16 +295,7 @@ class PyOCDController:
 
     @staticmethod
     def read_core_registers(probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        if not PYOCD_AVAILABLE:
-            raise RuntimeError("PyOCD is not available.")
-        
-        kwargs = {"auto_open": True}
-        if probe_id:
-            kwargs["unique_id"] = probe_id
-        if target_override:
-            kwargs["target_override"] = target_override
-
-        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        session = PyOCDController._create_session(probe_id, target_override)
         with session:
             target = session.board.target
             was_running = target.is_running()
@@ -264,17 +348,8 @@ class PyOCDController:
 
     @staticmethod
     def read_memory(address: int, count: int, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        if not PYOCD_AVAILABLE:
-            raise RuntimeError("PyOCD is not available.")
-        
         count = min(count, 4096)  # Cap at 4KB
-        kwargs = {"auto_open": True}
-        if probe_id:
-            kwargs["unique_id"] = probe_id
-        if target_override:
-            kwargs["target_override"] = target_override
-
-        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        session = PyOCDController._create_session(probe_id, target_override)
         with session:
             target = session.board.target
             data = target.read_memory_block8(address, count)
@@ -288,15 +363,7 @@ class PyOCDController:
 
     @staticmethod
     def write_memory(address: int, value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        if not PYOCD_AVAILABLE:
-            raise RuntimeError("PyOCD is not available.")
-        kwargs = {"auto_open": True}
-        if probe_id:
-            kwargs["unique_id"] = probe_id
-        if target_override:
-            kwargs["target_override"] = target_override
-
-        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        session = PyOCDController._create_session(probe_id, target_override)
         with session:
             target = session.board.target
             target.write32(address, value)
@@ -304,15 +371,7 @@ class PyOCDController:
 
     @staticmethod
     def write_memory_byte(address: int, value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        if not PYOCD_AVAILABLE:
-            raise RuntimeError("PyOCD is not available.")
-        kwargs = {"auto_open": True}
-        if probe_id:
-            kwargs["unique_id"] = probe_id
-        if target_override:
-            kwargs["target_override"] = target_override
-
-        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        session = PyOCDController._create_session(probe_id, target_override)
         with session:
             target = session.board.target
             target.write8(address, value & 0xFF)
@@ -320,15 +379,7 @@ class PyOCDController:
 
     @staticmethod
     def dump_memory_to_file(address: int, count: int, file_path: str, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        if not PYOCD_AVAILABLE:
-            raise RuntimeError("PyOCD is not available.")
-        kwargs = {"auto_open": True}
-        if probe_id:
-            kwargs["unique_id"] = probe_id
-        if target_override:
-            kwargs["target_override"] = target_override
-
-        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        session = PyOCDController._create_session(probe_id, target_override)
         with session:
             target = session.board.target
             chunk_size = 4096
@@ -349,18 +400,10 @@ class PyOCDController:
 
     @staticmethod
     def load_file_to_memory(address: int, file_path: str, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        if not PYOCD_AVAILABLE:
-            raise RuntimeError("PyOCD is not available.")
-        kwargs = {"auto_open": True}
-        if probe_id:
-            kwargs["unique_id"] = probe_id
-        if target_override:
-            kwargs["target_override"] = target_override
-
         with open(file_path, "rb") as f:
             data = f.read()
 
-        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        session = PyOCDController._create_session(probe_id, target_override)
         with session:
             target = session.board.target
             chunk_size = 4096
@@ -379,15 +422,7 @@ class PyOCDController:
 
     @staticmethod
     def reset_target(halt: bool = False, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        if not PYOCD_AVAILABLE:
-            raise RuntimeError("PyOCD is not available.")
-        kwargs = {"auto_open": True}
-        if probe_id:
-            kwargs["unique_id"] = probe_id
-        if target_override:
-            kwargs["target_override"] = target_override
-
-        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        session = PyOCDController._create_session(probe_id, target_override)
         with session:
             target = session.board.target
             if halt:
@@ -397,58 +432,123 @@ class PyOCDController:
             return {"status": "success", "halted": halt}
 
     @staticmethod
-    def flash_firmware(file_path: str, target_override: Optional[str] = None, probe_id: Optional[str] = None) -> Dict[str, Any]:
-        if not PYOCD_AVAILABLE:
-            raise RuntimeError("PyOCD is not available.")
-        
-        kwargs = {"auto_open": True}
-        if probe_id:
-            kwargs["unique_id"] = probe_id
-        if target_override:
-            kwargs["target_override"] = target_override
-
-        session = ConnectHelper.session_with_chosen_probe(**kwargs)
+    def flash_firmware(file_path: str, target_override: Optional[str] = None, probe_id: Optional[str] = None,
+                       pack_path: Optional[str] = None, frequency: Optional[int] = None) -> Dict[str, Any]:
+        session = PyOCDController._create_session(probe_id, target_override, pack=pack_path, frequency=frequency)
         with session:
             programmer = FileProgrammer(session)
             programmer.program(file_path)
             session.board.target.reset()
             trim_process_memory()
-            return {"status": "success", "file_path": file_path, "message": "Flashing and reset completed successfully."}
+            pack_desc = f" (using pack: {os.path.basename(pack_path)})" if pack_path else ""
+            freq_desc = f" @ {frequency // 1_000_000}MHz" if frequency and frequency >= 1_000_000 else ""
+            return {
+                "status": "success",
+                "file_path": file_path,
+                "pack_path": pack_path,
+                "message": f"Flashing and reset completed successfully{pack_desc}{freq_desc}."
+            }
 
     @staticmethod
-    def diagnose_hardfault(probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        """Comprehensive HardFault diagnosis."""
-        regs_info = PyOCDController.read_core_registers(probe_id, target_override)
-        cfsr_data = regs_info.get("cfsr_decoded", {})
-        hfsr_data = regs_info.get("hfsr_decoded", {})
-        core_regs = regs_info.get("core_registers", {})
-        fault_regs = regs_info.get("fault_registers", {})
+    def diagnose_hardfault(probe_id: Optional[str] = None, target_override: Optional[str] = None, axf_path: Optional[str] = None) -> Dict[str, Any]:
+        """Comprehensive HardFault diagnosis with call stack unwinding, EXC_RETURN decode, and address2line."""
+        session = PyOCDController._create_session(probe_id, target_override)
+        with session:
+            target = session.board.target
+            was_running = target.is_running()
+            if was_running:
+                target.halt()
+
+            # Standard ARM Cortex-M core registers
+            reg_names = [f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "xpsr", "msp", "psp"]
+            core_regs = {}
+            for name in reg_names:
+                try:
+                    val = target.read_core_register(name)
+                    core_regs[name.upper()] = f"0x{val:08X}"
+                except Exception:
+                    core_regs[name.upper()] = "N/A"
+
+            # SCB Fault Status Registers
+            SCB_CFSR  = 0xE000ED28
+            SCB_HFSR  = 0xE000ED2C
+            SCB_MMFAR = 0xE000ED34
+            SCB_BFAR  = 0xE000ED38
+
+            cfsr = target.read32(SCB_CFSR)
+            hfsr = target.read32(SCB_HFSR)
+            mmfar = target.read32(SCB_MMFAR)
+            bfar = target.read32(SCB_BFAR)
+
+            cfsr_decoded = decode_cfsr(cfsr, mmfar, bfar)
+            hfsr_decoded = decode_hfsr(hfsr)
+
+            regs_info = {
+                "target": target.part_number or "Cortex-M",
+                "core_registers": core_regs,
+                "fault_registers": {
+                    "CFSR": f"0x{cfsr:08X}",
+                    "HFSR": f"0x{hfsr:08X}",
+                    "MMFAR": f"0x{mmfar:08X}",
+                    "BFAR": f"0x{bfar:08X}",
+                },
+                "cfsr_decoded": cfsr_decoded,
+                "hfsr_decoded": hfsr_decoded,
+            }
+
+            deep_analysis = None
+            try:
+                from hardfault_analyzer import HardFaultAnalyzer
+                deep_analysis = HardFaultAnalyzer.diagnose_hardfault_deep(
+                    session=session,
+                    core_regs=core_regs,
+                    fault_regs=regs_info["fault_registers"],
+                    cfsr_decoded=cfsr_decoded,
+                    hfsr_decoded=hfsr_decoded,
+                    axf_path=axf_path
+                )
+            except Exception as ex:
+                logger.error(f"Error performing deep HardFault analysis: {ex}", exc_info=True)
+                deep_analysis = {"error": str(ex)}
+
+            if was_running:
+                try:
+                    target.resume()
+                except Exception:
+                    pass
 
         pc = core_regs.get("PC", "0x00000000")
         lr = core_regs.get("LR", "0x00000000")
         msp = core_regs.get("MSP", "0x00000000")
-        bfar = fault_regs.get("BFAR", "0x00000000")
+        psp = core_regs.get("PSP", "0x00000000")
+        bfar = regs_info["fault_registers"].get("BFAR", "0x00000000")
 
         # Compile AI diagnostic summary
         diagnosis_lines = []
         diagnosis_lines.append("=== Cortex-M HardFault 智能分析诊断报告 ===")
-        diagnosis_lines.append(f"崩溃发生程序计数器 (PC): {pc}")
+        diagnosis_lines.append(f"当前程序计数器 (PC): {pc}")
         diagnosis_lines.append(f"返回链接寄存器 (LR/EXC_RETURN): {lr}")
         diagnosis_lines.append(f"主栈指针 (MSP): {msp}")
+        diagnosis_lines.append(f"进程栈指针 (PSP): {psp}")
 
-        if "FORCED" in hfsr_data.get("flags", []):
+        if deep_analysis and deep_analysis.get("active_stack_desc"):
+            diagnosis_lines.append(f"• {deep_analysis['active_stack_desc']}")
+        if deep_analysis and deep_analysis.get("crash_point_desc"):
+            diagnosis_lines.append(f"• {deep_analysis['crash_point_desc']}")
+
+        if "FORCED" in hfsr_decoded.get("flags", []):
             diagnosis_lines.append("• 故障类型: 强制硬故障 (Forced HardFault)，由低级故障升级触发。")
 
-        if cfsr_data.get("flags"):
-            diagnosis_lines.append(f"• 触发状态标志: {', '.join(cfsr_data['flags'])}")
-            for exp in cfsr_data.get("explanations", []):
+        if cfsr_decoded.get("flags"):
+            diagnosis_lines.append(f"• 触发状态标志: {', '.join(cfsr_decoded['flags'])}")
+            for exp in cfsr_decoded.get("explanations", []):
                 diagnosis_lines.append(f"  - {exp}")
         else:
             diagnosis_lines.append("• 未检测到可配置故障标志 (CFSR=0)，可能是中断向量表错误或非法指令栈破坏。")
 
         # Specific recommendations
         recommendations = []
-        cfsr_flags_str = " ".join(cfsr_data.get("flags", []))
+        cfsr_flags_str = " ".join(cfsr_decoded.get("flags", []))
         if "BFARVALID" in cfsr_flags_str:
             recommendations.append(f"检查对地址 {bfar} 的读写操作：确认对应外设时钟（如 RCC_APB1/2/AHB）是否已在代码中使能。")
         if "INVSTATE" in cfsr_flags_str:
@@ -458,11 +558,14 @@ class PyOCDController:
         if "NOCP" in cfsr_flags_str:
             recommendations.append("浮点运算协处理器未使能：若在中断中使用了浮点计算，请在初始化时开启 SCB->CPACR 的 CP10 与 CP11 访问权限。")
 
-        return {
+        result = {
             "summary": "\n".join(diagnosis_lines),
             "recommendations": recommendations,
             "raw_dump": regs_info
         }
+        if deep_analysis:
+            result["deep_analysis"] = deep_analysis
+        return result
 
 
 class RTTController:
@@ -481,9 +584,14 @@ class RTTController:
     _jlink = None
     _session = None
 
+    _ram_start = 0x20000000
+    _ram_size = 0x20000
+    _block_address = None
+
     @classmethod
     def start_rtt(cls, probe_id: Optional[str] = None, target_override: Optional[str] = None,
-                  block_address: Optional[int] = None, probe_type: Optional[str] = None) -> Dict[str, Any]:
+                  block_address: Optional[int] = None, probe_type: Optional[str] = None,
+                  ram_start: Optional[int] = None, ram_size: Optional[int] = None) -> Dict[str, Any]:
         with cls._lock:
             if cls._running:
                 return {
@@ -491,6 +599,10 @@ class RTTController:
                     "tcp_port": cls._tcp_port,
                     "mode": cls._mode
                 }
+
+            cls._block_address = block_address
+            cls._ram_start = int(ram_start) if ram_start is not None else 0x20000000
+            cls._ram_size = max(0x1000, int(ram_size) if ram_size is not None else 0x20000)
 
             # Create ephemeral TCP server for bi-directional streaming
             cls._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -502,7 +614,6 @@ class RTTController:
             # Decide probe type if not specified
             chosen_type = (probe_type or "").lower()
             if not chosen_type:
-                # Check probe description
                 for p in PyOCDController.list_probes():
                     if not probe_id or p["unique_id"] == probe_id:
                         chosen_type = p.get("probe_type", "generic")
@@ -530,7 +641,9 @@ class RTTController:
                 "status": "started",
                 "tcp_port": cls._tcp_port,
                 "mode": cls._mode,
-                "probe_type": chosen_type
+                "probe_type": chosen_type,
+                "ram_start": f"0x{cls._ram_start:08X}",
+                "ram_size": f"0x{cls._ram_size:X}"
             }
 
     @classmethod
@@ -541,26 +654,19 @@ class RTTController:
         else:
             cls._jlink.open()
 
-        chip = target_override or "Cortex-M4"
+        chip = normalize_target(target_override) or "cortex_m"
         cls._jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
         cls._jlink.connect(chip)
-        cls._jlink.rtt_start(block_address)
-        logger.info(f"J-Link RTT started on target {chip} (CB addr: {block_address})")
+        cb_addr = block_address if block_address else cls._block_address
+        cls._jlink.rtt_start(cb_addr)
+        logger.info(f"J-Link RTT started on target {chip} (CB addr: {cb_addr})")
 
     @classmethod
     def _start_pyocd(cls, probe_id: Optional[str], target_override: Optional[str], block_address: Optional[int]):
-        if not PYOCD_AVAILABLE:
-            raise RuntimeError("PyOCD is not available for DAPLink RTT")
-
-        kwargs = {"auto_open": True}
-        if probe_id:
-            kwargs["unique_id"] = probe_id
-        if target_override:
-            kwargs["target_override"] = target_override
-
-        cls._session = ConnectHelper.session_with_chosen_probe(**kwargs)
+        norm_target = normalize_target(target_override) or "cortex_m"
+        cls._session = PyOCDController._create_session(probe_id, norm_target, auto_open=True)
         cls._session.open()
-        logger.info(f"PyOCD session opened for RTT on probe {probe_id}")
+        logger.info(f"PyOCD session opened for RTT on target {norm_target}")
 
     @classmethod
     def _rtt_worker_loop(cls):
@@ -589,8 +695,7 @@ class RTTController:
             return
 
         # 2. RTT streaming loop
-        # For PyOCD, maintain scanned RTT CB state
-        cb_address = None
+        cb_address = cls._block_address
         up_buf_ptr = None
         up_buf_size = 0
 
@@ -608,25 +713,28 @@ class RTTController:
                 elif cls._mode == "pyocd" and cls._session:
                     target = cls._session.board.target
                     if cb_address is None:
-                        # Search for "SEGGER RTT" in RAM (e.g. 0x20000000 - 0x20010000)
+                        # Scan RAM range for "SEGGER RTT" signature in chunks (up to cls._ram_size)
                         try:
-                            start_ram = 0x20000000
-                            scan_len = 0x10000 // 4  # 64KB scan range
-                            words = target.read_memory_block32(start_ram, scan_len)
-                            # Magic string: "SEGGER RTT\0" -> 0x47455320, etc.
-                            # Scan bytes
-                            raw_bytes = bytearray()
-                            for w in words:
-                                raw_bytes.extend(w.to_bytes(4, 'little'))
-                            magic_idx = raw_bytes.find(b"SEGGER RTT")
-                            if magic_idx != -1:
-                                cb_address = start_ram + magic_idx
-                                # Parse Up Buffer 0 info:
-                                # Header: acID(16), MaxNumUp(4), MaxNumDown(4) -> 24 bytes offset to aUp[0]
-                                # aUp[0]: sName(4), pBuffer(4), SizeOfBuffer(4), WrOff(4), RdOff(4), Flags(4)
-                                up_buf_ptr = int.from_bytes(raw_bytes[magic_idx+28:magic_idx+32], 'little')
-                                up_buf_size = int.from_bytes(raw_bytes[magic_idx+32:magic_idx+36], 'little')
-                                logger.info(f"PyOCD found SEGGER RTT CB at 0x{cb_address:08X}, UpBuffer: 0x{up_buf_ptr:08X} ({up_buf_size} bytes)")
+                            start_ram = cls._ram_start
+                            total_len = cls._ram_size
+                            chunk_size = 0x8000  # 32KB per scan chunk
+                            offset = 0
+
+                            while offset < total_len and cb_address is None:
+                                cur_addr = start_ram + offset
+                                cur_len = min(chunk_size, total_len - offset)
+                                words = target.read_memory_block32(cur_addr, cur_len // 4)
+                                raw_bytes = bytearray()
+                                for w in words:
+                                    raw_bytes.extend(w.to_bytes(4, 'little'))
+                                magic_idx = raw_bytes.find(b"SEGGER RTT")
+                                if magic_idx != -1:
+                                    cb_address = cur_addr + magic_idx
+                                    up_buf_ptr = int.from_bytes(raw_bytes[magic_idx+28:magic_idx+32], 'little')
+                                    up_buf_size = int.from_bytes(raw_bytes[magic_idx+32:magic_idx+36], 'little')
+                                    logger.info(f"PyOCD found SEGGER RTT CB at 0x{cb_address:08X} (UpBuffer: 0x{up_buf_ptr:08X}, size {up_buf_size}B)")
+                                    break
+                                offset += cur_len
                         except Exception as e:
                             logger.debug(f"Scanning for RTT CB failed: {e}")
 
@@ -706,6 +814,556 @@ class RTTController:
             cls._mode = None
             trim_process_memory()
             return {"status": "stopped"}
+
+
+def format_bytes(size: int) -> str:
+    """Format byte size into human-readable string."""
+    if size < 1024:
+        return f"{size} B"
+    elif size < 1024 * 1024:
+        return f"{size / 1024:.2f} KB"
+    else:
+        return f"{size / (1024 * 1024):.2f} MB"
+
+
+class FirmwareResourceAnalyzer:
+    """
+    Analyzes embedded ARM Cortex-M firmware (.axf / .elf / binary ELF) for total RAM/ROM footprint,
+    compiler toolchain detection (GCC, ARMCC, ARMClang), section layout, and module-level attribution.
+    """
+
+    @staticmethod
+    def analyze(
+        file_path: str,
+        chip_flash_size: Optional[int] = None,
+        chip_ram_size: Optional[int] = None,
+        max_symbols_per_module: int = 25
+    ) -> Dict[str, Any]:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Firmware file not found: {file_path}")
+
+        from map_analyzer import MapFileAnalyzer
+        if file_path.lower().endswith(".map") or MapFileAnalyzer.is_map_file(file_path):
+            return MapFileAnalyzer.analyze(file_path, chip_flash_size, chip_ram_size, max_symbols_per_module)
+
+        # Check for companion .map file
+        base_name = os.path.splitext(file_path)[0]
+        dir_name = os.path.dirname(file_path)
+        candidates = [
+            base_name + ".map",
+            os.path.join(dir_name, "listing", os.path.basename(base_name) + ".map"),
+            os.path.join(dir_name, "..", "listing", os.path.basename(base_name) + ".map")
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                try:
+                    logger.info(f"Found companion map file for {file_path}: {c}")
+                    res = MapFileAnalyzer.analyze(c, chip_flash_size, chip_ram_size, max_symbols_per_module)
+                    res["file_path"] = file_path
+                    res["file_name"] = os.path.basename(file_path)
+                    return res
+                except Exception as e:
+                    logger.warning(f"Failed to parse companion map {c}: {e}, falling back to ELF parser")
+
+        try:
+            from elftools.elf.elffile import ELFFile
+            from elftools.elf.sections import SymbolTableSection
+        except ImportError:
+            raise RuntimeError("pyelftools is not installed in Python daemon.")
+
+        file_stat = os.stat(file_path)
+        file_size = file_stat.st_size
+        file_name = os.path.basename(file_path)
+
+        with open(file_path, "rb") as f:
+            magic = f.read(4)
+            if magic != b"\x7fELF":
+                raise ValueError(f"Invalid ELF/AXF binary: header magic is {magic!r}, expected '\\x7fELF'")
+            f.seek(0)
+            elf = ELFFile(f)
+
+            # 1. Toolchain & Architecture Detection
+            toolchain_type = "generic"
+            toolchain_name = "Generic ELF Toolchain"
+            raw_producer = ""
+
+            comment_sec = elf.get_section_by_name(".comment")
+            if comment_sec:
+                try:
+                    cdata = comment_sec.data().decode("utf-8", errors="ignore")
+                    first_line = cdata.split("\n")[0].split("\x00")[0].strip()
+                    raw_producer = first_line
+                    if "GCC" in cdata or "GNU" in cdata:
+                        toolchain_type = "gcc"
+                        toolchain_name = f"GNU Arm GCC ({first_line})"
+                    elif "ARM Compiler for Embedded 6" in cdata or "armclang" in cdata:
+                        toolchain_type = "armclang"
+                        toolchain_name = "Arm Compiler 6 (armclang)"
+                    elif "ARM Compiler 5" in cdata or "ArmLink" in cdata or "ARM Linker" in cdata:
+                        toolchain_type = "armcc"
+                        toolchain_name = "Arm Compiler 5 (armcc / armlink)"
+                except Exception:
+                    pass
+
+            if elf.has_dwarf_info():
+                try:
+                    di = elf.get_dwarf_info()
+                    for cu in di.iter_CUs():
+                        top_die = cu.get_top_DIE()
+                        prod = top_die.attributes.get("DW_AT_producer")
+                        if prod:
+                            p_val = prod.value.decode("utf-8", errors="ignore")
+                            if not raw_producer:
+                                raw_producer = p_val
+                            if toolchain_type == "generic":
+                                if "GNU" in p_val or "GCC" in p_val:
+                                    toolchain_type = "gcc"
+                                    toolchain_name = f"GNU GCC ({p_val[:60]})"
+                                elif "Arm Compiler 6" in p_val or "clang" in p_val:
+                                    toolchain_type = "armclang"
+                                    toolchain_name = "Arm Compiler 6 (armclang)"
+                                elif "ARM Compiler" in p_val or "ArmC" in p_val:
+                                    toolchain_type = "armcc"
+                                    toolchain_name = "Arm Compiler 5 (armcc)"
+                            break
+                except Exception:
+                    pass
+
+            arch = elf.header.get("e_machine", "EM_ARM")
+            arch_name = "ARM Cortex-M" if arch == "EM_ARM" else str(arch)
+
+            # 2. Section Classification
+            sections_info = []
+            code_bytes = 0
+            ro_data_bytes = 0
+            rw_data_bytes = 0
+            zi_data_bytes = 0
+
+            for s in elf.iter_sections():
+                name = s.name
+                size = s["sh_size"]
+                flags = s["sh_flags"]
+                stype = s["sh_type"]
+                addr = s["sh_addr"]
+
+                if size == 0:
+                    continue
+
+                alloc = bool(flags & 0x2)      # SHF_ALLOC
+                exec_instr = bool(flags & 0x4) # SHF_EXECINSTR
+                write = bool(flags & 0x1)      # SHF_WRITE
+
+                category = "Other"
+                target = "None"
+
+                if alloc:
+                    if exec_instr:
+                        category = "Code"
+                        target = "ROM"
+                        code_bytes += size
+                    elif write:
+                        if stype == "SHT_NOBITS":
+                            category = "ZI-Data"
+                            target = "RAM"
+                            zi_data_bytes += size
+                        else:
+                            category = "RW-Data"
+                            target = "ROM+RAM"
+                            rw_data_bytes += size
+                    else:
+                        category = "RO-Data"
+                        target = "ROM"
+                        ro_data_bytes += size
+
+                flags_str = ""
+                if alloc: flags_str += "A"
+                if write: flags_str += "W"
+                if exec_instr: flags_str += "X"
+
+                sections_info.append({
+                    "name": name or f"[sec_{len(sections_info)}]",
+                    "type": stype,
+                    "address": f"0x{addr:08X}",
+                    "raw_address": addr,
+                    "size": size,
+                    "size_str": format_bytes(size),
+                    "flags": flags_str,
+                    "category": category,
+                    "target": target
+                })
+
+            rom_total_bytes = code_bytes + ro_data_bytes + rw_data_bytes
+            ram_total_bytes = rw_data_bytes + zi_data_bytes
+
+            # 3. DWARF Compile Unit Indexing (Range Map)
+            cu_func_ranges = []
+            if elf.has_dwarf_info():
+                try:
+                    di = elf.get_dwarf_info()
+                    for cu in di.iter_CUs():
+                        top_die = cu.get_top_DIE()
+                        name_attr = top_die.attributes.get("DW_AT_name")
+                        if not name_attr:
+                            continue
+                        full_path = name_attr.value.decode("utf-8", errors="ignore").replace("\\", "/")
+                        file_base = os.path.basename(full_path)
+
+                        for die in cu.iter_DIEs():
+                            if die.tag == "DW_TAG_subprogram":
+                                low = die.attributes.get("DW_AT_low_pc")
+                                high = die.attributes.get("DW_AT_high_pc")
+                                if low and high:
+                                    l_val = low.value
+                                    h_val = high.value
+                                    if getattr(high, "form", "").startswith("DW_FORM_data"):
+                                        h_val = l_val + h_val
+                                    cu_func_ranges.append((l_val, h_val, file_base, full_path))
+                except Exception:
+                    pass
+
+            cu_func_ranges.sort(key=lambda x: x[0])
+
+            def find_cu_for_address(addr: int) -> Optional[tuple]:
+                for l_val, h_val, f_base, f_path in cu_func_ranges:
+                    if l_val <= addr < h_val:
+                        return f_base, f_path
+                return None
+
+            # 4. Symbol & Module Attribution
+            modules_map = defaultdict(lambda: {
+                "name": "",
+                "full_path": "",
+                "code": 0,
+                "ro_data": 0,
+                "rw_data": 0,
+                "zi_data": 0,
+                "symbols": []
+            })
+
+            symtab = None
+            for s in elf.iter_sections():
+                if isinstance(s, SymbolTableSection):
+                    symtab = s
+                    break
+
+            current_file_base = "system_lib"
+            current_file_path = "[System / Core Library]"
+            total_symbols_count = 0
+
+            if symtab:
+                for sym in symtab.iter_symbols():
+                    st_type = sym["st_info"]["type"]
+                    st_size = sym["st_size"]
+                    st_value = sym["st_value"]
+                    name = sym.name
+
+                    if not name or name.startswith("$"):
+                        continue
+
+                    if st_type == "STT_FILE":
+                        current_file_path = name.replace("\\", "/")
+                        current_file_base = os.path.basename(current_file_path)
+                        continue
+
+                    if st_size > 0:
+                        shndx = sym["st_shndx"]
+                        if isinstance(shndx, int) and shndx < elf.num_sections():
+                            sec = elf.get_section(shndx)
+                            flags = sec["sh_flags"]
+                            stype = sec["sh_type"]
+
+                            alloc = bool(flags & 0x2)
+                            exec_instr = bool(flags & 0x4)
+                            write = bool(flags & 0x1)
+
+                            if alloc:
+                                total_symbols_count += 1
+                                target_file_base = current_file_base
+                                target_file_path = current_file_path
+
+                                if exec_instr:
+                                    matched_cu = find_cu_for_address(st_value)
+                                    if matched_cu:
+                                        target_file_base, target_file_path = matched_cu
+
+                                mod_entry = modules_map[target_file_base]
+                                mod_entry["name"] = target_file_base
+                                if not mod_entry["full_path"] or mod_entry["full_path"] == "[System / Core Library]":
+                                    mod_entry["full_path"] = target_file_path
+
+                                sym_category = "Other"
+                                if exec_instr:
+                                    mod_entry["code"] += st_size
+                                    sym_category = "Code"
+                                elif write:
+                                    if stype == "SHT_NOBITS":
+                                        mod_entry["zi_data"] += st_size
+                                        sym_category = "ZI-Data"
+                                    else:
+                                        mod_entry["rw_data"] += st_size
+                                        sym_category = "RW-Data"
+                                else:
+                                    mod_entry["ro_data"] += st_size
+                                    sym_category = "RO-Data"
+
+                                mod_entry["symbols"].append({
+                                    "name": name,
+                                    "kind": "func" if exec_instr else "object",
+                                    "address": f"0x{st_value:08X}",
+                                    "raw_address": st_value,
+                                    "size": st_size,
+                                    "size_str": format_bytes(st_size),
+                                    "category": sym_category
+                                })
+
+            module_list = []
+            for mod_key, mod_val in modules_map.items():
+                m_code = mod_val["code"]
+                m_ro = mod_val["ro_data"]
+                m_rw = mod_val["rw_data"]
+                m_zi = mod_val["zi_data"]
+                m_rom = m_code + m_ro + m_rw
+                m_ram = m_rw + m_zi
+
+                mod_symbols = sorted(mod_val["symbols"], key=lambda s: s["size"], reverse=True)
+
+                module_list.append({
+                    "name": mod_val["name"] or mod_key,
+                    "full_path": mod_val["full_path"] or mod_key,
+                    "code": m_code,
+                    "ro_data": m_ro,
+                    "rw_data": m_rw,
+                    "zi_data": m_zi,
+                    "rom_total": m_rom,
+                    "ram_total": m_ram,
+                    "code_str": format_bytes(m_code),
+                    "ro_data_str": format_bytes(m_ro),
+                    "rw_data_str": format_bytes(m_rw),
+                    "zi_data_str": format_bytes(m_zi),
+                    "rom_total_str": format_bytes(m_rom),
+                    "ram_total_str": format_bytes(m_ram),
+                    "rom_percent": round((m_rom / rom_total_bytes * 100), 2) if rom_total_bytes > 0 else 0.0,
+                    "ram_percent": round((m_ram / ram_total_bytes * 100), 2) if ram_total_bytes > 0 else 0.0,
+                    "symbols_count": len(mod_symbols),
+                    "symbols": mod_symbols[:max_symbols_per_module]
+                })
+
+            module_list.sort(key=lambda m: m["rom_total"], reverse=True)
+
+            flash_usage_percent = None
+            ram_usage_percent = None
+            flash_free_bytes = None
+            ram_free_bytes = None
+
+            if chip_flash_size and chip_flash_size > 0:
+                flash_usage_percent = round((rom_total_bytes / chip_flash_size) * 100, 2)
+                flash_free_bytes = max(0, chip_flash_size - rom_total_bytes)
+
+            if chip_ram_size and chip_ram_size > 0:
+                ram_usage_percent = round((ram_total_bytes / chip_ram_size) * 100, 2)
+                ram_free_bytes = max(0, chip_ram_size - ram_total_bytes)
+
+            summary = {
+                "code_bytes": code_bytes,
+                "ro_data_bytes": ro_data_bytes,
+                "rw_data_bytes": rw_data_bytes,
+                "zi_data_bytes": zi_data_bytes,
+                "rom_total_bytes": rom_total_bytes,
+                "ram_total_bytes": ram_total_bytes,
+                "code_str": format_bytes(code_bytes),
+                "ro_data_str": format_bytes(ro_data_bytes),
+                "rw_data_str": format_bytes(rw_data_bytes),
+                "zi_data_str": format_bytes(zi_data_bytes),
+                "rom_total_str": format_bytes(rom_total_bytes),
+                "ram_total_str": format_bytes(ram_total_bytes),
+                "rom_code_ratio": round(code_bytes / rom_total_bytes * 100, 1) if rom_total_bytes > 0 else 0.0,
+                "rom_ro_ratio": round(ro_data_bytes / rom_total_bytes * 100, 1) if rom_total_bytes > 0 else 0.0,
+                "rom_rw_ratio": round(rw_data_bytes / rom_total_bytes * 100, 1) if rom_total_bytes > 0 else 0.0,
+                "ram_rw_ratio": round(rw_data_bytes / ram_total_bytes * 100, 1) if ram_total_bytes > 0 else 0.0,
+                "ram_zi_ratio": round(zi_data_bytes / ram_total_bytes * 100, 1) if ram_total_bytes > 0 else 0.0,
+                "chip_flash_size": chip_flash_size,
+                "chip_ram_size": chip_ram_size,
+                "chip_flash_str": format_bytes(chip_flash_size) if chip_flash_size else None,
+                "chip_ram_str": format_bytes(chip_ram_size) if chip_ram_size else None,
+                "flash_usage_percent": flash_usage_percent,
+                "ram_usage_percent": ram_usage_percent,
+                "flash_free_bytes": flash_free_bytes,
+                "ram_free_bytes": ram_free_bytes,
+                "flash_free_str": format_bytes(flash_free_bytes) if flash_free_bytes is not None else None,
+                "ram_free_str": format_bytes(ram_free_bytes) if ram_free_bytes is not None else None,
+                "padding_total": 0,
+                "padding_total_str": "0 B",
+                "parse_status": {"warnings": 0, "inferred": 0, "format": "ELF / DWARF"}
+            }
+
+            # Top metrics
+            all_funcs = []
+            all_objs = []
+            for m in module_list:
+                for s in m.get("symbols", []):
+                    if s.get("type") in ("Function", "Code"):
+                        all_funcs.append(s)
+                    else:
+                        all_objs.append(s)
+            all_funcs.sort(key=lambda x: x.get("size", 0), reverse=True)
+            all_objs.sort(key=lambda x: x.get("size", 0), reverse=True)
+
+            top_metrics = {
+                "max_function": all_funcs[0] if all_funcs else {"name": "N/A", "size": 0, "size_str": "0 B"},
+                "max_object": all_objs[0] if all_objs else {"name": "N/A", "size": 0, "size_str": "0 B"},
+                "total_padding": {"size": 0, "size_str": "0 B"},
+                "heap_stack_gap": {"size": max(0, ram_free_bytes or 0), "size_str": format_bytes(ram_free_bytes or 0), "low_margin": (ram_free_bytes or 0) < 2048}
+            }
+
+            # Treemap
+            flash_treemap = {
+                "name": "FLASH",
+                "size": rom_total_bytes,
+                "categories": [
+                    {
+                        "name": ".text (Code)",
+                        "type": "code",
+                        "color": "#3b82f6",
+                        "size": code_bytes,
+                        "size_str": format_bytes(code_bytes),
+                        "percent": summary["rom_code_ratio"],
+                        "items": [{"name": m["name"], "size": m["code"], "size_str": m["code_str"], "type": "code", "object": m["full_path"]} for m in module_list if m["code"] > 0][:12]
+                    },
+                    {
+                        "name": ".rodata (RO)",
+                        "type": "ro",
+                        "color": "#a855f7",
+                        "size": ro_data_bytes,
+                        "size_str": format_bytes(ro_data_bytes),
+                        "percent": summary["rom_ro_ratio"],
+                        "items": [{"name": m["name"], "size": m["ro_data"], "size_str": m["ro_data_str"], "type": "ro", "object": m["full_path"]} for m in module_list if m["ro_data"] > 0][:12]
+                    },
+                    {
+                        "name": ".data_init (RW)",
+                        "type": "rw",
+                        "color": "#f97316",
+                        "size": rw_data_bytes,
+                        "size_str": format_bytes(rw_data_bytes),
+                        "percent": summary["rom_rw_ratio"],
+                        "items": [{"name": m["name"], "size": m["rw_data"], "size_str": m["rw_data_str"], "type": "rw", "object": m["full_path"]} for m in module_list if m["rw_data"] > 0][:8]
+                    },
+                    {
+                        "name": "Padding",
+                        "type": "padding",
+                        "color": "#64748b",
+                        "size": 0,
+                        "size_str": "0 B",
+                        "percent": 0.0,
+                        "items": []
+                    }
+                ]
+            }
+
+            ram_treemap = {
+                "name": "RAM",
+                "size": ram_total_bytes,
+                "categories": [
+                    {
+                        "name": ".data (RW)",
+                        "type": "rw",
+                        "color": "#f97316",
+                        "size": rw_data_bytes,
+                        "size_str": format_bytes(rw_data_bytes),
+                        "percent": summary["ram_rw_ratio"],
+                        "items": [{"name": m["name"], "size": m["rw_data"], "size_str": m["rw_data_str"], "type": "rw", "object": m["full_path"]} for m in module_list if m["rw_data"] > 0][:8]
+                    },
+                    {
+                        "name": ".bss (ZI)",
+                        "type": "zi",
+                        "color": "#22c55e",
+                        "size": zi_data_bytes,
+                        "size_str": format_bytes(zi_data_bytes),
+                        "percent": summary["ram_zi_ratio"],
+                        "items": [{"name": m["name"], "size": m["zi_data"], "size_str": m["zi_data_str"], "type": "zi", "object": m["full_path"]} for m in module_list if m["zi_data"] > 0][:12]
+                    },
+                    {
+                        "name": "Free Gap (可用)",
+                        "type": "free",
+                        "color": "#1e293b",
+                        "size": max(0, ram_free_bytes or 0),
+                        "size_str": format_bytes(ram_free_bytes or 0),
+                        "percent": round(max(0, ram_free_bytes or 0) / (chip_ram_size or 65536) * 100, 1),
+                        "items": [{"name": "未分配自由 SRAM", "size": max(0, ram_free_bytes or 0), "size_str": format_bytes(ram_free_bytes or 0), "type": "free", "object": "System RAM"}]
+                    }
+                ]
+            }
+
+            # Linear memory
+            flash_blocks = [
+                {"name": s["name"], "start": s["address"], "size": s["size"], "size_str": s["size_str"], "type": s["category"].lower().replace("-", "_"), "section": s["name"], "object": s.get("object", "")}
+                for s in sections_info if s.get("target") in ("ROM", "ROM+RAM") and s.get("size", 0) > 0
+            ]
+            ram_blocks = [
+                {"name": ".data (RW)", "type": "rw", "size": rw_data_bytes, "size_str": format_bytes(rw_data_bytes), "growth": "none"},
+                {"name": ".bss (ZI)", "type": "zi", "size": zi_data_bytes, "size_str": format_bytes(zi_data_bytes), "growth": "none"},
+                {"name": f"Free Gap ({format_bytes(ram_free_bytes or 0)})", "type": "free", "size": max(0, ram_free_bytes or 0), "size_str": format_bytes(ram_free_bytes or 0), "warning": (ram_free_bytes or 0) < 2048, "growth": "none"}
+            ]
+
+            hierarchy_tree = [
+                {
+                    "id": "flash",
+                    "label": "FLASH",
+                    "size": rom_total_bytes,
+                    "size_str": format_bytes(rom_total_bytes),
+                    "type": "region",
+                    "children": [
+                        {"id": "flash_code", "label": ".text (代码)", "size": code_bytes, "size_str": format_bytes(code_bytes), "type": "code"},
+                        {"id": "flash_ro", "label": ".rodata (只读数据)", "size": ro_data_bytes, "size_str": format_bytes(ro_data_bytes), "type": "ro"},
+                        {"id": "flash_rw_init", "label": ".data_init (数据初值)", "size": rw_data_bytes, "size_str": format_bytes(rw_data_bytes), "type": "rw"}
+                    ]
+                },
+                {
+                    "id": "ram",
+                    "label": "RAM",
+                    "size": ram_total_bytes,
+                    "size_str": format_bytes(ram_total_bytes),
+                    "type": "region",
+                    "children": [
+                        {"id": "ram_data", "label": ".data (全局变量)", "size": rw_data_bytes, "size_str": format_bytes(rw_data_bytes), "type": "rw"},
+                        {"id": "ram_bss", "label": ".bss (零初始化)", "size": zi_data_bytes, "size_str": format_bytes(zi_data_bytes), "type": "zi"},
+                        {"id": "ram_free", "label": "Free Gap (空闲)", "size": max(0, ram_free_bytes or 0), "size_str": format_bytes(ram_free_bytes or 0), "type": "free"}
+                    ]
+                }
+            ]
+
+            trim_process_memory()
+
+            return {
+                "file_path": file_path,
+                "file_name": file_name,
+                "file_size": file_size,
+                "file_size_str": format_bytes(file_size),
+                "toolchain": {
+                    "type": toolchain_type,
+                    "name": toolchain_name,
+                    "raw_producer": raw_producer
+                },
+                "architecture": arch_name,
+                "summary": summary,
+                "top_metrics": top_metrics,
+                "linear_memory": {
+                    "flash_base": "0x00000000",
+                    "flash_end": f"0x{rom_total_bytes:08X}",
+                    "flash_blocks": flash_blocks[:60],
+                    "ram_base": "0x20000000",
+                    "ram_end": f"0x{(0x20000000 + (chip_ram_size or 65536)):08X}",
+                    "ram_blocks": ram_blocks
+                },
+                "treemap": {
+                    "flash": flash_treemap,
+                    "ram": ram_treemap
+                },
+                "hierarchy": hierarchy_tree,
+                "sections": sections_info,
+                "modules": module_list,
+                "total_modules_count": len(module_list),
+                "total_symbols_count": total_symbols_count
+            }
 
 
 class AxfSymbolParser:
@@ -808,6 +1466,9 @@ class JScopeController:
     _client_sock = None
     _tcp_port = 0
     _interval_ms = 20
+    _interval_us = 20000
+    _interval_sec = 0.02
+    _swd_frequency_hz = 10_000_000
     _vars = []  # [{name, address, size, type}]
 
     _mode = None
@@ -817,7 +1478,8 @@ class JScopeController:
     @classmethod
     def start_sampling(cls, variables: List[Dict[str, Any]], interval_ms: int = 20,
                        probe_id: Optional[str] = None, target_override: Optional[str] = None,
-                       probe_type: Optional[str] = None) -> Dict[str, Any]:
+                       probe_type: Optional[str] = None, interval_us: Optional[int] = None,
+                       swd_frequency_hz: Optional[int] = None) -> Dict[str, Any]:
         with cls._lock:
             if cls._running:
                 cls.stop_sampling()
@@ -826,7 +1488,16 @@ class JScopeController:
                 raise ValueError("No variables specified for JScope sampling")
 
             cls._vars = variables
-            cls._interval_ms = max(5, interval_ms)
+            if interval_us is not None and interval_us > 0:
+                cls._interval_us = max(1, interval_us)
+                cls._interval_sec = cls._interval_us / 1_000_000.0
+                cls._interval_ms = max(1, int(round(cls._interval_us / 1000.0)))
+            else:
+                cls._interval_ms = max(1, interval_ms)
+                cls._interval_sec = cls._interval_ms / 1000.0
+                cls._interval_us = cls._interval_ms * 1000
+
+            cls._swd_frequency_hz = int(swd_frequency_hz) if swd_frequency_hz and swd_frequency_hz > 0 else 10_000_000
 
             # Create TCP server
             cls._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -853,27 +1524,23 @@ class JScopeController:
                         cls._jlink.open()
                     cls._jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
                     cls._jlink.connect(target_override or "Cortex-M4")
+                    # Set J-Link SWD clock frequency in kHz
+                    speed_khz = max(100, cls._swd_frequency_hz // 1000)
+                    try:
+                        cls._jlink.set_speed(speed_khz)
+                        logger.info(f"JScope J-Link SWD speed set to {speed_khz} kHz ({cls._swd_frequency_hz} Hz)")
+                    except Exception as e:
+                        logger.warning(f"Could not set J-Link speed: {e}")
                     cls._mode = "jlink"
                 except Exception as e:
                     logger.warning(f"JScope JLink connect failed, fallback to PyOCD: {e}")
-                    kwargs = {"auto_open": True}
-                    if probe_id:
-                        kwargs["unique_id"] = probe_id
-                    if target_override:
-                        kwargs["target_override"] = target_override
-                    cls._session = ConnectHelper.session_with_chosen_probe(**kwargs)
+                    cls._session = PyOCDController._create_session(probe_id, target_override, auto_open=True, frequency=cls._swd_frequency_hz)
                     cls._session.open()
                     cls._mode = "pyocd"
             else:
-                if not PYOCD_AVAILABLE:
-                    raise RuntimeError("PyOCD not available for sampling")
-                kwargs = {"auto_open": True}
-                if probe_id:
-                    kwargs["unique_id"] = probe_id
-                if target_override:
-                    kwargs["target_override"] = target_override
-                cls._session = ConnectHelper.session_with_chosen_probe(**kwargs)
+                cls._session = PyOCDController._create_session(probe_id, target_override, auto_open=True, frequency=cls._swd_frequency_hz)
                 cls._session.open()
+                logger.info(f"JScope PyOCD SWD frequency set to {cls._swd_frequency_hz} Hz")
                 cls._mode = "pyocd"
 
             cls._thread = threading.Thread(target=cls._sample_worker_loop, daemon=True)
@@ -883,13 +1550,45 @@ class JScopeController:
                 "status": "started",
                 "tcp_port": cls._tcp_port,
                 "interval_ms": cls._interval_ms,
+                "interval_us": cls._interval_us,
+                "swd_frequency_hz": cls._swd_frequency_hz,
                 "mode": cls._mode,
                 "variable_count": len(cls._vars)
             }
 
+    @staticmethod
+    def _unpack_val(raw_bytes: bytes, size: int, vtype: str) -> Any:
+        if not raw_bytes or len(raw_bytes) < size:
+            return 0
+        try:
+            if vtype == "float32" and size == 4:
+                return struct.unpack("<f", raw_bytes[:4])[0]
+            elif vtype == "float64" and size == 8:
+                return struct.unpack("<d", raw_bytes[:8])[0]
+            elif vtype == "int32" and size == 4:
+                return struct.unpack("<i", raw_bytes[:4])[0]
+            elif vtype == "uint32" and size == 4:
+                return struct.unpack("<I", raw_bytes[:4])[0]
+            elif vtype == "int16" and size >= 2:
+                return struct.unpack("<h", raw_bytes[:2])[0]
+            elif vtype == "uint16" and size >= 2:
+                return struct.unpack("<H", raw_bytes[:2])[0]
+            elif vtype == "int64" and size >= 8:
+                return struct.unpack("<q", raw_bytes[:8])[0]
+            elif vtype == "uint64" and size >= 8:
+                return struct.unpack("<Q", raw_bytes[:8])[0]
+            elif vtype == "int8" and size >= 1:
+                return struct.unpack("<b", raw_bytes[:1])[0]
+            elif vtype == "uint8" and size >= 1:
+                return struct.unpack("<B", raw_bytes[:1])[0]
+            else:
+                return struct.unpack("<I", raw_bytes[:4])[0] if len(raw_bytes) >= 4 else int.from_bytes(raw_bytes, "little")
+        except Exception:
+            return 0
+
     @classmethod
     def _sample_worker_loop(cls):
-        logger.info(f"JScope sampling TCP bridge listening on port {cls._tcp_port}")
+        logger.info(f"JScope sampling TCP bridge listening on port {cls._tcp_port} (Period: {cls._interval_us}us)")
         cls._server_sock.settimeout(3.0)
 
         client = None
@@ -897,6 +1596,7 @@ class JScopeController:
             try:
                 client, addr = cls._server_sock.accept()
                 logger.info(f"JScope client connected from {addr}")
+                client.setblocking(False)
                 cls._client_sock = client
                 break
             except socket.timeout:
@@ -909,72 +1609,107 @@ class JScopeController:
             cls.stop_sampling()
             return
 
-        interval_sec = cls._interval_ms / 1000.0
+        interval_sec = cls._interval_sec
+        buffer_chunks = []
+        last_flush_time = time.perf_counter()
+        next_sample_time = time.perf_counter()
+
+        # Cache variables and mode pointers
+        mode = cls._mode
+        jlink = cls._jlink
+        target = cls._session.board.target if cls._session else None
+
+        processed_vars = []
+        for v in cls._vars:
+            name = v["name"]
+            addr = v["raw_address"] if "raw_address" in v else int(v["address"], 16)
+            size = int(v.get("size", 4))
+            vtype = v.get("type", "int32")
+            processed_vars.append((name, addr, size, vtype))
 
         while cls._running:
             try:
-                start_time = time.time()
-                # Read all watched variables
                 line_parts = []
 
-                for v in cls._vars:
-                    name = v["name"]
-                    addr = v["raw_address"] if "raw_address" in v else int(v["address"], 16)
-                    size = int(v.get("size", 4))
-                    vtype = v.get("type", "int32")
-
-                    raw_bytes = None
+                # Fast read watched variables
+                for name, addr, size, vtype in processed_vars:
+                    val = 0
                     try:
-                        if cls._mode == "jlink" and cls._jlink:
-                            raw_bytes = bytes(cls._jlink.memory_read8(addr, size))
-                        elif cls._mode == "pyocd" and cls._session:
-                            target = cls._session.board.target
-                            raw_bytes = bytes(target.read_memory_block8(addr, size))
+                        if mode == "jlink" and jlink:
+                            if size == 4 and vtype in ("uint32", "int32", "float32"):
+                                val_u32 = jlink.memory_read32(addr, 1)[0]
+                                if vtype == "float32":
+                                    val = struct.unpack("<f", struct.pack("<I", val_u32))[0]
+                                elif vtype == "int32":
+                                    val = struct.unpack("<i", struct.pack("<I", val_u32))[0]
+                                else:
+                                    val = val_u32
+                            else:
+                                raw_bytes = bytes(jlink.memory_read8(addr, size))
+                                val = cls._unpack_val(raw_bytes, size, vtype)
+                        elif mode == "pyocd" and target:
+                            if size == 4 and vtype in ("uint32", "int32", "float32"):
+                                val_u32 = target.read32(addr)
+                                if vtype == "float32":
+                                    val = struct.unpack("<f", struct.pack("<I", val_u32))[0]
+                                elif vtype == "int32":
+                                    val = struct.unpack("<i", struct.pack("<I", val_u32))[0]
+                                else:
+                                    val = val_u32
+                            else:
+                                raw_bytes = bytes(target.read_memory_block8(addr, size))
+                                val = cls._unpack_val(raw_bytes, size, vtype)
                     except Exception as err:
                         logger.debug(f"Read var {name} failed: {err}")
-
-                    if raw_bytes and len(raw_bytes) >= size:
                         val = 0
-                        try:
-                            if vtype == "float32" and size == 4:
-                                val = struct.unpack("<f", raw_bytes[:4])[0]
-                            elif vtype == "float64" and size == 8:
-                                val = struct.unpack("<d", raw_bytes[:8])[0]
-                            elif vtype == "int32" and size == 4:
-                                val = struct.unpack("<i", raw_bytes[:4])[0]
-                            elif vtype == "uint32" and size == 4:
-                                val = struct.unpack("<I", raw_bytes[:4])[0]
-                            elif vtype == "int16" and size >= 2:
-                                val = struct.unpack("<h", raw_bytes[:2])[0]
-                            elif vtype == "uint16" and size >= 2:
-                                val = struct.unpack("<H", raw_bytes[:2])[0]
-                            elif vtype == "int8" and size >= 1:
-                                val = struct.unpack("<b", raw_bytes[:1])[0]
-                            elif vtype == "uint8" and size >= 1:
-                                val = struct.unpack("<B", raw_bytes[:1])[0]
-                            else:
-                                val = struct.unpack("<I", raw_bytes[:4])[0]
-                        except Exception:
-                            val = 0
 
-                        # Format as Telemetry protocol key:value
-                        if isinstance(val, float):
-                            line_parts.append(f"{name}:{val:.3f}")
-                        else:
-                            line_parts.append(f"{name}:{val}")
+                    if isinstance(val, float):
+                        line_parts.append(f"{name}:{val:.3f}")
+                    else:
+                        line_parts.append(f"{name}:{val}")
 
                 if line_parts:
-                    # e.g. "motor_speed:1200 temp:38.5\n"
-                    telemetry_line = " ".join(line_parts) + "\n"
-                    client.sendall(telemetry_line.encode("utf-8"))
+                    buffer_chunks.append(" ".join(line_parts) + "\n")
 
-                elapsed = time.time() - start_time
-                remain = interval_sec - elapsed
-                if remain > 0:
-                    time.sleep(remain)
+                # Batched flushing to prevent socket bottleneck at high sampling rates
+                now_perf = time.perf_counter()
+                if (now_perf - last_flush_time >= 0.005) or len(buffer_chunks) >= 50 or interval_sec >= 0.005:
+                    if buffer_chunks:
+                        out_data = "".join(buffer_chunks).encode("utf-8")
+                        try:
+                            client.sendall(out_data)
+                        except (BlockingIOError, socket.error):
+                            pass
+                        buffer_chunks.clear()
+                    last_flush_time = now_perf
+
+                # Microsecond-precision pacing
+                next_sample_time += interval_sec
+                current_time = time.perf_counter()
+                sleep_needed = next_sample_time - current_time
+
+                if sleep_needed > 0.002:
+                    time.sleep(sleep_needed - 0.001)
+                    while time.perf_counter() < next_sample_time:
+                        pass
+                elif sleep_needed > 0:
+                    while time.perf_counter() < next_sample_time:
+                        pass
+                else:
+                    # Catch-up if fallen behind
+                    if -sleep_needed > 2 * interval_sec:
+                        next_sample_time = current_time
+
             except Exception as e:
                 logger.error(f"JScope sampling loop error: {e}")
                 break
+
+        # Flush remaining buffer before exiting
+        if buffer_chunks and client:
+            try:
+                client.sendall("".join(buffer_chunks).encode("utf-8"))
+            except Exception:
+                pass
 
         cls.stop_sampling()
 
@@ -1064,13 +1799,15 @@ MCP_TOOLS = [
     },
     {
         "name": "flash_firmware",
-        "description": "通过 SWD 协议将本地固件文件 (.bin/.hex/.elf) 烧录至目标芯片 Flash",
+        "description": "通过 SWD 协议将本地固件文件 (.bin/.hex/.elf) 烧录至目标芯片 Flash (支持外部 CMSIS-Pack 下载算法)",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "本地固件文件的绝对物理路径"},
-                "target_override": {"type": "string", "description": "目标单片机芯片型号 (如 stm32f103c8)"},
-                "probe_id": {"type": "string", "description": "探针 ID"}
+                "target_override": {"type": "string", "description": "目标单片机芯片型号 (如 gd32f403rc / stm32f103c8)"},
+                "probe_id": {"type": "string", "description": "探针 ID"},
+                "pack_path": {"type": "string", "description": "CMSIS-Pack (.pack) 文件绝对物理路径 (用于加载芯片专有 Flash 下载算法)"},
+                "frequency": {"type": "integer", "description": "SWD 烧录工作时钟频率 (Hz，如 10000000)"}
             },
             "required": ["file_path"]
         }
@@ -1089,12 +1826,13 @@ MCP_TOOLS = [
     },
     {
         "name": "diagnose_hardfault",
-        "description": "自动化全流程分析 Cortex-M 硬件硬故障 (HardFault)，提取崩溃现场并输出 AI 诊断建议",
+        "description": "自动化全流程分析 Cortex-M 硬件硬故障 (HardFault)，提取崩溃现场、回溯双栈调用链、解析源文件行并输出 AI 诊断建议",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "probe_id": {"type": "string", "description": "探针 ID"},
-                "target_override": {"type": "string", "description": "目标芯片型号"}
+                "target_override": {"type": "string", "description": "目标芯片型号"},
+                "axf_path": {"type": "string", "description": "固件 ELF/AXF 文件绝对路径 (用于反汇编、解析调用栈符号与源码行)"}
             }
         }
     },
@@ -1134,12 +1872,14 @@ MCP_TOOLS = [
     },
     {
         "name": "start_jscope_sampling",
-        "description": "启动后台 SWD 高速无侵入周期变量采样 (类似 J-Scope)，通过本地 TCP 桥接输出波形数据",
+        "description": "启动后台 SWD 高速无侵入周期变量采样 (类似 J-Scope)，支持微秒至毫秒级周期 (最高1MHz)，通过本地 TCP 桥接输出波形数据",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "variables": {"type": "array", "description": "待监视变量列表"},
                 "interval_ms": {"type": "integer", "description": "采样周期毫秒 (如 20)", "default": 20},
+                "interval_us": {"type": "integer", "description": "微秒级采样周期 (1 至 1000000 µs，优先于 interval_ms)"},
+                "swd_frequency_hz": {"type": "integer", "description": "SWD 接口时钟频率 (Hz，如 10000000 代表 10MHz)", "default": 10000000},
                 "probe_id": {"type": "string", "description": "探针 ID"},
                 "target_override": {"type": "string", "description": "目标芯片型号"},
                 "probe_type": {"type": "string", "description": "探针类型: 'jlink' 或 'daplink'"}
@@ -1197,9 +1937,119 @@ MCP_TOOLS = [
             },
             "required": ["address", "file_path"]
         }
+    },
+    {
+        "name": "analyze_firmware_resources",
+        "description": "深度分析嵌入式固件 (.axf/.elf) 的 Flash/ROM 与 SRAM 资源占用情况。根据 GCC、ARMCC、ARMClang 等不同编译器输出规则，提取总 Code/RO/RW/ZI 内存、各模块源文件及函数的资源占用与占比，并支持目标芯片容量评估与优化诊断",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "本地 .axf 或 .elf 固件文件的绝对物理路径"},
+                "chip_flash_size": {"type": "integer", "description": "目标芯片 Flash 容量 (可选，字节数，如 524288 表示 512KB)"},
+                "chip_ram_size": {"type": "integer", "description": "目标芯片 SRAM 容量 (可选，字节数，如 65536 表示 64KB)"},
+                "max_symbols_per_module": {"type": "integer", "description": "每个模块返回的最大符号数 (默认 25)", "default": 25}
+            },
+            "required": ["file_path"]
+        }
+    },
+    {
+        "name": "svd_get_devices",
+        "description": "获取已加载 CMSIS-Pack 中定义的所有芯片型号 (ING91800, ING91600, ING2000 等) 及其内存基地址与容量",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "svd_get_peripherals",
+        "description": "解析并返回指定芯片的 SVD 外设列表 (外设名称、基地址、描述、组名)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "device_name": {"type": "string", "description": "芯片型号，如 ING91800"},
+                "custom_svd_path": {"type": "string", "description": "自定义外部 .svd 物理路径 (可选)"}
+            },
+            "required": ["device_name"]
+        }
+    },
+    {
+        "name": "svd_get_registers",
+        "description": "获取指定外设的全部寄存器定义，包含偏移、绝对地址、访问权限 (RO/RW/WO)、复位值及 32 位位域 (Fields)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "device_name": {"type": "string", "description": "芯片型号"},
+                "peripheral_name": {"type": "string", "description": "外设名称，如 UART0"},
+                "custom_svd_path": {"type": "string", "description": "自定义外部 .svd 物理路径 (可选)"}
+            },
+            "required": ["device_name", "peripheral_name"]
+        }
+    },
+    {
+        "name": "svd_read_register",
+        "description": "通过 SWD 硬件读取目标单片机指定 SVD 寄存器 32 位值",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": "integer", "description": "寄存器物理绝对地址"},
+                "probe_id": {"type": "string", "description": "探针 ID"},
+                "target_override": {"type": "string", "description": "目标芯片型号"}
+            },
+            "required": ["address"]
+        }
+    },
+    {
+        "name": "svd_read_all_registers",
+        "description": "批量读取外设的一组寄存器 32 位值",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "addresses": {"type": "array", "items": {"type": "integer"}, "description": "寄存器绝对地址列表"},
+                "probe_id": {"type": "string", "description": "探针 ID"},
+                "target_override": {"type": "string", "description": "目标芯片型号"}
+            },
+            "required": ["addresses"]
+        }
+    },
+    {
+        "name": "svd_write_register",
+        "description": "通过 SWD 硬件向目标单片机指定 SVD 寄存器写入 32 位值",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": "integer", "description": "寄存器物理绝对地址"},
+                "value": {"type": "integer", "description": "32位无符号数值"},
+                "probe_id": {"type": "string", "description": "探针 ID"},
+                "target_override": {"type": "string", "description": "目标芯片型号"}
+            },
+            "required": ["address", "value"]
+        }
+    },
+    {
+        "name": "svd_write_field",
+        "description": "按位域 (Bitfield) 安全修改硬件寄存器并回写 (Read-Modify-Write)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": "integer", "description": "寄存器物理绝对地址"},
+                "bit_offset": {"type": "integer", "description": "位域起始偏移 (0-31)"},
+                "bit_width": {"type": "integer", "description": "位域宽度 (1-32)"},
+                "field_value": {"type": "integer", "description": "欲写入的位域数值"},
+                "probe_id": {"type": "string", "description": "探针 ID"},
+                "target_override": {"type": "string", "description": "目标芯片型号"}
+            },
+            "required": ["address", "bit_offset", "bit_width", "field_value"]
+        }
+    },
+    {
+        "name": "svd_import_pack",
+        "description": "动态导入 CMSIS-Pack (.pack) 文件并解析其内置的芯片、Flash 算法与 SVD 外设定义",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pack_path": {"type": "string", "description": "CMSIS-Pack 文件完整物理路径 (.pack)"}
+            },
+            "required": ["pack_path"]
+        }
     }
 ]
-
 
 MCP_SERVER_NAME = "embedded-hil-debugger"
 MCP_SERVER_VERSION = "1.0.0"
@@ -1222,6 +2072,15 @@ DIRECT_TOOL_METHODS = [
     "parse_axf_symbols",
     "start_jscope_sampling",
     "stop_jscope_sampling",
+    "analyze_firmware_resources",
+    "svd_get_devices",
+    "svd_get_peripherals",
+    "svd_get_registers",
+    "svd_read_register",
+    "svd_read_all_registers",
+    "svd_write_register",
+    "svd_write_field",
+    "svd_import_pack",
 ]
 
 
@@ -1282,18 +2141,29 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         return PyOCDController.load_file_to_memory(address, file_path, probe_id, target_override)
     elif name == "flash_firmware":
         file_path = arguments["file_path"]
-        return PyOCDController.flash_firmware(file_path, target_override, probe_id)
+        pack_path = arguments.get("pack_path")
+        freq = arguments.get("frequency")
+        if isinstance(freq, str):
+            freq = int(freq, 16 if freq.startswith("0x") else 10)
+        return PyOCDController.flash_firmware(file_path, target_override, probe_id, pack_path=pack_path, frequency=freq)
     elif name == "reset_target":
         halt = bool(arguments.get("halt", False))
         return PyOCDController.reset_target(halt, probe_id, target_override)
     elif name == "diagnose_hardfault":
-        return PyOCDController.diagnose_hardfault(probe_id, target_override)
+        axf_path = arguments.get("axf_path")
+        return PyOCDController.diagnose_hardfault(probe_id, target_override, axf_path)
     elif name == "start_rtt":
         probe_type = arguments.get("probe_type")
         block_addr = arguments.get("block_address")
         if isinstance(block_addr, str):
             block_addr = int(block_addr, 16 if block_addr.startswith("0x") else 10)
-        return RTTController.start_rtt(probe_id, target_override, block_addr, probe_type)
+        ram_start = arguments.get("ram_start")
+        if isinstance(ram_start, str):
+            ram_start = int(ram_start, 16 if ram_start.startswith("0x") else 10)
+        ram_size = arguments.get("ram_size")
+        if isinstance(ram_size, str):
+            ram_size = int(ram_size, 16 if ram_size.startswith("0x") else 10)
+        return RTTController.start_rtt(probe_id, target_override, block_addr, probe_type, ram_start=ram_start, ram_size=ram_size)
     elif name == "stop_rtt":
         return RTTController.stop_rtt()
     elif name == "parse_axf_symbols":
@@ -1304,10 +2174,76 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
     elif name == "start_jscope_sampling":
         variables = arguments["variables"]
         interval = int(arguments.get("interval_ms", 20))
+        interval_us = arguments.get("interval_us")
+        if interval_us is not None:
+            interval_us = int(interval_us)
+        swd_freq = arguments.get("swd_frequency_hz")
+        if swd_freq is not None:
+            swd_freq = int(swd_freq)
         probe_type = arguments.get("probe_type")
-        return JScopeController.start_sampling(variables, interval, probe_id, target_override, probe_type)
+        return JScopeController.start_sampling(variables, interval, probe_id, target_override, probe_type,
+                                              interval_us=interval_us, swd_frequency_hz=swd_freq)
     elif name == "stop_jscope_sampling":
         return JScopeController.stop_sampling()
+    elif name == "analyze_firmware_resources":
+        file_path = arguments["file_path"]
+        chip_flash = arguments.get("chip_flash_size")
+        if isinstance(chip_flash, str):
+            chip_flash = int(chip_flash, 16 if chip_flash.startswith("0x") else 10)
+        chip_ram = arguments.get("chip_ram_size")
+        if isinstance(chip_ram, str):
+            chip_ram = int(chip_ram, 16 if chip_ram.startswith("0x") else 10)
+        max_syms = int(arguments.get("max_symbols_per_module", 25))
+        return FirmwareResourceAnalyzer.analyze(file_path, chip_flash, chip_ram, max_syms)
+    elif name == "svd_get_devices":
+        from svd_manager import SvdManager
+        return SvdManager.list_devices()
+    elif name == "svd_get_peripherals":
+        from svd_manager import SvdManager
+        device_name = arguments["device_name"]
+        custom_svd = arguments.get("custom_svd_path")
+        return SvdManager.get_peripherals(device_name, custom_svd)
+    elif name == "svd_get_registers":
+        from svd_manager import SvdManager
+        device_name = arguments["device_name"]
+        peripheral_name = arguments["peripheral_name"]
+        custom_svd = arguments.get("custom_svd_path")
+        return SvdManager.get_registers(device_name, peripheral_name, custom_svd)
+    elif name == "svd_read_register":
+        from svd_manager import SvdManager
+        address = arguments["address"]
+        if isinstance(address, str):
+            address = int(address, 16 if address.startswith("0x") else 10)
+        return SvdManager.read_register(address, probe_id, target_override)
+    elif name == "svd_read_all_registers":
+        from svd_manager import SvdManager
+        addresses = arguments["addresses"]
+        int_addrs = [int(a, 16 if isinstance(a, str) and a.startswith("0x") else 10) for a in addresses]
+        return SvdManager.read_all_registers(int_addrs, probe_id, target_override)
+    elif name == "svd_write_register":
+        from svd_manager import SvdManager
+        address = arguments["address"]
+        if isinstance(address, str):
+            address = int(address, 16 if address.startswith("0x") else 10)
+        value = arguments["value"]
+        if isinstance(value, str):
+            value = int(value, 16 if value.startswith("0x") else 10)
+        return SvdManager.write_register(address, value, probe_id, target_override)
+    elif name == "svd_write_field":
+        from svd_manager import SvdManager
+        address = arguments["address"]
+        if isinstance(address, str):
+            address = int(address, 16 if address.startswith("0x") else 10)
+        bit_offset = int(arguments["bit_offset"])
+        bit_width = int(arguments["bit_width"])
+        field_val = arguments["field_value"]
+        if isinstance(field_val, str):
+            field_val = int(field_val, 16 if field_val.startswith("0x") else 10)
+        return SvdManager.write_field(address, bit_offset, bit_width, field_val, probe_id, target_override)
+    elif name == "svd_import_pack":
+        from svd_manager import SvdManager
+        pack_path = arguments["pack_path"]
+        return SvdManager.import_pack(pack_path)
     else:
         raise ValueError(f"Unknown MCP tool: {name}")
 

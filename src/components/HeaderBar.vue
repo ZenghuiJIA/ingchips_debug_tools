@@ -19,7 +19,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'connect', port: string, baudRate: number): void;
+  (e: 'connect', port: string, baudRate: number, ramStart?: number, ramSize?: number): void;
   (e: 'disconnect'): void;
   (e: 'resetTriggered', seq: string): void;
 }>();
@@ -28,6 +28,19 @@ const ports = ref<PortInfo[]>([]);
 const selectedPort = ref<string>('');
 const selectedBaud = ref<number>(115200);
 const baudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+
+// RTT RAM Scan Range presets
+const rttRamPresets = [
+  { label: 'SRAM 0x20000000 (128KB 常用M4/M3)', start: 0x20000000, size: 0x20000 },
+  { label: 'SRAM 0x20000000 (64KB 常用M0/M3)', start: 0x20000000, size: 0x10000 },
+  { label: 'SRAM 0x20000000 (256KB 大RAM)', start: 0x20000000, size: 0x40000 },
+  { label: 'SRAM 0x20000000 (512KB 高性能M7/M4)', start: 0x20000000, size: 0x80000 },
+  { label: 'DTCM 0x20000000 (128KB Cortex-M7)', start: 0x20000000, size: 0x20000 },
+  { label: 'ITCM/RAM 0x00000000 (64KB Cortex-M0)', start: 0x00000000, size: 0x10000 },
+  { label: 'AXI-SRAM 0x24000000 (512KB H7系列)', start: 0x24000000, size: 0x80000 },
+];
+const selectedRttRamPreset = ref<number>(0x20000000);
+const selectedRttRamSize = ref<number>(0x20000);
 
 const dtrState = ref<boolean>(false);
 const rtsState = ref<boolean>(false);
@@ -119,7 +132,11 @@ function handleToggleConnect() {
     emit('disconnect');
   } else {
     if (!selectedPort.value) return;
-    emit('connect', selectedPort.value, Number(selectedBaud.value));
+    if (selectedPort.value.startsWith('RTT')) {
+      emit('connect', selectedPort.value, Number(selectedBaud.value), selectedRttRamPreset.value, selectedRttRamSize.value);
+    } else {
+      emit('connect', selectedPort.value, Number(selectedBaud.value));
+    }
   }
 }
 
@@ -248,9 +265,22 @@ onUnmounted(() => {
       </select>
       <div
         v-else
-        class="px-2.5 py-1.5 rounded-md bg-purple-950/60 border border-purple-800/60 text-purple-300 text-xs font-mono font-semibold"
+        class="flex items-center gap-1.5"
       >
-        SWD 内存高速通道
+        <select
+          v-model="selectedRttRamPreset"
+          @change="(e: any) => {
+            const found = rttRamPresets.find(p => p.start === Number(e.target.value));
+            if (found) selectedRttRamSize = found.size;
+          }"
+          class="bg-purple-950/70 border border-purple-800 text-xs text-purple-200 py-1.5 px-2.5 rounded-md outline-none cursor-pointer font-mono"
+          :disabled="isConnected"
+          title="SWD RTT 通道 RAM 扫描基地址与范围"
+        >
+          <option v-for="p in rttRamPresets" :key="p.label" :value="p.start" class="bg-zinc-900 text-zinc-200">
+            ⚡ {{ p.label }}
+          </option>
+        </select>
       </div>
 
       <!-- Connect/Disconnect Button -->

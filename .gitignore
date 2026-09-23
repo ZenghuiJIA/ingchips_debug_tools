@@ -64,9 +64,7 @@ src-tauri/gen/schemas/
 # (Source code is tracked; compiled binaries go to releases)
 # --------------------------------------------------------
 *.exe
-bin/*.exe
-bin/*.dll
-bin/*.log
+bin/
 release/
 *.zip
 *.tar.gz
@@ -124,6 +122,8 @@ crash.log
 app_debug.log
 EBWebView/
 *.bak
+app_debug.log
+crash.log
 
 # --------------------------------------------------------
 # 7. IDE, Editor & Workspace Configs

@@ -130,6 +130,19 @@ pub fn run() {
             commands::jscope_parse_axf,
             commands::jscope_start_sampling,
             commands::jscope_stop_sampling,
+            commands::analyze_firmware_resources,
+            commands::pick_firmware_file,
+            commands::pick_pack_file,
+            commands::svd_import_pack,
+            commands::svd_get_devices,
+            commands::svd_get_peripherals,
+            commands::svd_get_registers,
+            commands::svd_read_register,
+            commands::svd_read_all_registers,
+            commands::svd_write_register,
+            commands::svd_write_field,
+            commands::set_waveform_protocol,
+            commands::clear_waveform_protocol,
         ])
         .build(tauri::generate_context!()) {
             Ok(a) => {

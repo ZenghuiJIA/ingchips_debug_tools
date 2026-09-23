@@ -27,6 +27,16 @@ pub struct SerialRxPayload {
     pub timestamp_ms: u64,
 }
 
+use super::protocol_engine::{ProtocolConfig, ProtocolEngine};
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaveformPointsPayload {
+    pub port: String,
+    pub points: Vec<HashMap<String, f64>>,
+    pub timestamp_ms: u64,
+}
+
 pub struct SerialManager {
     port: Arc<Mutex<Option<Box<dyn SerialPort>>>>,
     rtt_stream: Arc<Mutex<Option<TcpStream>>>,
@@ -35,6 +45,7 @@ pub struct SerialManager {
     is_running: Arc<AtomicBool>,
     pub dtr_state: Arc<AtomicBool>,
     pub rts_state: Arc<AtomicBool>,
+    pub protocol_engine: Arc<Mutex<Option<ProtocolEngine>>>,
 }
 
 impl SerialManager {
@@ -47,7 +58,25 @@ impl SerialManager {
             is_running: Arc::new(AtomicBool::new(false)),
             dtr_state: Arc::new(AtomicBool::new(false)),
             rts_state: Arc::new(AtomicBool::new(false)),
+            protocol_engine: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_protocol_config(&self, config_json: &str) -> Result<(), String> {
+        let config: ProtocolConfig = serde_json::from_str(config_json)
+            .map_err(|e| format!("Invalid protocol JSON config: {}", e))?;
+        let mut engine_guard = self.protocol_engine.lock().unwrap();
+        if let Some(engine) = engine_guard.as_mut() {
+            engine.update_config(config);
+        } else {
+            *engine_guard = Some(ProtocolEngine::new(config));
+        }
+        Ok(())
+    }
+
+    pub fn clear_protocol(&self) {
+        let mut engine_guard = self.protocol_engine.lock().unwrap();
+        *engine_guard = None;
     }
 
     pub fn list_ports() -> Vec<PortInfo> {
@@ -175,6 +204,7 @@ impl SerialManager {
         self.is_running.store(true, Ordering::SeqCst);
         let is_running_clone = Arc::clone(&self.is_running);
         let current_port_name = port_name.to_string();
+        let protocol_engine_clone = Arc::clone(&self.protocol_engine);
 
         // Background reader thread for RTT TCP stream
         std::thread::spawn(move || {
@@ -186,7 +216,30 @@ impl SerialManager {
             while is_running_clone.load(Ordering::SeqCst) {
                 match reader.read(&mut read_buf) {
                     Ok(n) if n > 0 => {
-                        batch_buffer.extend_from_slice(&read_buf[..n]);
+                        let incoming = &read_buf[..n];
+                        // If protocol engine is active, parse into waveform points
+                        let mut parsed_points = Vec::new();
+                        {
+                            if let Ok(mut engine_opt) = protocol_engine_clone.lock() {
+                                if let Some(engine) = engine_opt.as_mut() {
+                                    parsed_points = engine.parse_chunk(incoming);
+                                }
+                            }
+                        }
+                        if !parsed_points.is_empty() {
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let points_payload = WaveformPointsPayload {
+                                port: current_port_name.clone(),
+                                points: parsed_points,
+                                timestamp_ms: now_ms,
+                            };
+                            let _ = app.emit("waveform-points", points_payload);
+                        }
+
+                        batch_buffer.extend_from_slice(incoming);
                     }
                     Ok(_) => {}
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -267,9 +320,9 @@ impl SerialManager {
 
         self.is_running.store(true, Ordering::SeqCst);
 
-        // Background reader thread with batching and throttling (prevents UI freeze at 921600 baud)
         let is_running_clone = Arc::clone(&self.is_running);
         let current_port_name = port_name.to_string();
+        let protocol_engine_clone = Arc::clone(&self.protocol_engine);
 
         std::thread::spawn(move || {
             let mut reader = reader_port;
@@ -280,7 +333,30 @@ impl SerialManager {
             while is_running_clone.load(Ordering::SeqCst) {
                 match reader.read(&mut read_buf) {
                     Ok(n) if n > 0 => {
-                        batch_buffer.extend_from_slice(&read_buf[..n]);
+                        let incoming = &read_buf[..n];
+                        // If protocol engine is active, parse into waveform points
+                        let mut parsed_points = Vec::new();
+                        {
+                            if let Ok(mut engine_opt) = protocol_engine_clone.lock() {
+                                if let Some(engine) = engine_opt.as_mut() {
+                                    parsed_points = engine.parse_chunk(incoming);
+                                }
+                            }
+                        }
+                        if !parsed_points.is_empty() {
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let points_payload = WaveformPointsPayload {
+                                port: current_port_name.clone(),
+                                points: parsed_points,
+                                timestamp_ms: now_ms,
+                            };
+                            let _ = app.emit("waveform-points", points_payload);
+                        }
+
+                        batch_buffer.extend_from_slice(incoming);
                     }
                     Ok(_) => {}
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}

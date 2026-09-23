@@ -21,7 +21,9 @@ OUT_EXE_NAME = "hil-daemon-x86_64-pc-windows-msvc.exe"
 TARGET_PATHS = [
     ROOT_DIR / "src-tauri" / "binaries" / OUT_EXE_NAME,
     ROOT_DIR / "bin" / OUT_EXE_NAME,
-    ROOT_DIR / OUT_EXE_NAME,
+    ROOT_DIR / "src-tauri" / "target" / "release" / OUT_EXE_NAME,
+    ROOT_DIR / "src-tauri" / "target" / "debug" / OUT_EXE_NAME,
+    ROOT_DIR / "release" / "AI-HIL-Debugger-v1.0.0-windows-x64" / "bin" / OUT_EXE_NAME,
 ]
 
 def kill_locking_processes():
@@ -48,6 +50,35 @@ def build_executable():
     dist_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    exclude_modules = [
+        "PySide6",
+        "shiboken6",
+        "numpy",
+        "scipy",
+        "pandas",
+        "matplotlib",
+        "PIL",
+        "pillow",
+        "tkinter",
+        "tcl",
+        "tk",
+        "unittest",
+        "pytest",
+        "pypdf",
+        "openpyxl",
+        "fastapi",
+        "uvicorn",
+        "starlette",
+        "can",
+        "canopen",
+        "pyvisa",
+        "fonttools",
+        "contourpy",
+        "kiwisolver",
+        "IPython",
+        "jupyter",
+    ]
+
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--onefile",
@@ -63,11 +94,19 @@ def build_executable():
         "--hidden-import", "pyocd.probe.cmsis_dap_probe",
         "--hidden-import", "pyocd.probe.jlink_probe",
         "--hidden-import", "pyocd.coresight",
+        "--paths", str(SRC_ENTRY.parent),
+        "--collect-all", "capstone",
+        "--hidden-import", "capstone",
+        "--hidden-import", "map_analyzer",
+        "--hidden-import", "svd_manager",
+        "--hidden-import", "hardfault_analyzer",
         "--distpath", str(dist_dir),
         "--workpath", str(work_dir),
         "--name", "hil-daemon",
-        str(SRC_ENTRY)
     ]
+    for mod in exclude_modules:
+        cmd.extend(["--exclude-module", mod])
+    cmd.append(str(SRC_ENTRY))
 
     start_time = time.time()
     subprocess.check_call(cmd)

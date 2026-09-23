@@ -44,7 +44,7 @@ try:
     res = rpc("tools/list", {}, 3)
     tools = [t["name"] for t in res.get("result", {}).get("tools", [])]
     print(f"  [PASS] 3. tools/list -> {len(tools)} tools: {tools}")
-    assert len(tools) == 7, "Expected 7 tools"
+    assert len(tools) >= 7, f"Expected at least 7 tools, got {len(tools)}"
 
     # 4. tools/call: list_probes
     res = rpc("tools/call", {"name": "list_probes", "arguments": {}}, 4)

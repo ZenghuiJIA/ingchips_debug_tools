@@ -7,25 +7,35 @@ import WaveformPlotter from './components/WaveformPlotter.vue';
 import PyocdFlasher from './components/PyocdFlasher.vue';
 import HardFaultInspector from './components/HardFaultInspector.vue';
 import MemoryInspector from './components/MemoryInspector.vue';
+import FirmwareResourceAnalyzer from './components/FirmwareResourceAnalyzer.vue';
+import SvdRegisterInspector from './components/SvdRegisterInspector.vue';
 import AiCopilot from './components/AiCopilot.vue';
 import {
   Terminal,
   Activity,
   Zap,
+  PieChart,
   AlertOctagon,
   Database,
   Sparkles,
-  Info
+  Info,
+  Sliders
 } from '@lucide/vue';
 
 const isConnected = ref<boolean>(false);
 const activePort = ref<string | null>(null);
-const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'hardfault' | 'memory' | 'ai'>('terminal');
+const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'analyzer' | 'svd' | 'hardfault' | 'memory' | 'ai'>('terminal');
+const sharedFirmwarePath = ref<string>('');
 const runningInBrowser = ref<boolean>(!isTauri());
 
-async function handleConnect(port: string, baudRate: number) {
+async function handleConnect(port: string, baudRate: number, ramStart?: number, ramSize?: number) {
   try {
-    await safeInvoke('open_serial_port', { portName: port, baudRate });
+    await safeInvoke('open_serial_port', {
+      portName: port,
+      baudRate,
+      ramStart: ramStart !== undefined ? ramStart : null,
+      ramSize: ramSize !== undefined ? ramSize : null,
+    });
     isConnected.value = true;
     activePort.value = port;
   } catch (err: any) {
@@ -106,6 +116,28 @@ function handleResetTriggered(seq: string) {
           </button>
 
           <button
+            @click="currentTab = 'analyzer'"
+            class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
+            :class="currentTab === 'analyzer' 
+              ? 'border-emerald-500 text-emerald-400 bg-zinc-800/40' 
+              : 'border-transparent text-zinc-400 hover:text-zinc-200'"
+          >
+            <PieChart class="w-3.5 h-3.5 text-emerald-400" />
+            <span>固件资源分析</span>
+          </button>
+
+          <button
+            @click="currentTab = 'svd'"
+            class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
+            :class="currentTab === 'svd' 
+              ? 'border-indigo-500 text-indigo-400 bg-zinc-800/40' 
+              : 'border-transparent text-zinc-400 hover:text-zinc-200'"
+          >
+            <Sliders class="w-3.5 h-3.5 text-indigo-400" />
+            <span>SVD 外设寄存器</span>
+          </button>
+
+          <button
             @click="currentTab = 'hardfault'"
             class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
             :class="currentTab === 'hardfault' 
@@ -152,12 +184,18 @@ function handleResetTriggered(seq: string) {
               currentTab === 'terminal' ? SerialTerminal :
               currentTab === 'plotter' ? WaveformPlotter :
               currentTab === 'flasher' ? PyocdFlasher :
+              currentTab === 'analyzer' ? FirmwareResourceAnalyzer :
+              currentTab === 'svd' ? SvdRegisterInspector :
               currentTab === 'hardfault' ? HardFaultInspector :
               currentTab === 'memory' ? MemoryInspector :
               AiCopilot
             "
             :is-connected="isConnected"
-            @switch-tab="(t: any) => currentTab = t"
+            :initial-file-path="sharedFirmwarePath"
+            @switch-tab="(t: any, payload?: any) => {
+              currentTab = t;
+              if (payload && payload.filePath) sharedFirmwarePath = payload.filePath;
+            }"
           />
         </KeepAlive>
       </div>

@@ -46,33 +46,31 @@ def package():
     (TARGET_DIR / "scripts").mkdir(exist_ok=True)
     (TARGET_DIR / "skills").mkdir(exist_ok=True)
     (TARGET_DIR / "mcp").mkdir(exist_ok=True)
+    (TARGET_DIR / "packs").mkdir(exist_ok=True)
 
     # Copy primary executables
     print("[1/5] Copying application executables...")
     main_exe_candidates = [
         ROOT_DIR / "src-tauri" / "target" / "release" / "ai-hil-debugger.exe",
         ROOT_DIR / "src-tauri" / "target" / "release" / "AI-HIL-Debugger.exe",
-        ROOT_DIR / "AI-HIL-Debugger.exe",
         ROOT_DIR / "bin" / "AI-HIL-Debugger.exe",
     ]
     main_exe = next((p for p in main_exe_candidates if p.exists()), None)
     if main_exe:
         shutil.copy2(main_exe, TARGET_DIR / "AI-HIL-Debugger.exe")
-        shutil.copy2(main_exe, TARGET_DIR / "bin" / "AI-HIL-Debugger.exe")
-        shutil.copy2(main_exe, ROOT_DIR / "AI-HIL-Debugger.exe")
-        shutil.copy2(main_exe, ROOT_DIR / "bin" / "AI-HIL-Debugger.exe")
         print(f"  [OK] Copied {main_exe.name} -> AI-HIL-Debugger.exe ({main_exe.stat().st_size / 1024 / 1024:.1f} MB)")
 
     daemon_exe = ROOT_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe"
     if daemon_exe.exists():
         shutil.copy2(daemon_exe, TARGET_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe")
-        shutil.copy2(daemon_exe, TARGET_DIR / "hil-daemon-x86_64-pc-windows-msvc.exe")
         print(f"  [OK] Copied {daemon_exe.name} ({daemon_exe.stat().st_size / 1024 / 1024:.1f} MB)")
 
     # Copy batch scripts
     print("[2/5] Copying batch launchers and installers...")
     for bat_file in ["start.bat", "install_mcp.bat", "install_skill.bat", "diagnose.bat"]:
-        src = ROOT_DIR / bat_file
+        src = ROOT_DIR / "scripts" / bat_file
+        if not src.exists():
+            src = ROOT_DIR / bat_file
         if src.exists():
             shutil.copy2(src, TARGET_DIR / bat_file)
             print(f"  [OK] Copied {bat_file}")
@@ -106,6 +104,13 @@ def package():
     if license_file.exists():
         shutil.copy2(license_file, TARGET_DIR / "LICENSE")
         print(f"  [OK] Copied LICENSE")
+
+    # Copy packs
+    packs_src = ROOT_DIR / "packs"
+    if packs_src.exists():
+        for p in packs_src.glob("*.pack"):
+            shutil.copy2(p, TARGET_DIR / "packs" / p.name)
+            print(f"  [OK] Copied pack: {p.name}")
 
     # Compress into zip
     print(f"[5/5] Compressing package into {ZIP_PATH.name}...")

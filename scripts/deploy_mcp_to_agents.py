@@ -10,10 +10,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
 
 candidates = [
+    ROOT_DIR / "release" / "AI-HIL-Debugger-v1.0.0-windows-x64" / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe",
     ROOT_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe",
-    ROOT_DIR / "hil-daemon-x86_64-pc-windows-msvc.exe",
-    Path(r"C:\ming\source\tools\test_tools\release\AI-HIL-Debugger-v1.0.0-windows-x64\bin\hil-daemon-x86_64-pc-windows-msvc.exe"),
-    Path(r"C:\ming\source\tools\test_tools\bin\hil-daemon-x86_64-pc-windows-msvc.exe"),
 ]
 
 found_exe = next((p for p in candidates if p.exists()), candidates[0])
@@ -200,7 +198,12 @@ def deploy_to_opencode():
         mcp_cfg = data.get("mcp", {})
         if SERVER_ID in mcp_cfg:
             curr = mcp_cfg[SERVER_ID]
-            if is_same_daemon(curr.get("command", "")) and curr.get("args") == ["--mode", "stdio-mcp"]:
+            cmd = curr.get("command")
+            if (curr.get("type") == "local" and
+                isinstance(cmd, list) and
+                len(cmd) >= 1 and
+                is_same_daemon(cmd[0]) and
+                cmd[1:] == ["--mode", "stdio-mcp"]):
                 print(f"  [EXISTS] MCP server '{SERVER_ID}' already configured in OpenCode (Skipping)")
                 return
 
@@ -209,9 +212,10 @@ def deploy_to_opencode():
             data["mcp"] = {}
 
         data["mcp"][SERVER_ID] = {
-            "type": "stdio",
-            "command": DAEMON_EXE,
-            "args": ["--mode", "stdio-mcp"]
+            "type": "local",
+            "command": [DAEMON_EXE, "--mode", "stdio-mcp"],
+            "enabled": True,
+            "timeout": 60000
         }
 
         with open(opencode_json_path, "w", encoding="utf-8") as f:
