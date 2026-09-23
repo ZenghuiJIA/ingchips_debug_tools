@@ -83,7 +83,11 @@ def discover_and_load_packs() -> List[str]:
         candidates.append(os.path.join(script_dir, "..", "..", "packs"))
         cwd = os.getcwd()
         candidates.append(os.path.join(cwd, "packs"))
-        candidates.append(os.path.join(cwd, "release", "AI-HIL-Debugger-v1.0.0-windows-x64", "packs"))
+        release_parent = os.path.join(cwd, "release")
+        if os.path.isdir(release_parent):
+            for rel_sub in os.listdir(release_parent):
+                if rel_sub.startswith("AI-HIL-Debugger-"):
+                    candidates.append(os.path.join(release_parent, rel_sub, "packs"))
         candidates.append(r"C:\ming\python\get_svd")
 
         for d in candidates:

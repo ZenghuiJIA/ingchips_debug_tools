@@ -10,9 +10,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
 
 candidates = [
-    ROOT_DIR / "release" / "AI-HIL-Debugger-v1.0.0-windows-x64" / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe",
     ROOT_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe",
 ]
+# 动态寻找 release/AI-HIL-Debugger-*/bin 下的 daemon
+release_dir = ROOT_DIR / "release"
+if release_dir.exists():
+    for sub in release_dir.glob("AI-HIL-Debugger-*"):
+        if sub.is_dir():
+            candidates.append(sub / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe")
 
 found_exe = next((p for p in candidates if p.exists()), candidates[0])
 DAEMON_EXE = str(found_exe)
@@ -351,7 +356,7 @@ def deploy_to_deepseek_harness():
         if "mcp-embedded-hil" in existing_content:
             # Replace existing outdated mcp-embedded-hil block
             pattern = re.compile(r"-\s*id:\s*mcp-embedded-hil.*?(?=\n-|\Z)", re.DOTALL)
-            new_content = pattern.sub(mcp_block.strip(), existing_content)
+            new_content = pattern.sub(lambda _: mcp_block.strip(), existing_content)
         else:
             new_content = existing_content.rstrip() + "\n" + mcp_block.strip() + "\n"
 

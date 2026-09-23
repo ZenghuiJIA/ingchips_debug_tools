@@ -39,7 +39,7 @@ echo.
 echo ========================================================
 echo [SUCCESS] Build finished successfully!
 echo Development binary ready at: bin\AI-HIL-Debugger.exe
-echo Standalone release package at: release\AI-HIL-Debugger-v1.0.0-windows-x64\
+echo Standalone release package at: release\
 echo MCP server deployed to: CCSwitch, Claude, Codex, OpenCode, Gemini
 echo ========================================================
 pause

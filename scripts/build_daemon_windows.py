@@ -23,7 +23,6 @@ TARGET_PATHS = [
     ROOT_DIR / "bin" / OUT_EXE_NAME,
     ROOT_DIR / "src-tauri" / "target" / "release" / OUT_EXE_NAME,
     ROOT_DIR / "src-tauri" / "target" / "debug" / OUT_EXE_NAME,
-    ROOT_DIR / "release" / "AI-HIL-Debugger-v1.0.0-windows-x64" / "bin" / OUT_EXE_NAME,
 ]
 
 def kill_locking_processes():
@@ -132,6 +131,14 @@ def sync_binaries(built_exe: Path, dist_dir: Path, work_dir: Path):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(built_exe, target)
         print(f"  [COPIED] -> {target}")
+
+    # Synchronize to any active release directories
+    rel_dir = ROOT_DIR / "release"
+    if rel_dir.exists():
+        for sub in rel_dir.glob("AI-HIL-Debugger-*"):
+            if sub.is_dir() and (sub / "bin").exists():
+                shutil.copy2(built_exe, sub / "bin" / OUT_EXE_NAME)
+                print(f"  [COPIED] -> {sub / 'bin' / OUT_EXE_NAME}")
 
     # Clean temporary directories
     shutil.rmtree(dist_dir, ignore_errors=True)
