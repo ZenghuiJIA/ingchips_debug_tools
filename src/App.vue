@@ -28,13 +28,14 @@ const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'analyzer' | 'svd' |
 const sharedFirmwarePath = ref<string>('');
 const runningInBrowser = ref<boolean>(!isTauri());
 
-async function handleConnect(port: string, baudRate: number, ramStart?: number, ramSize?: number) {
+async function handleConnect(port: string, baudRate: number, ramStart?: number, ramSize?: number, blockAddress?: number) {
   try {
     await safeInvoke('open_serial_port', {
       portName: port,
       baudRate,
       ramStart: ramStart !== undefined ? ramStart : null,
       ramSize: ramSize !== undefined ? ramSize : null,
+      blockAddress: blockAddress !== undefined ? blockAddress : null,
     });
     isConnected.value = true;
     activePort.value = port;
@@ -191,7 +192,10 @@ function handleResetTriggered(seq: string) {
               AiCopilot
             "
             :is-connected="isConnected"
+            :active-port="activePort"
             :initial-file-path="sharedFirmwarePath"
+            @request-connect="handleConnect"
+            @request-disconnect="handleDisconnect"
             @switch-tab="(t: any, payload?: any) => {
               currentTab = t;
               if (payload && payload.filePath) sharedFirmwarePath = payload.filePath;

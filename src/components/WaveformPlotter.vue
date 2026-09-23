@@ -117,6 +117,34 @@ async function resetToDefaultProtocol() {
   }
 }
 
+// --- Multi-Device Waveform Source Binding State ---
+const boundWaveformSource = ref<string>('');
+const activePortList = ref<string[]>([]);
+
+async function refreshActivePortList() {
+  try {
+    const list: string[] = await safeInvoke('list_active_serial_sessions');
+    activePortList.value = list;
+    const currentBound: string | null = await safeInvoke('get_waveform_source');
+    if (currentBound) {
+      boundWaveformSource.value = currentBound;
+    } else if (list.length > 0 && !boundWaveformSource.value) {
+      boundWaveformSource.value = list[0];
+      await handleWaveformSourceChange();
+    }
+  } catch (err) {
+    console.error('Failed to list active sessions for waveform binding:', err);
+  }
+}
+
+async function handleWaveformSourceChange() {
+  try {
+    await safeInvoke('set_waveform_source', { portName: boundWaveformSource.value || null });
+  } catch (err) {
+    console.error('Failed to bind waveform source:', err);
+  }
+}
+
 // --- J-Scope State ---
 const isJScopeModalOpen = ref<boolean>(false);
 const axfFilePath = ref<string>('');
@@ -947,9 +975,15 @@ onMounted(async () => {
     animFrameId = requestAnimationFrame(renderCanvas);
   });
 
+  await refreshActivePortList();
+
   if (isTauri()) {
     try {
       unlistenRx = await listen<SerialRxPayload>('serial-rx', (event) => {
+        // Filter by bound waveform port if set
+        if (boundWaveformSource.value && event.payload.port && event.payload.port !== boundWaveformSource.value) {
+          return;
+        }
         // Only run frontend fallback parsing if Rust engine is not already doing it
         if (!isRustEngineActive.value) {
           const raw = new Uint8Array(event.payload.data);
@@ -958,6 +992,10 @@ onMounted(async () => {
       });
 
       unlistenPoints = await listen<WaveformPointsPayload>('waveform-points', (event) => {
+        // Filter by bound waveform port if set
+        if (boundWaveformSource.value && event.payload.port && event.payload.port !== boundWaveformSource.value) {
+          return;
+        }
         const now = performance.now();
         for (const pt of event.payload.points) {
           ingestDataPoint(pt, now);
@@ -987,6 +1025,28 @@ onUnmounted(() => {
         <div class="flex items-center gap-1.5 text-zinc-200 font-semibold">
           <Activity class="w-4 h-4 text-cyan-400" />
           <span>实时波形示波器</span>
+        </div>
+
+        <!-- Waveform Source Binding Selector -->
+        <div class="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded px-2 py-0.5">
+          <span class="text-[11px] text-zinc-400">数据源:</span>
+          <select
+            v-model="boundWaveformSource"
+            @focus="refreshActivePortList"
+            @change="handleWaveformSourceChange"
+            class="bg-transparent text-cyan-300 text-xs font-semibold outline-none cursor-pointer max-w-[150px]"
+            title="选择要绘制波形的目标串口或RTT通道"
+          >
+            <option value="" class="bg-zinc-900 text-zinc-400">自动监听全部活跃流</option>
+            <option
+              v-for="p in activePortList"
+              :key="p"
+              :value="p"
+              class="bg-zinc-900 text-zinc-200"
+            >
+              {{ p }}
+            </option>
+          </select>
         </div>
 
         <div class="h-4 w-px bg-zinc-800"></div>

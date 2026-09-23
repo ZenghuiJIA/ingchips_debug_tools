@@ -523,3 +523,14 @@ export interface ProtocolConfig {
   channels: ProtocolChannelDef[];
 }
 
+export interface TerminalSessionTab {
+  id: string;
+  portName: string;
+  baudRate: number;
+  isConnected: boolean;
+  isDaplink: boolean;
+  rxBytesCount: number;
+  txBytesCount: number;
+}
+
+

@@ -1,524 +1,526 @@
 <script setup lang="ts">
-import { ref, shallowRef, onMounted, onUnmounted, nextTick } from 'vue';
-import { safeInvoke, isTauri } from '../utils/ipc';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { SerialRxPayload, SerialLogItem } from '../types';
+import { ref, watch, onMounted } from 'vue';
+import { safeInvoke } from '../utils/ipc';
+import type { TerminalSessionTab, PortInfo } from '../types';
+import SerialTerminalSession from './SerialTerminalSession.vue';
 import {
-  Trash2,
-  Download,
-  ArrowDown,
-  Send,
-  Binary,
-  Clock,
-  Terminal,
-  Layers,
-  Zap,
-  Activity,
-  Copy,
-  Check
+  Plus,
+  X,
+  RefreshCw,
+  Power,
+  Radio,
+  FolderArchive
 } from '@lucide/vue';
-import CommandGroupPanel from './CommandGroupPanel.vue';
-import TriggerPanel from './TriggerPanel.vue';
-import { encodeCommand } from '../utils/commandEncoder';
-import type { CommandGroup, CommandItem, TriggerRule } from '../types';
 
 const props = defineProps<{
+  // Initial / main connection props from HeaderBar
   isConnected: boolean;
+  activePort: string | null;
 }>();
 
 const emit = defineEmits<{
   (e: 'switch-tab', tab: string): void;
+  (e: 'request-connect', port: string, baud: number): void;
+  (e: 'request-disconnect', port?: string): void;
 }>();
 
-const isCopiedAll = ref<boolean>(false);
+// Available system ports
+const availablePorts = ref<PortInfo[]>([]);
+const isRefreshingPorts = ref<boolean>(false);
 
-function copyAllLogs() {
-  if (logs.value.length === 0) return;
-  const text = logs.value.map(l => (showTimestamps.value ? `[${l.timestamp}] ` : '') + `[${l.type.toUpperCase()}] ` + l.text).join('\n');
-  navigator.clipboard.writeText(text);
-  isCopiedAll.value = true;
-  setTimeout(() => isCopiedAll.value = false, 2000);
-}
+// Active multi-session tabs
+const tabs = ref<TerminalSessionTab[]>([]);
+const activeTabId = ref<string>('');
 
-const isCommandPanelOpen = ref<boolean>(true);
-const isTriggerPanelOpen = ref<boolean>(false);
-const cmdPanelRef = ref<any>(null);
-const triggerPanelRef = ref<any>(null);
-const activeGroup = ref<CommandGroup | null>(null);
+// Modal for opening a new port
+const isNewPortModalOpen = ref<boolean>(false);
+const newPortSelected = ref<string>('');
+const newPortBaud = ref<number>(115200);
+const baudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
-function handleSendSingleGroupCommand(cmd: CommandItem) {
-  if (cmdPanelRef.value) {
-    cmdPanelRef.value.sendSingleCommand(cmd);
-  }
-}
+// RTT RAM presets for new tab
+const rttRamPresets = [
+  { label: 'SRAM 0x20000000 (128KB 常用M4/M3)', start: 0x20000000, size: 0x20000 },
+  { label: 'SRAM 0x20000000 (64KB 常用M0/M3)', start: 0x20000000, size: 0x10000 },
+  { label: 'SRAM 0x20000000 (256KB 大RAM)', start: 0x20000000, size: 0x40000 },
+  { label: 'SRAM 0x20000000 (512KB 高性能M7/M4)', start: 0x20000000, size: 0x80000 },
+  { label: 'AXI-SRAM 0x24000000 (512KB H7系列)', start: 0x24000000, size: 0x80000 },
+  { label: '自定义 / Pack解析地址', start: -1, size: -1 },
+];
+const newPortRttRamPreset = ref<number>(0x20000000);
+const newPortRttRamSize = ref<number>(0x20000);
+const newPortRttCustomStartHex = ref<string>('0x20000000');
+const newPortRttCustomSizeHex = ref<string>('0x20000');
+const newPortRttBlockAddrHex = ref<string>(''); // Exact RTT CB
+const isNewPortImportingPack = ref<boolean>(false);
+const newPortImportedPackInfo = ref<string>('');
 
-async function executeTriggerResponse(rule: TriggerRule) {
-  const encoded = encodeCommand({
-    id: rule.id,
-    label: rule.name,
-    payload: rule.responsePayload,
-    format: rule.responseFormat,
-    lineEnding: rule.responseEnding,
-    delayAfterMs: 0,
-    enabled: true
-  });
-
-  setTimeout(async () => {
-    try {
-      const sentCount: number = await safeInvoke('send_serial_data', { data: encoded.bytes });
-      txBytesCount.value += sentCount;
-      appendLog(`⚡ [触发器: ${rule.name}] 命中规则，自动应答 -> ${encoded.textDisplay}`, 'tx');
-    } catch (err) {
-      appendLog(`⚡ [触发器: ${rule.name}] 自动应答发送失败: ${err}`, 'error');
-    }
-  }, rule.delayMs);
-}
-
-function handleIncomingRxText(text: string) {
-  if (triggerPanelRef.value) {
-    const matched = triggerPanelRef.value.checkAndMatchTriggers(text);
-    for (const rule of matched) {
-      executeTriggerResponse(rule);
-    }
-  }
-}
-
-const logContainer = ref<HTMLElement | null>(null);
-const logs = shallowRef<SerialLogItem[]>([]);
-let nextLogId = 1;
-const MAX_LOG_LINES = 2500;
-
-const viewMode = ref<'string' | 'hex'>('string');
-const showTimestamps = ref<boolean>(true);
-const autoScroll = ref<boolean>(true);
-
-const inputMessage = ref<string>('');
-const inputMode = ref<'string' | 'hex'>('string');
-const lineEnding = ref<string>('crlf');
-
-const rxBytesCount = ref<number>(0);
-const txBytesCount = ref<number>(0);
-
-let unlistenRx: UnlistenFn | null = null;
-let worker: Worker | null = null;
-
-function formatTimestamp(): string {
-  const d = new Date();
-  return d.toTimeString().split(' ')[0] + '.' + d.getMilliseconds().toString().padStart(3, '0');
-}
-
-function scrollToBottom() {
-  if (!autoScroll.value || !logContainer.value) return;
-  nextTick(() => {
-    if (logContainer.value) {
-      logContainer.value.scrollTop = logContainer.value.scrollHeight;
-    }
-  });
-}
-
-function appendLog(text: string, type: 'rx' | 'tx' | 'info' | 'error', customTime?: string) {
-  const newItem: SerialLogItem = {
-    id: nextLogId++,
-    timestamp: customTime || formatTimestamp(),
-    text,
-    type
-  };
-
-  let current = [...logs.value, newItem];
-  if (current.length > MAX_LOG_LINES) {
-    current = current.slice(current.length - MAX_LOG_LINES);
-  }
-  logs.value = current;
-  scrollToBottom();
-}
-
-function clearLogs() {
-  logs.value = [];
-  rxBytesCount.value = 0;
-  txBytesCount.value = 0;
-}
-
-function exportLogs() {
-  const content = logs.value.map(l => `[${l.timestamp}] [${l.type.toUpperCase()}] ${l.text}`).join('\n');
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `serial_log_${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-async function handleSendMessage(customText?: string) {
-  const textToSend = customText !== undefined ? customText : inputMessage.value;
-  if (!textToSend || !props.isConnected) return;
-
-  let bytes: number[] = [];
-
-  if (inputMode.value === 'hex' && customText === undefined) {
-    const cleanHex = textToSend.replace(/\s+/g, '');
-    if (!/^[0-9a-fA-F]*$/.test(cleanHex)) {
-      appendLog('HEX 格式无效，必须为十六进制字符', 'error');
-      return;
-    }
-    for (let i = 0; i < cleanHex.length; i += 2) {
-      bytes.push(parseInt(cleanHex.substring(i, i + 2), 16));
-    }
-  } else {
-    let payload = textToSend;
-    if (lineEnding.value === 'crlf') payload += '\r\n';
-    else if (lineEnding.value === 'lf') payload += '\n';
-    else if (lineEnding.value === 'cr') payload += '\r';
-
-    bytes = Array.from(new TextEncoder().encode(payload));
-  }
-
+async function importPackForNewPortRtt() {
   try {
-    const sentCount: number = await safeInvoke('send_serial_data', { data: bytes });
-    txBytesCount.value += sentCount;
-    appendLog(textToSend, 'tx');
-    if (customText === undefined) {
-      inputMessage.value = '';
+    const selected: string | null = await safeInvoke('pick_pack_file', {
+      title: '选择芯片 CMSIS-Pack 文件以解析默认 RAM / RTT 地址'
+    });
+    if (selected) {
+      isNewPortImportingPack.value = true;
+      const res: any = await safeInvoke('svd_import_pack', { packPath: selected });
+      if (res && res.devices && res.devices.length > 0) {
+        const dev = res.devices[0];
+        newPortRttCustomStartHex.value = dev.ram_start || '0x20000000';
+        const sizeVal = dev.ram_size || 0x20000;
+        newPortRttCustomSizeHex.value = `0x${sizeVal.toString(16).toUpperCase()}`;
+        newPortImportedPackInfo.value = `${dev.name} (${dev.vendor}): RAM ${newPortRttCustomStartHex.value} (${newPortRttCustomSizeHex.value})`;
+        newPortRttRamPreset.value = -1;
+      }
     }
   } catch (err: any) {
-    appendLog(`发送失败: ${err}`, 'error');
+    alert(`导入 Pack 解析失败: ${err}`);
+  } finally {
+    isNewPortImportingPack.value = false;
   }
 }
 
-onMounted(async () => {
-  // Initialize Web Worker
-  try {
-    worker = new Worker(new URL('../workers/serialParser.worker.ts', import.meta.url), { type: 'module' });
-    worker.onmessage = (e) => {
-      if (e.data.type === 'formatted_chunk') {
-        rxBytesCount.value += e.data.rawLength;
-        appendLog(e.data.text, 'rx', e.data.timestamp);
-        handleIncomingRxText(e.data.text);
-      }
-    };
-  } catch (err) {
-    console.error('Failed to instantiate Web Worker:', err);
-  }
-
-  // Listen to Tauri serial-rx event if running in Tauri
-  if (isTauri()) {
+async function toggleTabConnection(tab: TerminalSessionTab) {
+  if (tab.isConnected) {
     try {
-      unlistenRx = await listen<SerialRxPayload>('serial-rx', (event) => {
-        const raw = new Uint8Array(event.payload.data);
-        const ts = formatTimestamp();
-
-        if (worker) {
-          worker.postMessage({
-            rawBytes: raw,
-            mode: viewMode.value,
-            timestamp: ts
-          });
-        } else {
-          // Fallback
-          const text = new TextDecoder('utf-8', { fatal: false }).decode(raw);
-          rxBytesCount.value += raw.length;
-          appendLog(text, 'rx', ts);
-          handleIncomingRxText(text);
-        }
-      });
+      await safeInvoke('close_serial_port', { portName: tab.portName });
+      tab.isConnected = false;
     } catch (err) {
-      console.warn('Failed to attach serial-rx listener:', err);
+      console.error(`关闭端口 ${tab.portName} 失败:`, err);
+    }
+  } else {
+    try {
+      if (tab.portName.startsWith('RTT')) {
+        await safeInvoke('open_serial_port', {
+          portName: tab.portName,
+          baudRate: tab.baudRate,
+          ramStart: newPortRttRamPreset.value !== -1 ? newPortRttRamPreset.value : parseInt(newPortRttCustomStartHex.value.trim(), 16),
+          ramSize: newPortRttRamPreset.value !== -1 ? newPortRttRamSize.value : parseInt(newPortRttCustomSizeHex.value.trim(), 16),
+          blockAddress: newPortRttBlockAddrHex.value.trim() ? parseInt(newPortRttBlockAddrHex.value.trim(), 16) : null,
+        });
+      } else {
+        await safeInvoke('open_serial_port', {
+          portName: tab.portName,
+          baudRate: tab.baudRate,
+          ramStart: null,
+          ramSize: null,
+          blockAddress: null,
+        });
+      }
+      tab.isConnected = true;
+    } catch (err: any) {
+      alert(`打开端口 ${tab.portName} 失败: ${err}`);
     }
   }
-});
+}
 
-onUnmounted(() => {
-  if (unlistenRx) unlistenRx();
-  if (worker) worker.terminate();
+async function refreshPortList() {
+  isRefreshingPorts.value = true;
+  try {
+    const list: PortInfo[] = await safeInvoke('list_serial_ports');
+    availablePorts.value = list;
+    if (list.length > 0 && !newPortSelected.value) {
+      newPortSelected.value = list[0].port_name;
+    }
+  } catch (err) {
+    console.error('List serial ports failed:', err);
+  } finally {
+    isRefreshingPorts.value = false;
+  }
+}
+
+// Synchronize main activePort from HeaderBar
+watch([() => props.activePort, () => props.isConnected], ([newPort, connected]) => {
+  if (connected && newPort) {
+    let existing = tabs.value.find(t => t.portName === newPort);
+    if (!existing) {
+      const isDap = availablePorts.value.find(p => p.port_name === newPort)?.is_daplink ?? false;
+      const newTab: TerminalSessionTab = {
+        id: `tab_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        portName: newPort,
+        baudRate: 115200,
+        isConnected: true,
+        isDaplink: isDap,
+        rxBytesCount: 0,
+        txBytesCount: 0
+      };
+      tabs.value.push(newTab);
+      activeTabId.value = newTab.id;
+    } else {
+      existing.isConnected = true;
+      activeTabId.value = existing.id;
+    }
+  } else if (!connected && newPort) {
+    const existing = tabs.value.find(t => t.portName === newPort);
+    if (existing) {
+      existing.isConnected = false;
+    }
+  }
+}, { immediate: true });
+
+function openNewPortDialog() {
+  refreshPortList();
+  isNewPortModalOpen.value = true;
+}
+
+async function confirmOpenNewPort() {
+  if (!newPortSelected.value) return;
+
+  const targetPort = newPortSelected.value;
+  const targetBaud = Number(newPortBaud.value);
+
+  // Check if tab already exists
+  let tab = tabs.value.find(t => t.portName === targetPort);
+  if (tab && tab.isConnected) {
+    activeTabId.value = tab.id;
+    isNewPortModalOpen.value = false;
+    return;
+  }
+
+  try {
+    if (targetPort.startsWith('RTT')) {
+      const rStart = newPortRttRamPreset.value !== -1 ? newPortRttRamPreset.value : parseInt(newPortRttCustomStartHex.value.trim(), 16);
+      const rSize = newPortRttRamPreset.value !== -1 ? newPortRttRamSize.value : parseInt(newPortRttCustomSizeHex.value.trim(), 16);
+      const bAddr = newPortRttBlockAddrHex.value.trim() ? parseInt(newPortRttBlockAddrHex.value.trim(), 16) : null;
+
+      await safeInvoke('open_serial_port', {
+        portName: targetPort,
+        baudRate: targetBaud,
+        ramStart: rStart,
+        ramSize: rSize,
+        blockAddress: bAddr,
+      });
+    } else {
+      await safeInvoke('open_serial_port', {
+        portName: targetPort,
+        baudRate: targetBaud,
+        ramStart: null,
+        ramSize: null,
+        blockAddress: null,
+      });
+    }
+
+    const isDap = availablePorts.value.find(p => p.port_name === targetPort)?.is_daplink ?? false;
+
+    if (!tab) {
+      tab = {
+        id: `tab_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        portName: targetPort,
+        baudRate: targetBaud,
+        isConnected: true,
+        isDaplink: isDap,
+        rxBytesCount: 0,
+        txBytesCount: 0
+      };
+      tabs.value.push(tab);
+    } else {
+      tab.isConnected = true;
+      tab.baudRate = targetBaud;
+    }
+
+    activeTabId.value = tab.id;
+    isNewPortModalOpen.value = false;
+  } catch (err: any) {
+    alert(`打开端口 ${targetPort} 失败: ${err}`);
+  }
+}
+
+async function closeTab(tab: TerminalSessionTab, e?: MouseEvent) {
+  if (e) e.stopPropagation();
+
+  if (tab.isConnected) {
+    try {
+      await safeInvoke('close_serial_port', { portName: tab.portName });
+    } catch (err) {
+      console.error(`关闭端口 ${tab.portName} 失败:`, err);
+    }
+  }
+
+  const idx = tabs.value.findIndex(t => t.id === tab.id);
+  if (idx !== -1) {
+    tabs.value.splice(idx, 1);
+    if (activeTabId.value === tab.id) {
+      if (tabs.value.length > 0) {
+        activeTabId.value = tabs.value[Math.max(0, idx - 1)].id;
+      } else {
+        activeTabId.value = '';
+      }
+    }
+  }
+}
+
+function handleTabStatsUpdate(tabId: string, stats: { rx: number; tx: number }) {
+  const tab = tabs.value.find(t => t.id === tabId);
+  if (tab) {
+    tab.rxBytesCount = stats.rx;
+    tab.txBytesCount = stats.tx;
+  }
+}
+
+onMounted(() => {
+  refreshPortList();
 });
 </script>
 
 <template>
-  <div class="h-full flex flex-col bg-zinc-950 text-zinc-100 font-mono text-xs">
-    <!-- Terminal Header Toolbar -->
-    <div class="bg-zinc-900 border-b border-zinc-800 px-3 py-1.5 flex items-center justify-between gap-3 select-none">
-      <!-- Left: Title & Mode Selector -->
-      <div class="flex items-center gap-2">
-        <div class="flex items-center gap-1 text-zinc-300 font-semibold">
-          <Terminal class="w-4 h-4 text-emerald-400" />
-          <span>串口控制台</span>
+  <div class="h-full flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden select-none">
+    <!-- Top Tabs Bar (Chrome / VS Code style) -->
+    <div class="bg-zinc-900 border-b border-zinc-800 px-2 pt-1.5 flex items-center justify-between gap-2 shrink-0">
+      <!-- Left: Tab List -->
+      <div class="flex items-center gap-1 overflow-x-auto min-w-0">
+        <template v-if="tabs.length > 0">
+          <div
+            v-for="tab in tabs"
+            :key="tab.id"
+            @click="activeTabId = tab.id"
+            class="flex items-center gap-2 px-3 py-1.5 rounded-t text-xs font-mono border-t-2 transition-all cursor-pointer group"
+            :class="activeTabId === tab.id
+              ? 'bg-zinc-950 border-emerald-500 text-zinc-100 font-semibold shadow-sm'
+              : 'bg-zinc-900/60 hover:bg-zinc-800/80 border-transparent text-zinc-400 hover:text-zinc-200'"
+          >
+            <!-- Port Status Indicator -->
+            <span
+              class="w-2 h-2 rounded-full shrink-0"
+              :class="tab.isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'"
+            ></span>
+
+            <!-- Port Label -->
+            <span class="truncate max-w-[130px]">{{ tab.portName }}</span>
+
+            <!-- Close Tab Button -->
+            <button
+              @click="closeTab(tab, $event)"
+              class="opacity-0 group-hover:opacity-100 hover:bg-zinc-800 hover:text-rose-400 rounded p-0.5 text-zinc-500 transition-opacity"
+              title="关闭该端口会话"
+            >
+              <X class="w-3 h-3" />
+            </button>
+          </div>
+        </template>
+
+        <!-- No Tabs Open State -->
+        <div v-else class="text-xs text-zinc-500 px-2 py-1.5 flex items-center gap-2">
+          <span>暂无打开的串口设备</span>
         </div>
 
-        <div class="flex items-center bg-zinc-950 border border-zinc-800 rounded p-0.5 ml-2">
-          <button
-            @click="viewMode = 'string'"
-            class="px-2 py-0.5 rounded text-[11px] transition-colors"
-            :class="viewMode === 'string' ? 'bg-zinc-800 text-emerald-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
-          >
-            ASCII 文本
-          </button>
-          <button
-            @click="viewMode = 'hex'"
-            class="px-2 py-0.5 rounded text-[11px] transition-colors flex items-center gap-1"
-            :class="viewMode === 'hex' ? 'bg-zinc-800 text-emerald-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
-          >
-            <Binary class="w-3 h-3" />
-            <span>HEX</span>
-          </button>
-        </div>
-
-        <!-- Toggles -->
-        <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer ml-1">
-          <input type="checkbox" v-model="showTimestamps" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
-          <Clock class="w-3 h-3" />
-          <span>时间戳</span>
-        </label>
-
-        <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer">
-          <input type="checkbox" v-model="autoScroll" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
-          <ArrowDown class="w-3 h-3" />
-          <span>自动滚动</span>
-        </label>
-
-        <!-- Command Group Toggle Button -->
+        <!-- Add Port Tab Button -->
         <button
-          @click="isCommandPanelOpen = !isCommandPanelOpen"
-          class="px-2 py-0.5 rounded text-[11px] transition-colors border flex items-center gap-1 ml-1"
-          :class="isCommandPanelOpen ? 'bg-emerald-950 text-emerald-300 border-emerald-700/80 font-bold' : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
-          title="切换右侧命令组管理面板"
+          @click="openNewPortDialog"
+          class="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-emerald-400 border border-zinc-700/60 transition-colors ml-1"
+          title="打开并添加新的并行串口/RTT设备"
         >
-          <Layers class="w-3.5 h-3.5 text-emerald-400" />
-          <span>命令组 {{ activeGroup ? `(${activeGroup.commands.length})` : '' }}</span>
-        </button>
-
-        <!-- Smart Trigger / Auto-Responder Toggle Button -->
-        <button
-          @click="isTriggerPanelOpen = !isTriggerPanelOpen"
-          class="px-2 py-0.5 rounded text-[11px] transition-colors border flex items-center gap-1"
-          :class="isTriggerPanelOpen ? 'bg-amber-950 text-amber-300 border-amber-700/80 font-bold' : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
-          title="切换智能应答触发器面板"
-        >
-          <Zap class="w-3.5 h-3.5 text-amber-400" />
-          <span>自动应答</span>
-        </button>
-
-        <!-- Quick Jump to Waveform Plotter -->
-        <button
-          @click="emit('switch-tab', 'plotter')"
-          class="px-2 py-0.5 rounded text-[11px] bg-zinc-800 hover:bg-zinc-700 text-cyan-300 border border-cyan-800/60 transition-colors flex items-center gap-1 ml-1"
-          title="切换到实时波形示波器"
-        >
-          <Activity class="w-3.5 h-3.5 text-cyan-400" />
-          <span>波形曲线</span>
+          <Plus class="w-3.5 h-3.5" />
+          <span>打开新端口</span>
         </button>
       </div>
 
-      <!-- Right: Stats & Actions -->
-      <div class="flex items-center gap-2">
-        <div class="text-[11px] text-zinc-500 flex items-center gap-2 font-mono">
-          <span>RX: <strong class="text-zinc-300">{{ rxBytesCount }}</strong> B</span>
-          <span>TX: <strong class="text-zinc-300">{{ txBytesCount }}</strong> B</span>
-          <span>行数: <strong class="text-zinc-300">{{ logs.length }}</strong></span>
-        </div>
-
-        <div class="h-3 w-px bg-zinc-800"></div>
-
-        <button
-          @click="copyAllLogs"
-          :disabled="logs.length === 0"
-          :title="isCopiedAll ? '已复制到剪贴板' : '复制终端全部日志'"
-          class="p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors disabled:opacity-40"
-        >
-          <component :is="isCopiedAll ? Check : Copy" class="w-3.5 h-3.5" :class="{ 'text-emerald-400': isCopiedAll }" />
-        </button>
-
-        <button
-          @click="exportLogs"
-          title="导出日志文件"
-          class="p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
-        >
-          <Download class="w-3.5 h-3.5" />
-        </button>
-
-        <button
-          @click="clearLogs"
-          title="清空终端"
-          class="p-1 text-zinc-400 hover:text-rose-400 hover:bg-zinc-800 rounded transition-colors"
-        >
-          <Trash2 class="w-3.5 h-3.5" />
-        </button>
+      <!-- Right: Active Session Quick Controls -->
+      <div v-if="tabs.length > 0" class="flex items-center gap-2 shrink-0 pb-1">
+        <span class="text-[11px] text-zinc-500 font-mono hidden md:inline">
+          并发连接数: <strong class="text-emerald-400">{{ tabs.filter(t => t.isConnected).length }}</strong> / {{ tabs.length }}
+        </span>
       </div>
     </div>
 
-    <!-- Main Center Viewport: Split Terminal Logs & Command Group Drawer -->
-    <div class="flex-1 flex overflow-hidden min-h-0">
-      <!-- Left: Terminal Log Viewport -->
-      <div
-        ref="logContainer"
-        class="flex-1 overflow-y-auto p-3 space-y-1 select-text bg-zinc-950 font-mono text-[11.5px] leading-relaxed"
-      >
-        <div v-if="logs.length === 0" class="h-full flex flex-col items-center justify-center text-zinc-600 select-none">
-          <Terminal class="w-10 h-10 mb-2 stroke-1 opacity-40" />
-          <p>串口就绪，等待数据输入或发送测试命令...</p>
-          <p class="text-[10px] text-zinc-700 mt-1">支持 921600 高波特率无损捕获与 Web Worker 异步渲染</p>
-        </div>
-
+    <!-- Active Tab Contents Area (KeepAlive / v-show to preserve background receiving & triggers) -->
+    <div class="flex-1 overflow-hidden relative">
+      <template v-if="tabs.length > 0">
         <div
-          v-for="item in logs"
-          :key="item.id"
-          class="flex items-start gap-2 hover:bg-zinc-900/50 rounded px-1 -mx-1"
+          v-for="tab in tabs"
+          :key="tab.id"
+          v-show="activeTabId === tab.id"
+          class="h-full w-full"
         >
-          <!-- Timestamp -->
-          <span v-if="showTimestamps" class="text-zinc-600 text-[10px] shrink-0 select-none">
-            [{{ item.timestamp }}]
-          </span>
+          <SerialTerminalSession
+            :port-name="tab.portName"
+            :baud-rate="tab.baudRate"
+            :is-connected="tab.isConnected"
+            :is-daplink="tab.isDaplink"
+            @switch-tab="(t) => emit('switch-tab', t)"
+            @update-stats="(s) => handleTabStatsUpdate(tab.id, s)"
+            @toggle-connection="toggleTabConnection(tab)"
+          />
+        </div>
+      </template>
 
-          <!-- Direction Badge -->
-          <span
-            class="text-[9px] px-1 py-0.2 rounded font-bold uppercase shrink-0 select-none"
-            :class="{
-              'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40': item.type === 'rx',
-              'bg-sky-950/80 text-sky-400 border border-sky-800/40': item.type === 'tx',
-              'bg-amber-950/80 text-amber-400 border border-amber-800/40': item.type === 'info',
-              'bg-rose-950/80 text-rose-400 border border-rose-800/40': item.type === 'error',
-            }"
+      <!-- Empty State View -->
+      <div v-else class="h-full flex flex-col items-center justify-center text-zinc-600 space-y-3">
+        <div class="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-500">
+          <Radio class="w-7 h-7 stroke-1" />
+        </div>
+        <div class="text-center">
+          <p class="text-sm font-semibold text-zinc-300">多设备终端就绪</p>
+          <p class="text-xs text-zinc-500 mt-1">可在上方点击 <strong>【打开新端口】</strong> 添加并行串口、DAPLink 或 RTT 监视通道</p>
+        </div>
+        <button
+          @click="openNewPortDialog"
+          class="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow transition-colors"
+        >
+          <Plus class="w-4 h-4" />
+          <span>添加端口会话</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Open New Port Modal Dialog -->
+    <div
+      v-if="isNewPortModalOpen"
+      class="fixed inset-0 bg-black/70 backdrop-blur-xs z-50 flex items-center justify-center p-4"
+    >
+      <div class="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-md shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+        <!-- Dialog Header -->
+        <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <Radio class="w-5 h-5 text-emerald-400" />
+            <h3 class="font-semibold text-sm text-zinc-100">打开新的串口/RTT设备会话</h3>
+          </div>
+          <button
+            @click="isNewPortModalOpen = false"
+            class="p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
           >
-            {{ item.type }}
-          </span>
+            <X class="w-4 h-4" />
+          </button>
+        </div>
 
-          <!-- Content -->
-          <span
-            class="flex-1 break-all whitespace-pre-wrap"
-            :class="{
-              'text-emerald-300': item.type === 'rx',
-              'text-sky-300 font-medium': item.type === 'tx',
-              'text-amber-300': item.type === 'info',
-              'text-rose-400 font-semibold': item.type === 'error',
-            }"
-          >{{ item.text }}</span>
+        <!-- Dialog Body -->
+        <div class="p-5 space-y-4">
+          <!-- Port Selection -->
+          <div>
+            <div class="flex items-center justify-between text-xs text-zinc-300 mb-1.5">
+              <label>目标物理串口 / 虚拟通道:</label>
+              <button
+                @click="refreshPortList"
+                class="flex items-center gap-1 text-[11px] text-emerald-400 hover:underline"
+              >
+                <RefreshCw class="w-3 h-3" :class="{ 'animate-spin': isRefreshingPorts }" />
+                <span>刷新</span>
+              </button>
+            </div>
+            <select
+              v-model="newPortSelected"
+              class="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none cursor-pointer"
+            >
+              <option v-if="availablePorts.length === 0" value="">暂无可用串口</option>
+              <option
+                v-for="p in availablePorts"
+                :key="p.port_name"
+                :value="p.port_name"
+                class="bg-zinc-900 text-zinc-200"
+              >
+                {{ p.port_name }} ({{ p.description }})
+              </option>
+            </select>
+          </div>
+
+          <!-- Baud Rate (if not RTT) -->
+          <div v-if="!newPortSelected.startsWith('RTT')">
+            <label class="block text-xs text-zinc-300 mb-1.5">波特率 (Baud Rate):</label>
+            <select
+              v-model="newPortBaud"
+              class="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none cursor-pointer"
+            >
+              <option v-for="b in baudRates" :key="b" :value="b" class="bg-zinc-900 text-zinc-200">
+                {{ b }} bps {{ b === 921600 ? '⚡ (极速推荐)' : '' }}
+              </option>
+            </select>
+          </div>
+
+          <!-- RTT Memory Scan Preset & Custom / Pack Options (if RTT) -->
+          <div v-else class="space-y-3">
+            <div>
+              <div class="flex items-center justify-between text-xs text-zinc-300 mb-1.5">
+                <label>RTT RAM 扫描预设 / 范围:</label>
+                <button
+                  @click="importPackForNewPortRtt"
+                  :disabled="isNewPortImportingPack"
+                  class="text-[11px] text-purple-400 hover:text-purple-300 hover:underline flex items-center gap-1"
+                >
+                  <FolderArchive class="w-3.5 h-3.5" />
+                  <span>导入Pack自动解析</span>
+                </button>
+              </div>
+              <select
+                v-model="newPortRttRamPreset"
+                @change="(e: any) => {
+                  const val = Number(e.target.value);
+                  if (val !== -1) {
+                    const found = rttRamPresets.find(p => p.start === val);
+                    if (found) newPortRttRamSize = found.size;
+                  }
+                }"
+                class="w-full bg-purple-950/70 border border-purple-800 focus:border-purple-500 rounded-lg px-3 py-2 text-xs text-purple-200 outline-none cursor-pointer font-mono"
+              >
+                <option v-for="p in rttRamPresets" :key="p.label" :value="p.start" class="bg-zinc-900 text-zinc-200">
+                  ⚡ {{ p.label }}
+                </option>
+              </select>
+            </div>
+
+            <div v-if="newPortImportedPackInfo" class="text-[11px] text-emerald-400 font-mono bg-emerald-950/60 border border-emerald-800/60 rounded px-2.5 py-1.5">
+              ✓ Pack 解析: {{ newPortImportedPackInfo }}
+            </div>
+
+            <!-- Custom RAM / RTT block inputs when custom selected or pack imported -->
+            <div v-if="newPortRttRamPreset === -1" class="bg-zinc-950 border border-zinc-800 rounded-lg p-3 space-y-2.5 font-mono text-xs">
+              <div class="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label class="block text-[11px] text-zinc-400 mb-1">RAM 起始地址 (Start):</label>
+                  <input
+                    v-model="newPortRttCustomStartHex"
+                    type="text"
+                    placeholder="0x20000000"
+                    class="w-full bg-zinc-900 border border-zinc-800 focus:border-purple-500 rounded px-2 py-1 text-purple-300 outline-none"
+                  />
+                </div>
+                <div>
+                  <label class="block text-[11px] text-zinc-400 mb-1">RAM 大小 (Size):</label>
+                  <input
+                    v-model="newPortRttCustomSizeHex"
+                    type="text"
+                    placeholder="0x20000"
+                    class="w-full bg-zinc-900 border border-zinc-800 focus:border-purple-500 rounded px-2 py-1 text-purple-300 outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-[11px] text-zinc-400 mb-1">
+                  指定 RTT 控制块地址 (选填，留空则自动扫描):
+                </label>
+                <input
+                  v-model="newPortRttBlockAddrHex"
+                  type="text"
+                  placeholder="例如 0x20001458 (留空则在RAM内自动扫描)"
+                  class="w-full bg-zinc-900 border border-zinc-800 focus:border-purple-500 rounded px-2 py-1 text-zinc-200 outline-none"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-zinc-950/80 border border-zinc-800 rounded-lg p-3 text-[11px] text-zinc-400 space-y-1">
+            <p class="text-zinc-300 font-semibold">💡 并行多设备运行提示：</p>
+            <p>• 每个打开的串口拥有独立的后台通信线程、日志缓冲区与触发器应答规则。</p>
+            <p>• 切换不同标签页时，后台会话不会断开，数据无损实时接收。</p>
+          </div>
+        </div>
+
+        <!-- Dialog Footer -->
+        <div class="px-5 py-3.5 bg-zinc-950/60 border-t border-zinc-800 flex items-center justify-end gap-2">
+          <button
+            @click="isNewPortModalOpen = false"
+            class="px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+          >
+            取消
+          </button>
+          <button
+            @click="confirmOpenNewPort"
+            :disabled="!newPortSelected"
+            class="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
+          >
+            <Power class="w-3.5 h-3.5" />
+            <span>确认连接打开</span>
+          </button>
         </div>
       </div>
-
-      <!-- Right: Collapsible Command Group Panel -->
-      <div
-        v-show="isCommandPanelOpen"
-        class="w-88 border-l border-zinc-800 flex flex-col shrink-0 overflow-hidden"
-      >
-        <CommandGroupPanel
-          ref="cmdPanelRef"
-          :is-connected="isConnected"
-          @log="appendLog"
-          @bytes-sent="(c) => txBytesCount += c"
-          @group-changed="(g) => activeGroup = g"
-        />
-      </div>
-
-      <!-- Right: Collapsible Smart Trigger Panel -->
-      <div
-        v-show="isTriggerPanelOpen"
-        class="flex flex-col shrink-0 overflow-hidden"
-      >
-        <TriggerPanel
-          ref="triggerPanelRef"
-          @close="isTriggerPanelOpen = false"
-        />
-      </div>
-    </div>
-
-    <!-- Quick Commands Bar -->
-    <div class="bg-zinc-900/70 border-t border-zinc-800 px-3 py-1 flex items-center gap-1.5 overflow-x-auto select-none">
-      <span class="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold shrink-0">
-        {{ activeGroup ? activeGroup.name : '快捷指令' }}:
-      </span>
-
-      <!-- Commands in active group (每个都支持直接单击单独发送!) -->
-      <template v-if="activeGroup && activeGroup.commands.length > 0">
-        <button
-          v-for="cmd in activeGroup.commands"
-          :key="cmd.id"
-          @click="handleSendSingleGroupCommand(cmd)"
-          :disabled="!isConnected"
-          :title="`[单击单发] ${cmd.label} | ${cmd.payload} (${cmd.format}, ${cmd.lineEnding})`"
-          class="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[10.5px] border border-zinc-700/60 transition-colors disabled:opacity-40 flex items-center gap-1 shrink-0 group/btn"
-        >
-          <span class="font-medium group-hover/btn:text-white">{{ cmd.label }}</span>
-          <span
-            class="text-[9px] px-1 rounded font-mono font-bold"
-            :class="{
-              'text-cyan-400 bg-cyan-950/80 border border-cyan-800/40': cmd.lineEnding === 'crlf',
-              'text-blue-400 bg-blue-950/80 border border-blue-800/40': cmd.lineEnding === 'lf',
-              'text-teal-400 bg-teal-950/80 border border-teal-800/40': cmd.lineEnding === 'cr',
-              'text-amber-400 bg-amber-950/80 border border-amber-800/40': cmd.lineEnding === 'none' && cmd.format === 'string',
-              'text-purple-400 bg-purple-950/80 border border-purple-800/40': cmd.format === 'hex',
-            }"
-          >
-            {{ cmd.format === 'hex' ? 'HEX' : cmd.lineEnding === 'crlf' ? '+CRLF' : cmd.lineEnding === 'lf' ? '+LF' : cmd.lineEnding === 'cr' ? '+CR' : 'RAW' }}
-          </span>
-        </button>
-      </template>
-
-      <!-- Fallback default buttons if no group -->
-      <template v-else>
-        <button
-          v-for="cmd in ['help', 'AT', 'reboot', 'status', 'version']"
-          :key="cmd"
-          @click="handleSendMessage(cmd)"
-          :disabled="!isConnected"
-          class="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10.5px] border border-zinc-700/60 transition-colors disabled:opacity-40 shrink-0"
-        >
-          {{ cmd }}
-        </button>
-      </template>
-
-      <!-- Toggle command group panel button -->
-      <button
-        @click="isCommandPanelOpen = !isCommandPanelOpen"
-        class="ml-auto px-2 py-0.5 rounded text-[10.5px] text-emerald-400 hover:bg-emerald-950/60 border border-emerald-800/40 transition-colors shrink-0 flex items-center gap-1 font-medium"
-      >
-        <Layers class="w-3 h-3" />
-        <span>{{ isCommandPanelOpen ? '隐藏抽屉' : '管理命令组' }}</span>
-      </button>
-    </div>
-
-    <!-- Bottom Input & Send Bar -->
-    <div class="bg-zinc-900 border-t border-zinc-800 p-2.5 flex items-center gap-2 select-none">
-      <!-- Input Format Mode -->
-      <select
-        v-model="inputMode"
-        class="bg-zinc-950 border border-zinc-800 text-zinc-200 text-xs py-1.5 px-2 rounded outline-none"
-      >
-        <option value="string">文本 (String)</option>
-        <option value="hex">HEX 格式</option>
-      </select>
-
-      <!-- Line Ending Mode -->
-      <select
-        v-if="inputMode === 'string'"
-        v-model="lineEnding"
-        class="bg-zinc-950 border border-zinc-800 text-zinc-200 text-xs py-1.5 px-2 rounded outline-none"
-      >
-        <option value="crlf">+CRLF (\r\n)</option>
-        <option value="lf">+LF (\n)</option>
-        <option value="cr">+CR (\r)</option>
-        <option value="none">无换行</option>
-      </select>
-
-      <!-- Input Textbox -->
-      <div class="flex-1 relative">
-        <input
-          v-model="inputMessage"
-          @keydown.enter="handleSendMessage()"
-          type="text"
-          :placeholder="inputMode === 'hex' ? '输入HEX字节，如: 01 03 00 00 00 02 C4 0B' : '输入发送指令，回车直接发送...'"
-          class="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded px-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 outline-none transition-colors"
-          :disabled="!isConnected"
-        />
-      </div>
-
-      <!-- Send Button -->
-      <button
-        @click="handleSendMessage()"
-        :disabled="!isConnected || !inputMessage"
-        class="flex items-center gap-1 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold transition-colors disabled:opacity-40 disabled:hover:bg-emerald-600"
-      >
-        <Send class="w-3.5 h-3.5" />
-        <span>发送</span>
-      </button>
     </div>
   </div>
 </template>

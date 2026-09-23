@@ -81,7 +81,7 @@ pub fn run() {
         .on_window_event(move |_window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
                 log_debug("[WINDOW_EVENT] Window closing, cleaning up all background processes...");
-                let _ = serial_win.close();
+                let _ = serial_win.close(None);
                 daemon_win.stop();
             }
         })
@@ -143,6 +143,9 @@ pub fn run() {
             commands::svd_write_field,
             commands::set_waveform_protocol,
             commands::clear_waveform_protocol,
+            commands::list_active_serial_sessions,
+            commands::set_waveform_source,
+            commands::get_waveform_source,
         ])
         .build(tauri::generate_context!()) {
             Ok(a) => {
@@ -184,18 +187,18 @@ pub fn run() {
             }
             tauri::RunEvent::WindowEvent { event, .. } => {
                 if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
-                    let _ = serial_exit.close();
+                    let _ = serial_exit.close(None);
                     daemon_exit.stop();
                 }
             }
             tauri::RunEvent::Exit => {
                 log_debug("[EVENT] RunEvent::Exit");
-                let _ = serial_exit.close();
+                let _ = serial_exit.close(None);
                 daemon_exit.stop();
             }
             tauri::RunEvent::ExitRequested { .. } => {
                 log_debug("[EVENT] RunEvent::ExitRequested");
-                let _ = serial_exit.close();
+                let _ = serial_exit.close(None);
                 daemon_exit.stop();
             }
             _ => {}

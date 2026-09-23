@@ -23,6 +23,7 @@ pub fn open_serial_port(
     baud_rate: u32,
     ram_start: Option<u64>,
     ram_size: Option<u64>,
+    block_address: Option<u64>,
 ) -> Result<(), String> {
     if port_name.starts_with("RTT") {
         state.daemon.ensure_started(&app)?;
@@ -37,6 +38,7 @@ pub fn open_serial_port(
                 "probe_type": probe_type,
                 "ram_start": ram_start,
                 "ram_size": ram_size,
+                "block_address": block_address,
             }),
         )?;
         let tcp_port = rtt_res
@@ -51,38 +53,78 @@ pub fn open_serial_port(
 }
 
 #[tauri::command]
-pub fn close_serial_port(state: State<'_, AppState>) -> Result<(), String> {
-    let _ = state.daemon.call_rpc("stop_rtt", json!({}));
-    state.serial.close()
+pub fn close_serial_port(
+    state: State<'_, AppState>,
+    port_name: Option<String>,
+) -> Result<(), String> {
+    if let Some(ref name) = port_name {
+        if name.starts_with("RTT") {
+            let _ = state.daemon.call_rpc("stop_rtt", json!({}));
+        }
+    } else {
+        let _ = state.daemon.call_rpc("stop_rtt", json!({}));
+    }
+    state.serial.close(port_name.as_deref())
 }
 
 #[tauri::command]
-pub fn send_serial_data(state: State<'_, AppState>, data: Vec<u8>) -> Result<usize, String> {
-    state.serial.write_data(&data)
+pub fn send_serial_data(
+    state: State<'_, AppState>,
+    data: Vec<u8>,
+    port_name: Option<String>,
+) -> Result<usize, String> {
+    state.serial.write_data(&data, port_name.as_deref())
 }
 
 #[tauri::command]
-pub fn set_dtr(state: State<'_, AppState>, level: bool) -> Result<(), String> {
-    state.serial.set_dtr(level)
+pub fn set_dtr(
+    state: State<'_, AppState>,
+    level: bool,
+    port_name: Option<String>,
+) -> Result<(), String> {
+    state.serial.set_dtr(level, port_name.as_deref())
 }
 
 #[tauri::command]
-pub fn set_rts(state: State<'_, AppState>, level: bool) -> Result<(), String> {
-    state.serial.set_rts(level)
+pub fn set_rts(
+    state: State<'_, AppState>,
+    level: bool,
+    port_name: Option<String>,
+) -> Result<(), String> {
+    state.serial.set_rts(level, port_name.as_deref())
 }
 
 #[tauri::command]
 pub async fn execute_reset_sequence(
     state: State<'_, AppState>,
     seq_type: String,
+    port_name: Option<String>,
 ) -> Result<(), String> {
     let is_bootloader = seq_type == "bootloader_reset";
-    state.serial.execute_reset(is_bootloader).await
+    state.serial.execute_reset(is_bootloader, port_name.as_deref()).await
 }
 
 #[tauri::command]
-pub fn get_serial_status(state: State<'_, AppState>) -> (bool, Option<String>, bool, bool, bool) {
-    state.serial.get_status()
+pub fn get_serial_status(
+    state: State<'_, AppState>,
+    port_name: Option<String>,
+) -> (bool, Option<String>, bool, bool, bool) {
+    state.serial.get_status(port_name.as_deref())
+}
+
+#[tauri::command]
+pub fn list_active_serial_sessions(state: State<'_, AppState>) -> Vec<String> {
+    state.serial.list_active_sessions()
+}
+
+#[tauri::command]
+pub fn set_waveform_source(state: State<'_, AppState>, port_name: Option<String>) {
+    state.serial.set_waveform_source(port_name);
+}
+
+#[tauri::command]
+pub fn get_waveform_source(state: State<'_, AppState>) -> Option<String> {
+    state.serial.get_waveform_source()
 }
 
 #[tauri::command]
@@ -356,7 +398,7 @@ pub fn jscope_start_sampling(
 
 #[tauri::command]
 pub fn jscope_stop_sampling(state: State<'_, AppState>) -> Result<Value, String> {
-    let _ = state.serial.close();
+    let _ = state.serial.close(None);
     state.daemon.call_rpc("stop_jscope_sampling", json!({}))
 }
 

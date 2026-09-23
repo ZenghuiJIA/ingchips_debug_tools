@@ -10,7 +10,10 @@ import {
   Zap,
   Activity,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  Settings2,
+  FolderArchive,
+  X
 } from '@lucide/vue';
 
 const props = defineProps<{
@@ -19,7 +22,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'connect', port: string, baudRate: number, ramStart?: number, ramSize?: number): void;
+  (e: 'connect', port: string, baudRate: number, ramStart?: number, ramSize?: number, blockAddress?: number): void;
   (e: 'disconnect'): void;
   (e: 'resetTriggered', seq: string): void;
 }>();
@@ -29,7 +32,7 @@ const selectedPort = ref<string>('');
 const selectedBaud = ref<number>(115200);
 const baudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
-// RTT RAM Scan Range presets
+// RTT RAM Scan Range presets & custom address/size support
 const rttRamPresets = [
   { label: 'SRAM 0x20000000 (128KB 常用M4/M3)', start: 0x20000000, size: 0x20000 },
   { label: 'SRAM 0x20000000 (64KB 常用M0/M3)', start: 0x20000000, size: 0x10000 },
@@ -38,9 +41,16 @@ const rttRamPresets = [
   { label: 'DTCM 0x20000000 (128KB Cortex-M7)', start: 0x20000000, size: 0x20000 },
   { label: 'ITCM/RAM 0x00000000 (64KB Cortex-M0)', start: 0x00000000, size: 0x10000 },
   { label: 'AXI-SRAM 0x24000000 (512KB H7系列)', start: 0x24000000, size: 0x80000 },
+  { label: '自定义 / Pack解析地址', start: -1, size: -1 },
 ];
 const selectedRttRamPreset = ref<number>(0x20000000);
 const selectedRttRamSize = ref<number>(0x20000);
+const isCustomRttOpen = ref<boolean>(false);
+const customRttStartHex = ref<string>('0x20000000');
+const customRttSizeHex = ref<string>('0x20000');
+const customRttBlockAddrHex = ref<string>(''); // Exact RTT Control Block address
+const isImportingPack = ref<boolean>(false);
+const importedPackInfo = ref<string>('');
 
 const dtrState = ref<boolean>(false);
 const rtsState = ref<boolean>(false);
@@ -127,13 +137,49 @@ async function refreshMetrics() {
   }
 }
 
+async function importPackForRtt() {
+  try {
+    const selected: string | null = await safeInvoke('pick_pack_file', {
+      title: '选择芯片 CMSIS-Pack 文件以解析默认 RAM / RTT 地址'
+    });
+    if (selected) {
+      isImportingPack.value = true;
+      const res: any = await safeInvoke('svd_import_pack', { packPath: selected });
+      if (res && res.devices && res.devices.length > 0) {
+        const dev = res.devices[0];
+        customRttStartHex.value = dev.ram_start || '0x20000000';
+        const sizeVal = dev.ram_size || 0x20000;
+        customRttSizeHex.value = `0x${sizeVal.toString(16).toUpperCase()}`;
+        importedPackInfo.value = `${dev.name} (${dev.vendor}): RAM ${customRttStartHex.value} (${customRttSizeHex.value})`;
+        selectedRttRamPreset.value = -1;
+      }
+    }
+  } catch (err: any) {
+    alert(`导入 Pack 解析失败: ${err}`);
+  } finally {
+    isImportingPack.value = false;
+  }
+}
+
 function handleToggleConnect() {
   if (props.isConnected) {
     emit('disconnect');
   } else {
     if (!selectedPort.value) return;
     if (selectedPort.value.startsWith('RTT')) {
-      emit('connect', selectedPort.value, Number(selectedBaud.value), selectedRttRamPreset.value, selectedRttRamSize.value);
+      let rStart = selectedRttRamPreset.value;
+      let rSize = selectedRttRamSize.value;
+      let bAddr: number | undefined = undefined;
+
+      if (selectedRttRamPreset.value === -1 || isCustomRttOpen.value) {
+        rStart = parseInt(customRttStartHex.value.trim(), 16);
+        rSize = parseInt(customRttSizeHex.value.trim(), 16);
+        if (customRttBlockAddrHex.value.trim()) {
+          bAddr = parseInt(customRttBlockAddrHex.value.trim(), 16);
+        }
+      }
+
+      emit('connect', selectedPort.value, Number(selectedBaud.value), rStart, rSize, bAddr);
     } else {
       emit('connect', selectedPort.value, Number(selectedBaud.value));
     }
@@ -270,8 +316,13 @@ onUnmounted(() => {
         <select
           v-model="selectedRttRamPreset"
           @change="(e: any) => {
-            const found = rttRamPresets.find(p => p.start === Number(e.target.value));
-            if (found) selectedRttRamSize = found.size;
+            const val = Number(e.target.value);
+            if (val === -1) {
+              isCustomRttOpen = true;
+            } else {
+              const found = rttRamPresets.find(p => p.start === val);
+              if (found) selectedRttRamSize = found.size;
+            }
           }"
           class="bg-purple-950/70 border border-purple-800 text-xs text-purple-200 py-1.5 px-2.5 rounded-md outline-none cursor-pointer font-mono"
           :disabled="isConnected"
@@ -281,6 +332,16 @@ onUnmounted(() => {
             ⚡ {{ p.label }}
           </option>
         </select>
+
+        <!-- Custom RTT / Pack Button -->
+        <button
+          @click="isCustomRttOpen = !isCustomRttOpen"
+          :disabled="isConnected"
+          class="p-1.5 rounded-md bg-purple-950/80 hover:bg-purple-900 border border-purple-800 text-purple-300 transition-colors"
+          title="自定义 RTT 扫描基地址、大小、指定 RTT 控制块，或导入外部 Pack 解析"
+        >
+          <Settings2 class="w-3.5 h-3.5" />
+        </button>
       </div>
 
       <!-- Connect/Disconnect Button -->
@@ -357,4 +418,100 @@ onUnmounted(() => {
       </div>
     </div>
   </header>
+
+  <!-- Custom RTT / CMSIS-Pack RAM Configuration Modal -->
+  <div
+    v-if="isCustomRttOpen"
+    class="fixed inset-0 bg-black/75 backdrop-blur-xs z-50 flex items-center justify-center p-4 select-none font-sans"
+  >
+    <div class="bg-zinc-900 border border-purple-800/80 rounded-xl w-full max-w-lg shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+      <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between bg-purple-950/40">
+        <div class="flex items-center gap-2">
+          <Settings2 class="w-5 h-5 text-purple-400" />
+          <h3 class="font-semibold text-sm text-zinc-100">自定义 RTT 内存扫描 / 导入外部 Pack</h3>
+        </div>
+        <button
+          @click="isCustomRttOpen = false"
+          class="p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
+        >
+          <X class="w-4 h-4" />
+        </button>
+      </div>
+
+      <div class="p-5 space-y-4">
+        <!-- Pack import option -->
+        <div class="bg-zinc-950 border border-zinc-800 rounded-lg p-3">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs text-zinc-300 font-semibold flex items-center gap-1.5">
+              <FolderArchive class="w-4 h-4 text-purple-400" />
+              <span>方式一：导入外部 CMSIS-Pack (.pack) 解析芯片 RAM</span>
+            </span>
+            <button
+              @click="importPackForRtt"
+              :disabled="isImportingPack"
+              class="px-2.5 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium transition-colors flex items-center gap-1"
+            >
+              <RefreshCw v-if="isImportingPack" class="w-3.5 h-3.5 animate-spin" />
+              <span>浏览并导入Pack</span>
+            </button>
+          </div>
+          <p v-if="importedPackInfo" class="text-[11px] text-emerald-400 font-mono bg-emerald-950/60 border border-emerald-800/60 rounded px-2 py-1">
+            ✓ 已解析: {{ importedPackInfo }}
+          </p>
+          <p v-else class="text-[11px] text-zinc-500">
+            支持 Keil DFP 芯片包，自动读取内部设备定义中的 RAM 起始地址与长度
+          </p>
+        </div>
+
+        <!-- Manual input option -->
+        <div class="bg-zinc-950 border border-zinc-800 rounded-lg p-3 space-y-3">
+          <span class="text-xs text-zinc-300 font-semibold block">
+            方式二：手动指定 RTT 扫描地址与范围
+          </span>
+
+          <div class="grid grid-cols-2 gap-3 font-mono text-xs">
+            <div>
+              <label class="block text-[11px] text-zinc-400 mb-1">RAM 起始地址 (Start):</label>
+              <input
+                v-model="customRttStartHex"
+                type="text"
+                placeholder="0x20000000"
+                class="w-full bg-zinc-900 border border-zinc-800 focus:border-purple-500 rounded px-2.5 py-1.5 text-purple-300 outline-none"
+              />
+            </div>
+            <div>
+              <label class="block text-[11px] text-zinc-400 mb-1">RAM 扫描大小 (Size):</label>
+              <input
+                v-model="customRttSizeHex"
+                type="text"
+                placeholder="0x20000 (128KB)"
+                class="w-full bg-zinc-900 border border-zinc-800 focus:border-purple-500 rounded px-2.5 py-1.5 text-purple-300 outline-none"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-[11px] text-zinc-400 mb-1 font-mono">
+              精确 RTT 控制块地址 (选填，留空则在 RAM 范围内自动扫描):
+            </label>
+            <input
+              v-model="customRttBlockAddrHex"
+              type="text"
+              placeholder="例如 0x20001458 (MAP 文件中的 _SEGGER_RTT 地址)"
+              class="w-full bg-zinc-900 border border-zinc-800 focus:border-purple-500 rounded px-2.5 py-1.5 text-xs text-zinc-200 outline-none font-mono"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div class="px-5 py-3 bg-zinc-950/80 border-t border-zinc-800 flex items-center justify-end gap-2">
+        <button
+          @click="isCustomRttOpen = false"
+          class="px-4 py-1.5 rounded-lg text-xs bg-purple-600 hover:bg-purple-500 text-white font-semibold transition-colors"
+        >
+          保存并应用
+        </button>
+      </div>
+    </div>
+  </div>
 </template>
