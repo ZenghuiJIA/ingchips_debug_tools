@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
-import type { PortInfo, SystemMetrics } from '../types';
+import type { PortInfo, SystemMetrics, SvdDevice } from '../types';
 import {
   Cpu,
   RefreshCw,
@@ -51,6 +51,15 @@ const customRttSizeHex = ref<string>('0x20000');
 const customRttBlockAddrHex = ref<string>(''); // Exact RTT Control Block address
 const isImportingPack = ref<boolean>(false);
 const importedPackInfo = ref<string>('');
+const packDevices = ref<SvdDevice[]>([]);
+const selectedPackDevice = ref<string>('');
+const packDeviceSearch = ref<string>('');
+
+const filteredPackDevices = computed(() => {
+  if (!packDeviceSearch.value.trim()) return packDevices.value;
+  const kw = packDeviceSearch.value.trim().toLowerCase();
+  return packDevices.value.filter(d => d.name.toLowerCase().includes(kw));
+});
 
 const dtrState = ref<boolean>(false);
 const rtsState = ref<boolean>(false);
@@ -146,11 +155,12 @@ async function importPackForRtt() {
       isImportingPack.value = true;
       const res: any = await safeInvoke('svd_import_pack', { packPath: selected });
       if (res && res.devices && res.devices.length > 0) {
+        packDevices.value = res.devices;
+        importedPackInfo.value = `${res.pack}: 成功解析到 ${res.devices.length} 个芯片型号`;
+        // Select first device by default
         const dev = res.devices[0];
-        customRttStartHex.value = dev.ram_start || '0x20000000';
-        const sizeVal = dev.ram_size || 0x20000;
-        customRttSizeHex.value = `0x${sizeVal.toString(16).toUpperCase()}`;
-        importedPackInfo.value = `${dev.name} (${dev.vendor}): RAM ${customRttStartHex.value} (${customRttSizeHex.value})`;
+        selectedPackDevice.value = dev.name;
+        applyDeviceRam(dev);
         selectedRttRamPreset.value = -1;
       }
     }
@@ -158,6 +168,19 @@ async function importPackForRtt() {
     alert(`导入 Pack 解析失败: ${err}`);
   } finally {
     isImportingPack.value = false;
+  }
+}
+
+function applyDeviceRam(dev: SvdDevice) {
+  customRttStartHex.value = dev.ram_start || '0x20000000';
+  const sizeVal = dev.ram_size || 0x20000;
+  customRttSizeHex.value = `0x${sizeVal.toString(16).toUpperCase()}`;
+}
+
+function handlePackDeviceChange() {
+  const found = packDevices.value.find(d => d.name === selectedPackDevice.value);
+  if (found) {
+    applyDeviceRam(found);
   }
 }
 
@@ -461,6 +484,33 @@ onUnmounted(() => {
           <p v-else class="text-[11px] text-zinc-500">
             支持 Keil DFP 芯片包，自动读取内部设备定义中的 RAM 起始地址与长度
           </p>
+
+          <!-- Device Model Selector inside Pack -->
+          <div v-if="packDevices.length > 0" class="mt-3 pt-2.5 border-t border-zinc-800 space-y-2">
+            <div class="flex items-center justify-between text-xs text-zinc-300">
+              <label class="font-semibold text-purple-300">选择具体芯片型号 ({{ packDevices.length }} 个型号):</label>
+              <input
+                v-model="packDeviceSearch"
+                type="text"
+                placeholder="搜索型号，如: GD32F450..."
+                class="bg-zinc-900 border border-zinc-800 focus:border-purple-500 rounded px-2 py-0.5 text-[11px] text-zinc-200 outline-none w-44"
+              />
+            </div>
+            <select
+              v-model="selectedPackDevice"
+              @change="handlePackDeviceChange"
+              class="w-full bg-zinc-900 border border-purple-800/80 focus:border-purple-500 rounded px-2.5 py-1.5 text-xs text-purple-200 outline-none font-mono cursor-pointer"
+            >
+              <option
+                v-for="d in filteredPackDevices"
+                :key="d.name"
+                :value="d.name"
+                class="bg-zinc-900 text-zinc-200"
+              >
+                {{ d.name }} [{{ d.vendor }}] · RAM: {{ d.ram_start }} ({{ (d.ram_size / 1024).toFixed(0) }}KB)
+              </option>
+            </select>
+          </div>
         </div>
 
         <!-- Manual input option -->

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
-import type { TerminalSessionTab, PortInfo } from '../types';
+import type { TerminalSessionTab, PortInfo, SvdDevice } from '../types';
 import SerialTerminalSession from './SerialTerminalSession.vue';
 import {
   Plus,
@@ -54,6 +54,30 @@ const newPortRttCustomSizeHex = ref<string>('0x20000');
 const newPortRttBlockAddrHex = ref<string>(''); // Exact RTT CB
 const isNewPortImportingPack = ref<boolean>(false);
 const newPortImportedPackInfo = ref<string>('');
+const newPortPackDevices = ref<SvdDevice[]>([]);
+const newPortSelectedPackDevice = ref<string>('');
+const newPortPackDeviceSearch = ref<string>('');
+
+const filteredNewPortPackDevices = computed(() => {
+  if (!newPortPackDeviceSearch.value.trim()) return newPortPackDevices.value;
+  const q = newPortPackDeviceSearch.value.trim().toLowerCase();
+  return newPortPackDevices.value.filter(d =>
+    d.name.toLowerCase().includes(q) || d.vendor.toLowerCase().includes(q)
+  );
+});
+
+function applyNewPortDeviceRam(dev: SvdDevice) {
+  newPortRttCustomStartHex.value = dev.ram_start || '0x20000000';
+  const sizeVal = dev.ram_size || 0x20000;
+  newPortRttCustomSizeHex.value = `0x${sizeVal.toString(16).toUpperCase()}`;
+}
+
+function handleNewPortPackDeviceChange() {
+  const found = newPortPackDevices.value.find(d => d.name === newPortSelectedPackDevice.value);
+  if (found) {
+    applyNewPortDeviceRam(found);
+  }
+}
 
 async function importPackForNewPortRtt() {
   try {
@@ -64,11 +88,11 @@ async function importPackForNewPortRtt() {
       isNewPortImportingPack.value = true;
       const res: any = await safeInvoke('svd_import_pack', { packPath: selected });
       if (res && res.devices && res.devices.length > 0) {
+        newPortPackDevices.value = res.devices;
+        newPortImportedPackInfo.value = `${res.pack}: 成功解析到 ${res.devices.length} 个芯片型号`;
         const dev = res.devices[0];
-        newPortRttCustomStartHex.value = dev.ram_start || '0x20000000';
-        const sizeVal = dev.ram_size || 0x20000;
-        newPortRttCustomSizeHex.value = `0x${sizeVal.toString(16).toUpperCase()}`;
-        newPortImportedPackInfo.value = `${dev.name} (${dev.vendor}): RAM ${newPortRttCustomStartHex.value} (${newPortRttCustomSizeHex.value})`;
+        newPortSelectedPackDevice.value = dev.name;
+        applyNewPortDeviceRam(dev);
         newPortRttRamPreset.value = -1;
       }
     }
@@ -457,6 +481,33 @@ onMounted(() => {
 
             <div v-if="newPortImportedPackInfo" class="text-[11px] text-emerald-400 font-mono bg-emerald-950/60 border border-emerald-800/60 rounded px-2.5 py-1.5">
               ✓ Pack 解析: {{ newPortImportedPackInfo }}
+            </div>
+
+            <!-- Model Selection dropdown if Pack imported -->
+            <div v-if="newPortPackDevices.length > 0" class="bg-zinc-950 border border-purple-900/60 rounded-lg p-2.5 space-y-2">
+              <div class="flex items-center justify-between text-xs text-zinc-300">
+                <label class="font-semibold text-purple-300 text-[11px]">选择具体芯片型号 ({{ newPortPackDevices.length }} 个型号):</label>
+                <input
+                  v-model="newPortPackDeviceSearch"
+                  type="text"
+                  placeholder="搜索型号，如: GD32F450..."
+                  class="bg-zinc-900 border border-zinc-800 focus:border-purple-500 rounded px-2 py-0.5 text-[11px] text-zinc-200 outline-none w-36"
+                />
+              </div>
+              <select
+                v-model="newPortSelectedPackDevice"
+                @change="handleNewPortPackDeviceChange"
+                class="w-full bg-zinc-900 border border-purple-800/80 focus:border-purple-500 rounded px-2.5 py-1.5 text-xs text-purple-200 outline-none font-mono cursor-pointer"
+              >
+                <option
+                  v-for="d in filteredNewPortPackDevices"
+                  :key="d.name"
+                  :value="d.name"
+                  class="bg-zinc-900 text-zinc-200"
+                >
+                  {{ d.name }} [{{ d.vendor }}] · RAM: {{ d.ram_start }} ({{ (d.ram_size / 1024).toFixed(0) }}KB)
+                </option>
+              </select>
             </div>
 
             <!-- Custom RAM / RTT block inputs when custom selected or pack imported -->
