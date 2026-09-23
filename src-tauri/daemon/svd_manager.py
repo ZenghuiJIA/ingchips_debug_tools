@@ -13,6 +13,7 @@ Enhanced with resilient XML sanitization supporting diverse vendor formats
 import os
 import sys
 import re
+import shutil
 import zipfile
 import xml.etree.ElementTree as ET
 import logging
@@ -115,6 +116,18 @@ class SvdManager:
             logger.info(f"Populated PyOCD targets from imported pack: {abs_path}")
         except Exception as e:
             logger.warning(f"Could not populate PyOCD targets from {abs_path}: {e}")
+
+        # Persist pack file into tool's primary packs/ directory so it stays permanently available across sessions
+        try:
+            from daemon_entry import get_primary_packs_dir
+            primary_dir = get_primary_packs_dir()
+            dest_pack = os.path.join(primary_dir, os.path.basename(abs_path))
+            if os.path.abspath(dest_pack) != abs_path:
+                shutil.copy2(abs_path, dest_pack)
+                logger.info(f"Persisted imported pack to: {dest_pack}")
+                abs_path = os.path.abspath(dest_pack)
+        except Exception as e:
+            logger.warning(f"Could not persist pack to primary packs directory: {e}")
 
         # Add to discovered packs list in daemon_entry
         from daemon_entry import _DISCOVERED_PACKS, _PACKS_LOCK

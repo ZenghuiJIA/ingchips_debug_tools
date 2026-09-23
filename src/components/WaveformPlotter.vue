@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue';
 import { isTauri, safeInvoke } from '../utils/ipc';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SerialRxPayload, PlotterChannel, JScopeSymbol, WaveformPointsPayload } from '../types';
@@ -123,13 +123,20 @@ const activePortList = ref<string[]>([]);
 
 async function refreshActivePortList() {
   try {
-    const list: string[] = await safeInvoke('list_active_serial_sessions');
-    activePortList.value = list;
+    const serialList: string[] = await safeInvoke('list_active_serial_sessions') || [];
+    let netList: string[] = [];
+    try {
+      const netSessions: any[] = await safeInvoke('list_network_streams') || [];
+      netList = netSessions.filter(s => s.is_connected).map(s => `[NET] ${s.name} (${s.host}:${s.port})`);
+    } catch (_) {}
+
+    const combined = [...serialList, ...netList];
+    activePortList.value = combined;
     const currentBound: string | null = await safeInvoke('get_waveform_source');
     if (currentBound) {
       boundWaveformSource.value = currentBound;
-    } else if (list.length > 0 && !boundWaveformSource.value) {
-      boundWaveformSource.value = list[0];
+    } else if (combined.length > 0 && !boundWaveformSource.value) {
+      boundWaveformSource.value = combined[0];
       await handleWaveformSourceChange();
     }
   } catch (err) {
@@ -351,15 +358,74 @@ const channels = ref<PlotterChannel[]>([]);
 const receivedSamplesCount = ref<number>(0);
 const fps = ref<number>(60);
 
+// --- Real-time Measurement & FFT Spectrum State (Powered by Rust Native DSP) ---
+export interface WaveformMeasurements {
+  max: number;
+  min: number;
+  vpp: number;
+  mean: number;
+  rms: number;
+  frequency: number | null;
+  period_sec: number | null;
+  duty_cycle_percent: number | null;
+}
+
+export interface FftPoint {
+  freq_hz: number;
+  magnitude: number;
+  db: number;
+}
+
+export interface HarmonicInfo {
+  order: number;
+  freq_hz: number;
+  magnitude: number;
+  dbc: number;
+}
+
+export interface FftAnalysisResult {
+  spectrum: FftPoint[];
+  fundamental_freq: number | null;
+  fundamental_mag: number | null;
+  harmonics: HarmonicInfo[];
+  thd_percent: number | null;
+  nyquist_hz: number;
+  resolution_hz: number;
+}
+
+const plotterDisplayMode = ref<'time' | 'fft'>('time');
+const selectedMeasureChannelId = ref<string>('');
+const selectedWindowFunction = ref<string>('hanning');
+const fftSizeOption = ref<number>(1024);
+
+const liveMeasurements = ref<WaveformMeasurements>({
+  max: 0,
+  min: 0,
+  vpp: 0,
+  mean: 0,
+  rms: 0,
+  frequency: null,
+  period_sec: null,
+  duty_cycle_percent: null,
+});
+
+const liveFftResult = ref<FftAnalysisResult | null>(null);
+let dspTimer: any = null;
+
 // Hover tooltip
 const mouseX = ref<number | null>(null);
 const mouseY = ref<number | null>(null);
 const hoveredData = ref<{ x: number; y: number; values: { name: string; color: string; val: number }[] } | null>(null);
 
+// High Refresh Rate & Downsampling State
+const fpsTarget = ref<'vsync' | '120hz' | '60hz' | '30hz'>('vsync');
+const downsampleMode = ref<'none' | 'smart_minmax' | '2x' | '5x' | '10x'>('smart_minmax');
+
 let unlistenRx: UnlistenFn | null = null;
 let unlistenPoints: UnlistenFn | null = null;
 let simTimer: any = null;
 let animFrameId: number | null = null;
+let renderTimerId: any = null;
 let lastFpsTime = performance.now();
 let framesRendered = 0;
 
@@ -371,6 +437,7 @@ function getChannelColor(index: number): string {
 // --- Data Ingestion ---
 function ingestDataPoint(record: Record<string, number>, timestamp: number) {
   receivedSamplesCount.value++;
+  lastDataIngestTime = performance.now();
 
   for (const [key, val] of Object.entries(record)) {
     let ch = channels.value.find(c => c.name === key);
@@ -396,8 +463,9 @@ function ingestDataPoint(record: Record<string, number>, timestamp: number) {
 
     if (!isPaused.value) {
       ch.points.push({ t: timestamp, v: val });
-      if (ch.points.length > MAX_BUFFER_POINTS) {
-        ch.points.shift();
+      // Batch slice rather than calling shift() on each incoming point (O(1) amortized vs O(N) memory copy)
+      if (ch.points.length > MAX_BUFFER_POINTS + 1000) {
+        ch.points = ch.points.slice(ch.points.length - MAX_BUFFER_POINTS);
       }
     }
   }
@@ -567,6 +635,61 @@ function clearPlot() {
     ch.maxValue = 0;
   }
   receivedSamplesCount.value = 0;
+  liveFftResult.value = null;
+}
+
+/**
+ * Periodically compute high-precision waveform measurements & FFT in Rust backend
+ */
+async function triggerDspCalculations() {
+  if (channels.value.length === 0) return;
+
+  // Determine active target channel
+  let targetCh = channels.value.find(c => c.id === selectedMeasureChannelId.value);
+  if (!targetCh) {
+    targetCh = channels.value.find(c => c.visible) || channels.value[0];
+    if (targetCh) selectedMeasureChannelId.value = targetCh.id;
+  }
+  if (!targetCh || targetCh.points.length < 16) return;
+
+  // Extract raw values slice
+  const sliceLen = Math.min(targetCh.points.length, fftSizeOption.value);
+  const rawValues = targetCh.points.slice(targetCh.points.length - sliceLen).map(p => p.v);
+
+  // Estimate sample rate from time intervals or configured period
+  let sampleRateHz = 50.0; // Fallback
+  if (isSampling.value && samplePeriodUs.value > 0) {
+    sampleRateHz = 1000000.0 / samplePeriodUs.value;
+  } else if (targetCh.points.length >= 2) {
+    const p1 = targetCh.points[targetCh.points.length - 1].t;
+    const p0 = targetCh.points[targetCh.points.length - 2].t;
+    const dt = (p1 - p0) / 1000.0;
+    if (dt > 1e-4) {
+      sampleRateHz = 1.0 / dt;
+    }
+  }
+
+  try {
+    // 1. Rust Time-domain measurements
+    const meas: WaveformMeasurements = await safeInvoke('dsp_measure_waveform', {
+      samples: rawValues,
+      sampleRateHz
+    });
+    liveMeasurements.value = meas;
+
+    // 2. Rust FFT Spectrum calculation (if in FFT view or visible)
+    if (plotterDisplayMode.value === 'fft' || rawValues.length >= 64) {
+      const fftRes: FftAnalysisResult = await safeInvoke('dsp_compute_fft', {
+        samples: rawValues,
+        sampleRateHz,
+        fftSize: fftSizeOption.value,
+        windowType: selectedWindowFunction.value
+      });
+      liveFftResult.value = fftRes;
+    }
+  } catch (err) {
+    // Graceful degradation
+  }
 }
 
 function exportCsv() {
@@ -603,7 +726,41 @@ function exportCsv() {
   URL.revokeObjectURL(url);
 }
 
+// Dirty check & rendering activity timestamp to save GPU and CPU resources
+let lastDataIngestTime = performance.now();
+
 // --- Canvas Rendering Loop ---
+function scheduleNextRender() {
+  const now = performance.now();
+  const isIdle = (now - lastDataIngestTime > 1500) && !isSimulating.value && !isDragging.value && !isSampling.value;
+
+  if (isIdle) {
+    // When idle (no new data & no user interaction), throttle to 10 FPS (~100ms) to let GPU rest
+    renderTimerId = setTimeout(() => {
+      animFrameId = requestAnimationFrame(renderCanvas);
+    }, 100);
+    return;
+  }
+
+  if (fpsTarget.value === '120hz') {
+    // 120 FPS target: ~8.33ms
+    renderTimerId = setTimeout(() => {
+      animFrameId = requestAnimationFrame(renderCanvas);
+    }, 4);
+  } else if (fpsTarget.value === '60hz') {
+    renderTimerId = setTimeout(() => {
+      animFrameId = requestAnimationFrame(renderCanvas);
+    }, 12);
+  } else if (fpsTarget.value === '30hz') {
+    renderTimerId = setTimeout(() => {
+      animFrameId = requestAnimationFrame(renderCanvas);
+    }, 28);
+  } else {
+    // Native VSync (60Hz ~ 144Hz+ depending on monitor)
+    animFrameId = requestAnimationFrame(renderCanvas);
+  }
+}
+
 function renderCanvas() {
   framesRendered++;
   const now = performance.now();
@@ -615,13 +772,13 @@ function renderCanvas() {
 
   const canvas = canvasRef.value;
   if (!canvas) {
-    animFrameId = requestAnimationFrame(renderCanvas);
+    scheduleNextRender();
     return;
   }
 
   const ctx = canvas.getContext('2d');
   if (!ctx) {
-    animFrameId = requestAnimationFrame(renderCanvas);
+    scheduleNextRender();
     return;
   }
 
@@ -645,7 +802,7 @@ function renderCanvas() {
   const plotH = height - padTop - padBottom;
 
   if (plotW <= 0 || plotH <= 0) {
-    animFrameId = requestAnimationFrame(renderCanvas);
+    scheduleNextRender();
     return;
   }
 
@@ -765,37 +922,130 @@ function renderCanvas() {
     ctx.fillText(`#${sampleIdx}`, x, height - padBottom + 6 * dpr);
   }
 
-  // 2. Draw Waveforms (Clipped to plot area)
+  const visibleChannels = channels.value.filter(c => c.visible && c.points.length > 1);
+
+  // 2. Draw Waveforms or FFT Spectrum (Clipped to plot area)
   ctx.save();
   ctx.beginPath();
   ctx.rect(padLeft, padTop, plotW, plotH);
   ctx.clip();
 
-  const visibleChannels = channels.value.filter(c => c.visible && c.points.length > 1);
+  if (plotterDisplayMode.value === 'fft') {
+    // --- Draw FFT Spectrum ---
+    if (liveFftResult.value && liveFftResult.value.spectrum.length > 0) {
+      const spec = liveFftResult.value.spectrum;
+      const maxMag = Math.max(0.1, ...spec.map(p => p.magnitude));
 
-  for (const ch of visibleChannels) {
-    ctx.strokeStyle = ch.color;
-    ctx.lineWidth = 2 * dpr;
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
+      // Draw Spectrum Curve
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 1.5 * dpr;
+      ctx.beginPath();
 
-    const pts = ch.points;
-    const pStart = Math.max(0, Math.floor(curOffset) - 1);
-    const pEnd = Math.min(pts.length - 1, Math.ceil(curOffset + curSpan) + 1);
-
-    let isFirst = true;
-    for (let i = pStart; i <= pEnd; i++) {
-      const px = padLeft + ((i - curOffset) / (curSpan - 1)) * plotW;
-      const py = padTop + ((curMaxY - pts[i].v) / yRange) * plotH;
-
-      if (isFirst) {
-        ctx.moveTo(px, py);
-        isFirst = false;
-      } else {
-        ctx.lineTo(px, py);
+      for (let i = 0; i < spec.length; i++) {
+        const px = padLeft + (i / (spec.length - 1)) * plotW;
+        const py = padTop + (1.0 - (spec[i].magnitude / maxMag)) * (plotH * 0.9);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
       }
+      ctx.stroke();
+
+      // Highlight Fundamental and Harmonics
+      for (const h of liveFftResult.value.harmonics) {
+        const binRatio = h.freq_hz / liveFftResult.value.nyquist_hz;
+        if (binRatio >= 0 && binRatio <= 1) {
+          const hx = padLeft + binRatio * plotW;
+          const hy = padTop + (1.0 - (h.magnitude / maxMag)) * (plotH * 0.9);
+
+          // Marker Point
+          ctx.fillStyle = h.order === 1 ? '#f59e0b' : '#a855f7';
+          ctx.beginPath();
+          ctx.arc(hx, hy, 4 * dpr, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Label
+          ctx.font = `${9 * dpr}px monospace`;
+          ctx.textAlign = 'center';
+          ctx.fillText(h.order === 1 ? `f0:${Math.round(h.freq_hz)}Hz` : `${h.order}f`, hx, hy - 6 * dpr);
+        }
+      }
+    } else {
+      ctx.fillStyle = '#71717a';
+      ctx.font = `${12 * dpr}px monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText('FFT 计算中，需采集至少 16 个点...', padLeft + plotW / 2, padTop + plotH / 2);
     }
-    ctx.stroke();
+  } else {
+    // --- Normal Time-Domain Waveforms with Downsampling Support ---
+    for (const ch of visibleChannels) {
+      ctx.strokeStyle = ch.color;
+      ctx.lineWidth = 2 * dpr;
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+
+      const pts = ch.points;
+      const pStart = Math.max(0, Math.floor(curOffset) - 1);
+      const pEnd = Math.min(pts.length - 1, Math.ceil(curOffset + curSpan) + 1);
+      const totalVisiblePts = pEnd - pStart + 1;
+
+      // Decide downsampling strategy
+      const mode = downsampleMode.value;
+      const step = mode === '2x' ? 2 : mode === '5x' ? 5 : mode === '10x' ? 10 : 1;
+
+      if (mode === 'smart_minmax' && totalVisiblePts > (plotW / dpr) * 2) {
+        // High-density: Min-Max Pixel Bucket Decimation (Preserves spikes & envelopes at 120Hz)
+        const numBuckets = Math.min(Math.floor(plotW / dpr), totalVisiblePts);
+        const ptsPerBucket = totalVisiblePts / numBuckets;
+
+        let isFirst = true;
+        for (let b = 0; b < numBuckets; b++) {
+          const bStart = pStart + Math.floor(b * ptsPerBucket);
+          const bEnd = Math.min(pEnd, pStart + Math.floor((b + 1) * ptsPerBucket));
+
+          let minVal = pts[bStart].v;
+          let maxVal = pts[bStart].v;
+          for (let k = bStart + 1; k < bEnd; k++) {
+            const v = pts[k].v;
+            if (v < minVal) minVal = v;
+            if (v > maxVal) maxVal = v;
+          }
+
+          const midIdx = (bStart + bEnd) / 2;
+          const px = padLeft + ((midIdx - curOffset) / (curSpan - 1)) * plotW;
+          const pyMin = padTop + ((curMaxY - minVal) / yRange) * plotH;
+          const pyMax = padTop + ((curMaxY - maxVal) / yRange) * plotH;
+
+          if (isFirst) {
+            ctx.moveTo(px, pyMin);
+            if (pyMin !== pyMax) ctx.lineTo(px, pyMax);
+            isFirst = false;
+          } else {
+            ctx.lineTo(px, pyMin);
+            ctx.lineTo(px, pyMax);
+          }
+        }
+      } else {
+        // Standard or Stepped Downsampling
+        let isFirst = true;
+        for (let i = pStart; i <= pEnd; i += step) {
+          const px = padLeft + ((i - curOffset) / (curSpan - 1)) * plotW;
+          const py = padTop + ((curMaxY - pts[i].v) / yRange) * plotH;
+
+          if (isFirst) {
+            ctx.moveTo(px, py);
+            isFirst = false;
+          } else {
+            ctx.lineTo(px, py);
+          }
+        }
+        // Always connect the absolute final point
+        if (pEnd > pStart && ((pEnd - pStart) % step !== 0)) {
+          const px = padLeft + ((pEnd - curOffset) / (curSpan - 1)) * plotW;
+          const py = padTop + ((curMaxY - pts[pEnd].v) / yRange) * plotH;
+          ctx.lineTo(px, py);
+        }
+      }
+      ctx.stroke();
+    }
   }
   ctx.restore();
 
@@ -839,7 +1089,7 @@ function renderCanvas() {
     hoveredData.value = null;
   }
 
-  animFrameId = requestAnimationFrame(renderCanvas);
+  scheduleNextRender();
 }
 
 // --- Canvas Resizing & Mouse Interaction ---
@@ -1005,9 +1255,46 @@ onMounted(async () => {
       console.warn('Failed to listen to serial events in Plotter:', err);
     }
   }
+
+  // Periodic background DSP trigger (200ms interval) for real-time measurements & FFT
+  dspTimer = setInterval(() => {
+    triggerDspCalculations();
+  }, 200);
+});
+
+// Resource governance: Suspend GPU Canvas rendering and DSP computations when tab is inactive
+onDeactivated(() => {
+  if (dspTimer) {
+    clearInterval(dspTimer);
+    dspTimer = null;
+  }
+  if (renderTimerId) {
+    clearTimeout(renderTimerId);
+    renderTimerId = null;
+  }
+  if (animFrameId) {
+    cancelAnimationFrame(animFrameId);
+    animFrameId = null;
+  }
+});
+
+onActivated(() => {
+  nextTick(() => {
+    resizeCanvas();
+    if (!animFrameId) {
+      animFrameId = requestAnimationFrame(renderCanvas);
+    }
+    if (!dspTimer) {
+      dspTimer = setInterval(() => {
+        triggerDspCalculations();
+      }, 200);
+    }
+  });
 });
 
 onUnmounted(() => {
+  if (dspTimer) clearInterval(dspTimer);
+  if (renderTimerId) clearTimeout(renderTimerId);
   if (unlistenRx) unlistenRx();
   if (unlistenPoints) unlistenPoints();
   if (simTimer) clearInterval(simTimer);
@@ -1130,10 +1417,45 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <!-- Right: Settings & Stats -->
-      <div class="flex items-center gap-3 text-zinc-400 text-[11px]">
+      <!-- Right Controls: Display Mode, Window, Points, Y Axis, Metrics -->
+      <div class="flex items-center gap-3">
+        <!-- Plotter Display Mode: Time Domain vs FFT Spectrum -->
+        <div class="flex items-center bg-zinc-950 border border-zinc-800 rounded p-0.5">
+          <button
+            @click="plotterDisplayMode = 'time'"
+            class="px-2 py-0.5 rounded text-[11px] transition-colors"
+            :class="plotterDisplayMode === 'time' ? 'bg-zinc-800 text-cyan-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
+            title="时域波形走势图"
+          >
+            📈 时域
+          </button>
+          <button
+            @click="plotterDisplayMode = 'fft'"
+            class="px-2 py-0.5 rounded text-[11px] transition-colors"
+            :class="plotterDisplayMode === 'fft' ? 'bg-zinc-800 text-amber-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
+            title="FFT 频域幅值谱分析 (Rust 原生微秒级加速)"
+          >
+            📊 FFT 频谱
+          </button>
+        </div>
+
+        <!-- Window Function Selector (when FFT is active) -->
+        <div v-if="plotterDisplayMode === 'fft'" class="flex items-center gap-1">
+          <span class="text-amber-400">窗函数:</span>
+          <select
+            v-model="selectedWindowFunction"
+            class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200 focus:outline-none"
+          >
+            <option value="hanning">汉宁窗 (Hanning/推荐)</option>
+            <option value="hamming">海明窗 (Hamming)</option>
+            <option value="blackman_harris">Blackman-Harris (92dB)</option>
+            <option value="flattop">Flat Top (幅值标定)</option>
+            <option value="rectangular">矩形窗 (无窗)</option>
+          </select>
+        </div>
+
         <!-- Points Window Selector -->
-        <div class="flex items-center gap-1">
+        <div v-if="plotterDisplayMode === 'time'" class="flex items-center gap-1">
           <span>点数:</span>
           <select
             v-model="maxPoints"
@@ -1145,11 +1467,44 @@ onUnmounted(() => {
             <option :value="1000">1000 点</option>
             <option :value="2000">2000 点</option>
             <option :value="5000">5000 点</option>
+            <option :value="10000">10000 点</option>
+            <option :value="20000">20000 点</option>
+          </select>
+        </div>
+
+        <!-- Downsampling Mode Selector -->
+        <div v-if="plotterDisplayMode === 'time'" class="flex items-center gap-1">
+          <span class="text-sky-400">降采样:</span>
+          <select
+            v-model="downsampleMode"
+            class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-sky-200 focus:outline-none"
+            title="大数据量降采样渲染，保持高刷丝滑"
+          >
+            <option value="smart_minmax">智能Min-Max分桶(极速推荐)</option>
+            <option value="none">全量原始点(无降采样)</option>
+            <option value="2x">2倍降采样 (1/2)</option>
+            <option value="5x">5倍降采样 (1/5)</option>
+            <option value="10x">10倍降采样 (1/10)</option>
+          </select>
+        </div>
+
+        <!-- High-FPS Target Selector -->
+        <div class="flex items-center gap-1">
+          <span class="text-emerald-400">刷新率:</span>
+          <select
+            v-model="fpsTarget"
+            class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-emerald-300 focus:outline-none font-bold"
+            title="目标渲染帧率，120Hz 极速电竞级丝滑刷新"
+          >
+            <option value="vsync">VSync 屏幕原生</option>
+            <option value="120hz">⚡ 120 FPS 极速高刷</option>
+            <option value="60hz">60 FPS 均衡</option>
+            <option value="30hz">30 FPS 低功耗</option>
           </select>
         </div>
 
         <!-- Y Axis Mode -->
-        <div class="flex items-center gap-1">
+        <div v-if="plotterDisplayMode === 'time'" class="flex items-center gap-1">
           <span>Y轴:</span>
           <select
             v-model="yAxisMode"
@@ -1164,7 +1519,7 @@ onUnmounted(() => {
 
         <!-- Metrics -->
         <div class="flex items-center gap-2 font-mono">
-          <span>帧率: <strong class="text-emerald-400">{{ fps }}</strong> FPS</span>
+          <span>帧率: <strong class="text-emerald-400 font-bold">{{ fps }}</strong> FPS</span>
           <span>样本: <strong class="text-zinc-300">{{ receivedSamplesCount }}</strong></span>
         </div>
       </div>
@@ -1250,6 +1605,59 @@ onUnmounted(() => {
         >
           <span :style="{ color: item.color }">{{ item.name }}:</span>
           <strong class="text-zinc-100">{{ item.val.toFixed(2) }}</strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- Real-time Oscilloscope Measurement Bar (Powered by Rust Native DSP) -->
+    <div class="bg-zinc-950 border-t border-zinc-800 px-4 py-1.5 flex items-center justify-between gap-4 text-xs font-mono shrink-0 select-text overflow-x-auto">
+      <div class="flex items-center gap-1.5 shrink-0">
+        <span class="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">标尺测量:</span>
+        <select
+          v-model="selectedMeasureChannelId"
+          class="bg-zinc-900 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200 text-[11px] outline-none"
+        >
+          <option v-for="c in channels" :key="c.id" :value="c.id">{{ c.name }}</option>
+        </select>
+      </div>
+
+      <!-- Measurement Values Grid -->
+      <div class="flex items-center gap-4 text-[11px] flex-wrap">
+        <div><span class="text-zinc-500">Vpp:</span> <strong class="text-emerald-400">{{ liveMeasurements.vpp.toFixed(2) }}</strong></div>
+        <div><span class="text-zinc-500">Max:</span> <strong class="text-zinc-300">{{ liveMeasurements.max.toFixed(2) }}</strong></div>
+        <div><span class="text-zinc-500">Min:</span> <strong class="text-zinc-300">{{ liveMeasurements.min.toFixed(2) }}</strong></div>
+        <div><span class="text-zinc-500">Mean:</span> <strong class="text-zinc-300">{{ liveMeasurements.mean.toFixed(2) }}</strong></div>
+        <div><span class="text-zinc-500">RMS:</span> <strong class="text-cyan-400">{{ liveMeasurements.rms.toFixed(2) }}</strong></div>
+
+        <!-- Frequency & Period -->
+        <div>
+          <span class="text-zinc-500">频率:</span>
+          <strong class="text-amber-400 ml-1">
+            {{ liveMeasurements.frequency !== null ? (liveMeasurements.frequency >= 1000 ? `${(liveMeasurements.frequency / 1000).toFixed(2)} kHz` : `${liveMeasurements.frequency.toFixed(1)} Hz`) : '--' }}
+          </strong>
+        </div>
+
+        <div>
+          <span class="text-zinc-500">周期:</span>
+          <strong class="text-amber-300 ml-1">
+            {{ liveMeasurements.period_sec !== null ? (liveMeasurements.period_sec < 0.001 ? `${(liveMeasurements.period_sec * 1000000).toFixed(1)} µs` : `${(liveMeasurements.period_sec * 1000).toFixed(2)} ms`) : '--' }}
+          </strong>
+        </div>
+
+        <!-- Duty Cycle -->
+        <div>
+          <span class="text-zinc-500">占空比:</span>
+          <strong class="text-purple-400 ml-1">
+            {{ liveMeasurements.duty_cycle_percent !== null ? `${liveMeasurements.duty_cycle_percent.toFixed(1)}%` : '--' }}
+          </strong>
+        </div>
+
+        <!-- THD Distortion -->
+        <div>
+          <span class="text-zinc-500">THD失真:</span>
+          <strong class="text-rose-400 ml-1">
+            {{ liveFftResult?.thd_percent !== null && liveFftResult?.thd_percent !== undefined ? `${liveFftResult.thd_percent.toFixed(2)}%` : '--' }}
+          </strong>
         </div>
       </div>
     </div>

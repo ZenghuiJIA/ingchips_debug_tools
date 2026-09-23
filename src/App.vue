@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { isTauri } from './utils/ipc';
 import HeaderBar from './components/HeaderBar.vue';
 import SerialTerminal from './components/SerialTerminal.vue';
@@ -9,6 +9,8 @@ import HardFaultInspector from './components/HardFaultInspector.vue';
 import MemoryInspector from './components/MemoryInspector.vue';
 import FirmwareResourceAnalyzer from './components/FirmwareResourceAnalyzer.vue';
 import SvdRegisterInspector from './components/SvdRegisterInspector.vue';
+import RTOSTracer from './components/RTOSTracer.vue';
+import LcdScreenMirror from './components/LcdScreenMirror.vue';
 import AiCopilot from './components/AiCopilot.vue';
 import {
   Terminal,
@@ -19,17 +21,44 @@ import {
   Database,
   Sparkles,
   Info,
-  Sliders
+  Sliders,
+  Cpu,
+  Monitor
 } from '@lucide/vue';
 
 const activeSessionsCount = ref<number>(0);
-const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'analyzer' | 'svd' | 'hardfault' | 'memory' | 'ai'>('terminal');
+const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'ai'>('terminal');
 const sharedFirmwarePath = ref<string>('');
 const runningInBrowser = ref<boolean>(!isTauri());
+
+function handleGlobalKeydown(e: KeyboardEvent) {
+  // Prevent F5 or Ctrl+R (Cmd+R on Mac) or Ctrl+Shift+R from accidentally reloading the debugging session
+  if (
+    e.key === 'F5' ||
+    ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R'))
+  ) {
+    e.preventDefault();
+  }
+}
+
+function handleGlobalContextMenu(e: MouseEvent) {
+  // Prevent native browser context menu from triggering page reload
+  e.preventDefault();
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleGlobalKeydown, true);
+  window.addEventListener('contextmenu', handleGlobalContextMenu, true);
+});
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown, true);
+  window.removeEventListener('contextmenu', handleGlobalContextMenu, true);
+});
 </script>
 
 <template>
-  <div class="h-screen w-screen flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden font-sans">
+  <div class="h-screen w-screen flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden font-sans" @contextmenu.prevent>
     <!-- Web Browser Notice if opened in Chrome/Edge instead of Tauri -->
     <div v-if="runningInBrowser" class="bg-amber-950/80 border-b border-amber-800 text-amber-300 px-4 py-1.5 flex items-center justify-between text-xs">
       <div class="flex items-center gap-2">
@@ -104,6 +133,28 @@ const runningInBrowser = ref<boolean>(!isTauri());
           </button>
 
           <button
+            @click="currentTab = 'rtos'"
+            class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
+            :class="currentTab === 'rtos' 
+              ? 'border-purple-500 text-purple-400 bg-zinc-800/40' 
+              : 'border-transparent text-zinc-400 hover:text-zinc-200'"
+          >
+            <Cpu class="w-3.5 h-3.5 text-purple-400" />
+            <span>RTOS 任务Trace</span>
+          </button>
+
+          <button
+            @click="currentTab = 'lcd'"
+            class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
+            :class="currentTab === 'lcd' 
+              ? 'border-cyan-500 text-cyan-400 bg-zinc-800/40' 
+              : 'border-transparent text-zinc-400 hover:text-zinc-200'"
+          >
+            <Monitor class="w-3.5 h-3.5 text-cyan-400" />
+            <span>屏幕显存镜像</span>
+          </button>
+
+          <button
             @click="currentTab = 'hardfault'"
             class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
             :class="currentTab === 'hardfault' 
@@ -144,7 +195,8 @@ const runningInBrowser = ref<boolean>(!isTauri());
 
       <!-- Tab Content Area -->
       <div class="flex-1 overflow-hidden relative">
-        <KeepAlive>
+        <!-- Resource governance: Limit KeepAlive cache to 2 components. Heavy analysis tools (SVD/RTOS/HardFault/LCD) are released when leaving -->
+        <KeepAlive :max="2">
           <component
             :is="
               currentTab === 'terminal' ? SerialTerminal :
@@ -152,6 +204,8 @@ const runningInBrowser = ref<boolean>(!isTauri());
               currentTab === 'flasher' ? PyocdFlasher :
               currentTab === 'analyzer' ? FirmwareResourceAnalyzer :
               currentTab === 'svd' ? SvdRegisterInspector :
+              currentTab === 'rtos' ? RTOSTracer :
+              currentTab === 'lcd' ? LcdScreenMirror :
               currentTab === 'hardfault' ? HardFaultInspector :
               currentTab === 'memory' ? MemoryInspector :
               AiCopilot

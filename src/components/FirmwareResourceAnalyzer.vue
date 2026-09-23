@@ -55,6 +55,7 @@ interface ChipPreset {
 }
 
 const chipPresets: ChipPreset[] = [
+  { label: '自适应 / 不指定规格 (仅分析绝对大小)', flashBytes: 0, ramBytes: 0 },
   { label: 'ING9188xx / ING91800 (512KB Flash / 64KB RAM)', flashBytes: 512 * 1024, ramBytes: 64 * 1024 },
   { label: 'ING9168xx / ING91600 (2048KB Flash / 32KB RAM)', flashBytes: 2048 * 1024, ramBytes: 32 * 1024 },
   { label: 'ING208xx / ING2000 (2048KB Flash / 32KB RAM)', flashBytes: 2048 * 1024, ramBytes: 32 * 1024 },
@@ -63,25 +64,31 @@ const chipPresets: ChipPreset[] = [
   { label: 'STM32H743VI (2048KB Flash / 1024KB RAM)', flashBytes: 2048 * 1024, ramBytes: 1024 * 1024 },
   { label: 'RP2040 (2048KB Flash / 264KB RAM)', flashBytes: 2048 * 1024, ramBytes: 264 * 1024 },
   { label: 'NRF52840 (1024KB Flash / 256KB RAM)', flashBytes: 1024 * 1024, ramBytes: 256 * 1024 },
-  { label: '自定义容量 (手动指定)', flashBytes: 0, ramBytes: 0 },
+  { label: '自定义容量 (手动指定)', flashBytes: -1, ramBytes: -1 },
 ];
 
-const selectedPreset = ref<number>(0);
+const selectedPreset = ref<number>(1);
 const customFlashKB = ref<number>(512);
 const customRamKB = ref<number>(64);
 
-const effectiveFlashBytes = computed<number>(() => {
+const effectiveFlashBytes = computed<number | null>(() => {
+  if (selectedPreset.value === 0) {
+    return null; // No limit preset
+  }
   if (selectedPreset.value === chipPresets.length - 1) {
     return (customFlashKB.value || 0) * 1024;
   }
-  return chipPresets[selectedPreset.value]?.flashBytes || 512 * 1024;
+  return chipPresets[selectedPreset.value]?.flashBytes || null;
 });
 
-const effectiveRamBytes = computed<number>(() => {
+const effectiveRamBytes = computed<number | null>(() => {
+  if (selectedPreset.value === 0) {
+    return null; // No limit preset
+  }
   if (selectedPreset.value === chipPresets.length - 1) {
     return (customRamKB.value || 0) * 1024;
   }
-  return chipPresets[selectedPreset.value]?.ramBytes || 64 * 1024;
+  return chipPresets[selectedPreset.value]?.ramBytes || null;
 });
 
 // Analysis results
@@ -703,7 +710,7 @@ onMounted(() => {
             </div>
             <div class="flex justify-between text-[10px] text-slate-500 font-mono">
               <span>已用: {{ analysisData.summary.rom_total_str }}</span>
-              <span>规格: {{ analysisData.summary.chip_flash_str }} (余 {{ analysisData.summary.flash_free_str }})</span>
+              <span>{{ analysisData.summary.chip_flash_str ? `规格: ${analysisData.summary.chip_flash_str} (余 ${analysisData.summary.flash_free_str})` : '未指定物理上限'}}</span>
             </div>
           </div>
 
@@ -756,7 +763,7 @@ onMounted(() => {
             </div>
             <div class="flex justify-between text-[10px] text-slate-500 font-mono">
               <span>已用: {{ analysisData.summary.ram_total_str }}</span>
-              <span>规格: {{ analysisData.summary.chip_ram_str }} (余 {{ analysisData.summary.ram_free_str }})</span>
+              <span>{{ analysisData.summary.chip_ram_str ? `规格: ${analysisData.summary.chip_ram_str} (余 ${analysisData.summary.ram_free_str})` : '未指定物理上限' }}</span>
             </div>
           </div>
 

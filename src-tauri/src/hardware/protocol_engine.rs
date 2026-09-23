@@ -338,9 +338,9 @@ fn validate_checksum(bytes: &[u8], chk: &ChecksumConfig) -> bool {
     if chk.offset >= bytes.len() {
         return false;
     }
-    let expected = bytes[chk.offset];
     match chk.check_type.to_lowercase().as_str() {
         "sum8" => {
+            let expected = bytes[chk.offset];
             let mut sum: u8 = 0;
             for (idx, &b) in bytes.iter().enumerate() {
                 if idx != chk.offset {
@@ -350,6 +350,7 @@ fn validate_checksum(bytes: &[u8], chk: &ChecksumConfig) -> bool {
             sum == expected
         }
         "xor8" => {
+            let expected = bytes[chk.offset];
             let mut xor_val: u8 = 0;
             for (idx, &b) in bytes.iter().enumerate() {
                 if idx != chk.offset {
@@ -357,6 +358,26 @@ fn validate_checksum(bytes: &[u8], chk: &ChecksumConfig) -> bool {
                 }
             }
             xor_val == expected
+        }
+        "modbus_crc16" | "modbus" => {
+            if chk.offset + 1 >= bytes.len() {
+                return false;
+            }
+            let data_slice = &bytes[..chk.offset];
+            let computed = crate::hardware::checksum::crc16_modbus(data_slice);
+            let expected_low = (computed & 0xFF) as u8;
+            let expected_high = ((computed >> 8) & 0xFF) as u8;
+            bytes[chk.offset] == expected_low && bytes[chk.offset + 1] == expected_high
+        }
+        "crc16_ccitt" | "ccitt" => {
+            if chk.offset + 1 >= bytes.len() {
+                return false;
+            }
+            let data_slice = &bytes[..chk.offset];
+            let computed = crate::hardware::checksum::crc16_ccitt(data_slice);
+            let expected_high = ((computed >> 8) & 0xFF) as u8;
+            let expected_low = (computed & 0xFF) as u8;
+            bytes[chk.offset] == expected_high && bytes[chk.offset + 1] == expected_low
         }
         _ => true,
     }

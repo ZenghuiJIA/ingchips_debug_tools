@@ -9,7 +9,9 @@ import {
   RefreshCw,
   Power,
   Radio,
-  FolderArchive
+  FolderArchive,
+  Network,
+  Globe
 } from '@lucide/vue';
 
 const props = defineProps<{
@@ -26,15 +28,80 @@ const emit = defineEmits<{
 const availablePorts = ref<PortInfo[]>([]);
 const isRefreshingPorts = ref<boolean>(false);
 
+// Storage keys for tabs persistence
+const STORAGE_KEY_TABS = 'ai_hil_serial_tabs';
+const STORAGE_KEY_ACTIVE_TAB = 'ai_hil_serial_active_tab';
+
+function loadSavedTabs(): TerminalSessionTab[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_TABS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.map(t => ({
+          ...t,
+          isConnected: false, // Default to false until synced with backend
+          rxBytesCount: 0,
+          txBytesCount: 0
+        }));
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to parse saved tabs from localStorage:', e);
+  }
+  return [];
+}
+
 // Active multi-session tabs
-const tabs = ref<TerminalSessionTab[]>([]);
-const activeTabId = ref<string>('');
+const tabs = ref<TerminalSessionTab[]>(loadSavedTabs());
+const activeTabId = ref<string>(localStorage.getItem(STORAGE_KEY_ACTIVE_TAB) || (tabs.value[0]?.id ?? ''));
+
+function saveTabsToStorage(newTabs: TerminalSessionTab[]) {
+  try {
+    const serialized = newTabs.map(t => ({
+      id: t.id,
+      portName: t.portName,
+      baudRate: t.baudRate,
+      isDaplink: t.isDaplink,
+      rttRamStart: t.rttRamStart,
+      rttRamSize: t.rttRamSize,
+      rttBlockAddress: t.rttBlockAddress
+    }));
+    localStorage.setItem(STORAGE_KEY_TABS, JSON.stringify(serialized));
+  } catch (e) {
+    console.warn('Failed to save tabs to localStorage:', e);
+  }
+}
+
+// Watch tabs changes and save to localStorage
+watch(
+  tabs,
+  (newTabs) => {
+    saveTabsToStorage(newTabs);
+  },
+  { deep: true }
+);
+
+watch(activeTabId, (newId) => {
+  if (newId) {
+    localStorage.setItem(STORAGE_KEY_ACTIVE_TAB, newId);
+  } else {
+    localStorage.removeItem(STORAGE_KEY_ACTIVE_TAB);
+  }
+});
 
 // Modal for opening a new port
 const isNewPortModalOpen = ref<boolean>(false);
+const newPortTabType = ref<'serial' | 'network'>('serial');
 const newPortSelected = ref<string>('');
 const newPortBaud = ref<number>(115200);
 const baudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+
+// Network Stream Configuration
+const networkMode = ref<'tcp_client' | 'tcp_server' | 'udp_socket'>('tcp_client');
+const networkHost = ref<string>('127.0.0.1');
+const networkPort = ref<number>(8080);
+const isConnectingNetwork = ref<boolean>(false);
 
 // RTT RAM presets for new tab
 const rttRamPresets = [
@@ -111,7 +178,19 @@ async function toggleTabConnection(tab: TerminalSessionTab) {
     }
   } else {
     try {
-      if (tab.portName.startsWith('RTT')) {
+      if (tab.portName.startsWith('TCP-Client:') || tab.portName.startsWith('TCP-Server:') || tab.portName.startsWith('UDP:')) {
+        const parts = tab.portName.split(':');
+        const prefix = parts[0];
+        const host = parts[1] || '127.0.0.1';
+        const port = Number(parts[2]) || 8080;
+        const mode = prefix.includes('Client') ? 'tcp_client' : prefix.includes('Server') ? 'tcp_server' : 'udp_socket';
+        await safeInvoke('start_network_stream', {
+          name: tab.portName,
+          mode,
+          host,
+          port
+        });
+      } else if (tab.portName.startsWith('RTT')) {
         await safeInvoke('open_serial_port', {
           portName: tab.portName,
           baudRate: tab.baudRate,
@@ -202,6 +281,56 @@ function openNewPortDialog() {
 }
 
 async function confirmOpenNewPort() {
+  if (newPortTabType.value === 'network') {
+    // Open Network Stream (TCP Client / TCP Server / UDP Socket)
+    const host = networkHost.value.trim() || '127.0.0.1';
+    const port = Number(networkPort.value) || 8080;
+    const mode = networkMode.value;
+    const prefix = mode === 'tcp_client' ? 'TCP-Client' : mode === 'tcp_server' ? 'TCP-Server' : 'UDP';
+    const streamName = `${prefix}:${host}:${port}`;
+
+    // Check if tab already exists
+    let tab = tabs.value.find(t => t.portName === streamName);
+    if (tab && tab.isConnected) {
+      activeTabId.value = tab.id;
+      isNewPortModalOpen.value = false;
+      return;
+    }
+
+    isConnectingNetwork.value = true;
+    try {
+      await safeInvoke('start_network_stream', {
+        name: streamName,
+        mode,
+        host,
+        port
+      });
+
+      if (!tab) {
+        tab = {
+          id: `tab_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+          portName: streamName,
+          baudRate: 0,
+          isConnected: true,
+          isDaplink: false,
+          rxBytesCount: 0,
+          txBytesCount: 0
+        };
+        tabs.value.push(tab);
+      } else {
+        tab.isConnected = true;
+      }
+
+      activeTabId.value = tab.id;
+      isNewPortModalOpen.value = false;
+    } catch (err: any) {
+      alert(`创建网络数据流 ${streamName} 失败: ${err}`);
+    } finally {
+      isConnectingNetwork.value = false;
+    }
+    return;
+  }
+
   if (!newPortSelected.value) return;
 
   const targetPort = newPortSelected.value;
@@ -274,6 +403,14 @@ async function closeTab(tab: TerminalSessionTab, e?: MouseEvent) {
     }
   }
 
+  // Check if waveform source is bound to this port, if so unbind to stop background piping
+  try {
+    const bound: string | null = await safeInvoke('get_waveform_source');
+    if (bound === tab.portName) {
+      await safeInvoke('set_waveform_source', { portName: null });
+    }
+  } catch {}
+
   const idx = tabs.value.findIndex(t => t.id === tab.id);
   if (idx !== -1) {
     tabs.value.splice(idx, 1);
@@ -295,8 +432,52 @@ function handleTabStatsUpdate(tabId: string, stats: { rx: number; tx: number }) 
   }
 }
 
-onMounted(() => {
-  refreshPortList();
+async function syncActiveSessions() {
+  try {
+    const activeSessions: string[] = await safeInvoke('list_active_serial_sessions');
+    
+    // 1. Mark status for existing tabs
+    for (const tab of tabs.value) {
+      tab.isConnected = activeSessions.includes(tab.portName);
+    }
+
+    // 2. Authoritative restoration: If backend has active sessions not in tabs, auto-reconstruct them!
+    for (const portName of activeSessions) {
+      const existing = tabs.value.find(t => t.portName === portName);
+      if (!existing) {
+        let isDap = availablePorts.value.find(p => p.port_name === portName)?.is_daplink ?? false;
+        try {
+          const [_, __, ___, ____, isDapBackend]: [boolean, string | null, boolean, boolean, boolean] = await safeInvoke('get_serial_status', { portName });
+          if (isDapBackend) isDap = true;
+        } catch {
+          // ignore
+        }
+
+        const newTab: TerminalSessionTab = {
+          id: `tab_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+          portName,
+          baudRate: 115200,
+          isConnected: true,
+          isDaplink: isDap,
+          rxBytesCount: 0,
+          txBytesCount: 0
+        };
+        tabs.value.push(newTab);
+      }
+    }
+
+    // Ensure activeTabId points to a valid tab
+    if (tabs.value.length > 0 && (!activeTabId.value || !tabs.value.some(t => t.id === activeTabId.value))) {
+      activeTabId.value = tabs.value[0].id;
+    }
+  } catch (err) {
+    console.warn('Sync active serial sessions failed:', err);
+  }
+}
+
+onMounted(async () => {
+  await refreshPortList();
+  await syncActiveSessions();
 });
 </script>
 
@@ -409,11 +590,25 @@ onMounted(() => {
       class="fixed inset-0 bg-black/70 backdrop-blur-xs z-50 flex items-center justify-center p-4"
     >
       <div class="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-md shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-        <!-- Dialog Header -->
-        <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between">
-          <div class="flex items-center gap-2">
-            <Radio class="w-5 h-5 text-emerald-400" />
-            <h3 class="font-semibold text-sm text-zinc-100">打开新的串口/RTT设备会话</h3>
+        <!-- Dialog Header with Mode Switch -->
+        <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
+          <div class="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+            <button
+              @click="newPortTabType = 'serial'"
+              :class="newPortTabType === 'serial' ? 'bg-zinc-800 text-emerald-400 font-semibold shadow' : 'text-zinc-400 hover:text-zinc-200'"
+              class="flex items-center gap-1.5 px-3 py-1 rounded-md text-xs transition-all"
+            >
+              <Radio class="w-3.5 h-3.5" />
+              <span>串口 / RTT 硬件设备</span>
+            </button>
+            <button
+              @click="newPortTabType = 'network'"
+              :class="newPortTabType === 'network' ? 'bg-zinc-800 text-sky-400 font-semibold shadow' : 'text-zinc-400 hover:text-zinc-200'"
+              class="flex items-center gap-1.5 px-3 py-1 rounded-md text-xs transition-all"
+            >
+              <Network class="w-3.5 h-3.5" />
+              <span>网络通信流 (TCP / UDP)</span>
+            </button>
           </div>
           <button
             @click="isNewPortModalOpen = false"
@@ -425,33 +620,102 @@ onMounted(() => {
 
         <!-- Dialog Body -->
         <div class="p-5 space-y-4">
-          <!-- Port Selection -->
-          <div>
-            <div class="flex items-center justify-between text-xs text-zinc-300 mb-1.5">
-              <label>目标物理串口 / 虚拟通道:</label>
-              <button
-                @click="refreshPortList"
-                class="flex items-center gap-1 text-[11px] text-emerald-400 hover:underline"
-              >
-                <RefreshCw class="w-3 h-3" :class="{ 'animate-spin': isRefreshingPorts }" />
-                <span>刷新</span>
-              </button>
+          <!-- Network Mode Options -->
+          <div v-if="newPortTabType === 'network'" class="space-y-3.5">
+            <div>
+              <label class="block text-xs text-zinc-300 mb-1.5">通信协议模式 (Protocol Mode):</label>
+              <div class="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  @click="networkMode = 'tcp_client'"
+                  :class="networkMode === 'tcp_client' ? 'bg-sky-950 border-sky-500 text-sky-300' : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700'"
+                  class="flex flex-col items-center justify-center p-2 rounded-lg border text-xs transition-all"
+                >
+                  <Globe class="w-4 h-4 mb-1" />
+                  <span class="font-semibold">TCP 客户端</span>
+                  <span class="text-[10px] text-zinc-500">连接远程目标</span>
+                </button>
+                <button
+                  type="button"
+                  @click="networkMode = 'tcp_server'"
+                  :class="networkMode === 'tcp_server' ? 'bg-indigo-950 border-indigo-500 text-indigo-300' : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700'"
+                  class="flex flex-col items-center justify-center p-2 rounded-lg border text-xs transition-all"
+                >
+                  <Network class="w-4 h-4 mb-1" />
+                  <span class="font-semibold">TCP 服务端</span>
+                  <span class="text-[10px] text-zinc-500">监听本地端口</span>
+                </button>
+                <button
+                  type="button"
+                  @click="networkMode = 'udp_socket'"
+                  :class="networkMode === 'udp_socket' ? 'bg-emerald-950 border-emerald-500 text-emerald-300' : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700'"
+                  class="flex flex-col items-center justify-center p-2 rounded-lg border text-xs transition-all"
+                >
+                  <Radio class="w-4 h-4 mb-1" />
+                  <span class="font-semibold">UDP 广播/单播</span>
+                  <span class="text-[10px] text-zinc-500">无连接数据包</span>
+                </button>
+              </div>
             </div>
-            <select
-              v-model="newPortSelected"
-              class="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none cursor-pointer"
-            >
-              <option v-if="availablePorts.length === 0" value="">暂无可用串口</option>
-              <option
-                v-for="p in availablePorts"
-                :key="p.port_name"
-                :value="p.port_name"
-                class="bg-zinc-900 text-zinc-200"
-              >
-                {{ p.port_name }} ({{ p.description }})
-              </option>
-            </select>
+
+            <div class="grid grid-cols-3 gap-3">
+              <div class="col-span-2">
+                <label class="block text-xs text-zinc-300 mb-1">
+                  {{ networkMode === 'tcp_server' ? '本地监听 IP / 地址' : '远程目标主机 / IP' }}:
+                </label>
+                <input
+                  v-model="networkHost"
+                  type="text"
+                  placeholder="127.0.0.1 或 0.0.0.0"
+                  class="w-full bg-zinc-950 border border-zinc-800 focus:border-sky-500 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none font-mono"
+                />
+              </div>
+              <div>
+                <label class="block text-xs text-zinc-300 mb-1">网络端口 (Port):</label>
+                <input
+                  v-model.number="networkPort"
+                  type="number"
+                  placeholder="8080"
+                  class="w-full bg-zinc-950 border border-zinc-800 focus:border-sky-500 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none font-mono"
+                />
+              </div>
+            </div>
+
+            <div class="bg-sky-950/40 border border-sky-800/50 rounded-lg p-2.5 text-[11px] text-sky-300/90 space-y-1">
+              <p class="font-semibold text-sky-200">🌐 网络数据流接入特性：</p>
+              <p>• 连接建立后自动接入全局流水线，终端会话可双向收发、HEX转码与校验追加。</p>
+              <p>• 接收到的网络遥测数据可直接在【波形显示器】实时绘图与测量分析。</p>
+            </div>
           </div>
+
+          <!-- Port Selection (Serial / RTT Mode) -->
+          <div v-else class="space-y-4">
+            <div>
+              <div class="flex items-center justify-between text-xs text-zinc-300 mb-1.5">
+                <label>目标物理串口 / 虚拟通道:</label>
+                <button
+                  @click="refreshPortList"
+                  class="flex items-center gap-1 text-[11px] text-emerald-400 hover:underline"
+                >
+                  <RefreshCw class="w-3 h-3" :class="{ 'animate-spin': isRefreshingPorts }" />
+                  <span>刷新</span>
+                </button>
+              </div>
+              <select
+                v-model="newPortSelected"
+                class="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none cursor-pointer"
+              >
+                <option v-if="availablePorts.length === 0" value="">暂无可用串口</option>
+                <option
+                  v-for="p in availablePorts"
+                  :key="p.port_name"
+                  :value="p.port_name"
+                  class="bg-zinc-900 text-zinc-200"
+                >
+                  {{ p.port_name }} ({{ p.description }})
+                </option>
+              </select>
+            </div>
 
           <!-- Baud Rate (if not RTT) -->
           <div v-if="!newPortSelected.startsWith('RTT')">
@@ -564,6 +828,7 @@ onMounted(() => {
               </div>
             </div>
           </div>
+          </div>
 
           <div class="bg-zinc-950/80 border border-zinc-800 rounded-lg p-3 text-[11px] text-zinc-400 space-y-1">
             <p class="text-zinc-300 font-semibold">💡 并行多设备运行提示：</p>
@@ -582,11 +847,11 @@ onMounted(() => {
           </button>
           <button
             @click="confirmOpenNewPort"
-            :disabled="!newPortSelected"
+            :disabled="newPortTabType === 'serial' ? !newPortSelected : (!networkHost || !networkPort)"
             class="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
           >
             <Power class="w-3.5 h-3.5" />
-            <span>确认连接打开</span>
+            <span>{{ newPortTabType === 'network' ? '建立网络数据流' : '确认连接打开' }}</span>
           </button>
         </div>
       </div>

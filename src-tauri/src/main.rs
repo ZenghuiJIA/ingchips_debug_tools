@@ -1,6 +1,27 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // Optimization: Constrain Edge WebView2 GPU & Renderer memory footprint
+    #[cfg(target_os = "windows")]
+    {
+        if std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_err() {
+            // --disable-features=AudioServiceOutOfProcess: save dedicated audio subprocess
+            // --disable-background-networking: stop Edge background telemetries
+            // --disable-gpu-memory-buffer-compositor-resources: stop allocating multiple swapchain GPU surfaces
+            // --gpu-memory-buffer-compositor-resources=1: minimize frame buffer memory
+            // --disable-breakpad: save crash reporting worker overhead
+            std::env::set_var(
+                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                "--disable-features=AudioServiceOutOfProcess,MediaRouter,OptimizationHints \
+                 --disable-background-networking \
+                 --disable-breakpad \
+                 --disable-gpu-memory-buffer-compositor-resources \
+                 --gpu-memory-buffer-compositor-resources=1 \
+                 --js-flags=--max-old-space-size=256"
+            );
+        }
+    }
+
     std::panic::set_hook(Box::new(|panic_info| {
         let msg = format!("PANIC: {:?}", panic_info);
 

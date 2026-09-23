@@ -1,6 +1,6 @@
 [package]
 name = "ai-hil-debugger"
-version = "1.0.0"
+version = "1.2.0"
 description = "AI-Driven Embedded Hardware-in-the-Loop (HIL) Debugger"
 authors = ["zenghuiJIA <zenghui.JIA@ingchips.com>"]
 license = "Apache-2.0"

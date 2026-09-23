@@ -17,11 +17,17 @@ import {
   Activity,
   Copy,
   Check,
-  Power
+  Power,
+  WrapText,
+  Sliders
 } from '@lucide/vue';
 import CommandGroupPanel from './CommandGroupPanel.vue';
 import TriggerPanel from './TriggerPanel.vue';
+import SerialXtermView from './SerialXtermView.vue';
+import ModbusDrawer from './ModbusDrawer.vue';
+import ProtocolDashboard from './ProtocolDashboard.vue';
 import { encodeCommand } from '../utils/commandEncoder';
+import { appendChecksum, type ChecksumAlgorithm } from '../utils/crc';
 import type { CommandGroup, CommandItem, TriggerRule, PortInfo } from '../types';
 
 const props = defineProps<{
@@ -104,7 +110,13 @@ const isCopiedAll = ref<boolean>(false);
 
 function copyAllLogs() {
   if (logs.value.length === 0) return;
-  const text = logs.value.map(l => (showTimestamps.value ? `[${l.timestamp}] ` : '') + `[${l.type.toUpperCase()}] ` + l.text).join('\n');
+  const text = logs.value.map(l => {
+    if (!showTimestamps.value && l.type === 'rx') {
+      return l.text;
+    }
+    const ts = showTimestamps.value ? `[${l.timestamp}] ` : '';
+    return `${ts}[${l.type.toUpperCase()}] ${l.text}`;
+  }).join('\n');
   navigator.clipboard.writeText(text);
   isCopiedAll.value = true;
   setTimeout(() => isCopiedAll.value = false, 2000);
@@ -112,9 +124,29 @@ function copyAllLogs() {
 
 const isCommandPanelOpen = ref<boolean>(false);
 const isTriggerPanelOpen = ref<boolean>(false);
+const isModbusDrawerOpen = ref<boolean>(false);
+const isDashboardOpen = ref<boolean>(false);
 const cmdPanelRef = ref<any>(null);
 const triggerPanelRef = ref<any>(null);
+const modbusDrawerRef = ref<any>(null);
+const xtermRef = ref<any>(null);
 const activeGroup = ref<CommandGroup | null>(null);
+
+const PREF_KEY_SESSION_MODE = 'ai_hil_pref_session_mode';
+const sessionMode = ref<'log' | 'vt100'>(
+  (localStorage.getItem(PREF_KEY_SESSION_MODE) as 'log' | 'vt100') || 'log'
+);
+watch(sessionMode, (m) => {
+  localStorage.setItem(PREF_KEY_SESSION_MODE, m);
+  if (m === 'vt100') {
+    nextTick(() => {
+      xtermRef.value?.fit();
+      xtermRef.value?.focus();
+    });
+  }
+});
+
+const checksumAlgo = ref<ChecksumAlgorithm>('none');
 
 function handleSendSingleGroupCommand(cmd: CommandItem) {
   if (cmdPanelRef.value) {
@@ -160,15 +192,46 @@ function handleIncomingRxText(text: string) {
 const logContainer = ref<HTMLElement | null>(null);
 const logs = shallowRef<SerialLogItem[]>([]);
 let nextLogId = 1;
-const MAX_LOG_LINES = 2500;
+// Optimized: Limit to 1200 lines per tab to keep DOM node count < 2000 and prevent Renderer memory bloat
+const MAX_LOG_LINES = 1200;
 
-const viewMode = ref<'string' | 'hex'>('string');
-const showTimestamps = ref<boolean>(true);
-const autoScroll = ref<boolean>(true);
+// Preferences persistence keys
+const PREF_KEY_TIMESTAMPS = 'ai_hil_pref_timestamps';
+const PREF_KEY_AUTOSCROLL = 'ai_hil_pref_autoscroll';
+const PREF_KEY_AUTOWRAP = 'ai_hil_pref_autowrap';
+const PREF_KEY_VIEWMODE = 'ai_hil_pref_viewmode';
+const PREF_KEY_LINE_ENDING = 'ai_hil_pref_line_ending';
+
+const viewMode = ref<'string' | 'hex'>(
+  (localStorage.getItem(PREF_KEY_VIEWMODE) as 'string' | 'hex') || 'string'
+);
+const showTimestamps = ref<boolean>(
+  localStorage.getItem(PREF_KEY_TIMESTAMPS) !== null
+    ? localStorage.getItem(PREF_KEY_TIMESTAMPS) === 'true'
+    : true
+);
+const autoScroll = ref<boolean>(
+  localStorage.getItem(PREF_KEY_AUTOSCROLL) !== null
+    ? localStorage.getItem(PREF_KEY_AUTOSCROLL) === 'true'
+    : true
+);
+const autoWrap = ref<boolean>(
+  localStorage.getItem(PREF_KEY_AUTOWRAP) !== null
+    ? localStorage.getItem(PREF_KEY_AUTOWRAP) === 'true'
+    : true
+);
+
+watch(viewMode, (v) => localStorage.setItem(PREF_KEY_VIEWMODE, v));
+watch(showTimestamps, (v) => localStorage.setItem(PREF_KEY_TIMESTAMPS, String(v)));
+watch(autoScroll, (v) => localStorage.setItem(PREF_KEY_AUTOSCROLL, String(v)));
+watch(autoWrap, (v) => localStorage.setItem(PREF_KEY_AUTOWRAP, String(v)));
 
 const inputMessage = ref<string>('');
 const inputMode = ref<'string' | 'hex'>('string');
-const lineEnding = ref<string>('crlf');
+const lineEnding = ref<string>(
+  localStorage.getItem(PREF_KEY_LINE_ENDING) || 'crlf'
+);
+watch(lineEnding, (v) => localStorage.setItem(PREF_KEY_LINE_ENDING, v));
 
 const rxBytesCount = ref<number>(0);
 const txBytesCount = ref<number>(0);
@@ -191,6 +254,30 @@ function scrollToBottom() {
 }
 
 function appendLog(text: string, type: 'rx' | 'tx' | 'info' | 'error', customTime?: string) {
+  // If receiving RX stream chunk and the previous log item is also RX:
+  // If showTimestamps is disabled, merge continuous RX chunks seamlessly into the last item
+  // unless user or incoming data explicitly contains newlines, or in line-mode.
+  // Even if showTimestamps is enabled, if the previous RX didn't end with newline,
+  // append in-place so buffer slicing never creates separate rows or broken words!
+  if (type === 'rx' && logs.value.length > 0) {
+    const lastItem = logs.value[logs.value.length - 1];
+    if (lastItem.type === 'rx') {
+      if (!showTimestamps.value) {
+        // Without timestamps, continuous RX is one continuous terminal output stream
+        lastItem.text += text;
+        logs.value = [...logs.value];
+        scrollToBottom();
+        return;
+      } else if (!lastItem.text.endsWith('\n') && !lastItem.text.endsWith('\r')) {
+        // With timestamps, if the line hasn't finished yet, append in-place
+        lastItem.text += text;
+        logs.value = [...logs.value];
+        scrollToBottom();
+        return;
+      }
+    }
+  }
+
   const newItem: SerialLogItem = {
     id: nextLogId++,
     timestamp: customTime || formatTimestamp(),
@@ -214,7 +301,13 @@ function clearLogs() {
 }
 
 function exportLogs() {
-  const content = logs.value.map(l => `[${l.timestamp}] [${l.type.toUpperCase()}] ${l.text}`).join('\n');
+  const content = logs.value.map(l => {
+    if (!showTimestamps.value && l.type === 'rx') {
+      return l.text;
+    }
+    const ts = showTimestamps.value ? `[${l.timestamp}] ` : '';
+    return `${ts}[${l.type.toUpperCase()}] ${l.text}`;
+  }).join('\n');
   const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -248,6 +341,11 @@ async function handleSendMessage(customText?: string) {
     bytes = Array.from(new TextEncoder().encode(payload));
   }
 
+  // Automatically append checksum if selected
+  if (checksumAlgo.value !== 'none') {
+    bytes = await appendChecksum(bytes, checksumAlgo.value);
+  }
+
   try {
     const sentCount: number = await safeInvoke('send_serial_data', { 
       data: bytes,
@@ -255,7 +353,14 @@ async function handleSendMessage(customText?: string) {
     });
     txBytesCount.value += sentCount;
     emit('update-stats', { rx: rxBytesCount.value, tx: txBytesCount.value });
-    appendLog(textToSend, 'tx');
+    
+    // If checksum was appended, log formatted hex
+    if (checksumAlgo.value !== 'none') {
+      const displayHex = bytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+      appendLog(`${textToSend} [追加校验: ${displayHex}]`, 'tx');
+    } else {
+      appendLog(textToSend, 'tx');
+    }
     if (customText === undefined) {
       inputMessage.value = '';
     }
@@ -295,6 +400,22 @@ onMounted(async () => {
         const raw = new Uint8Array(event.payload.data);
         const ts = formatTimestamp();
 
+        // 1. Dispatch to Modbus Drawer if open
+        if (isModbusDrawerOpen.value && modbusDrawerRef.value) {
+          modbusDrawerRef.value.feedIncomingBytes(raw);
+        }
+
+        // 2. Dispatch to xterm terminal if in VT100 mode
+        if (sessionMode.value === 'vt100') {
+          if (xtermRef.value) {
+            xtermRef.value.writeRawBytes(raw);
+          }
+          rxBytesCount.value += raw.length;
+          emit('update-stats', { rx: rxBytesCount.value, tx: txBytesCount.value });
+          return;
+        }
+
+        // 3. Normal Log Stream mode
         if (worker) {
           worker.postMessage({
             rawBytes: raw,
@@ -330,7 +451,12 @@ watch(() => props.isConnected, (connected: boolean) => {
 
 onUnmounted(() => {
   if (unlistenRx) unlistenRx();
-  if (worker) worker.terminate();
+  if (worker) {
+    worker.terminate();
+    worker = null;
+  }
+  // Thorough GC release: clear retained log arrays to free DOM and string heap
+  logs.value = [];
 });
 </script>
 
@@ -434,7 +560,28 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="flex items-center bg-zinc-950 border border-zinc-800 rounded p-0.5 ml-2">
+        <!-- Session Mode Switcher: Log Stream vs VT100 Terminal -->
+        <div class="flex items-center bg-zinc-950 border border-zinc-800 rounded p-0.5 ml-1">
+          <button
+            @click="sessionMode = 'log'"
+            class="px-2 py-0.5 rounded text-[11px] transition-colors"
+            :class="sessionMode === 'log' ? 'bg-zinc-800 text-emerald-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
+            title="日志模式: 适合抓包、时间戳记录与调试日志流"
+          >
+            日志流
+          </button>
+          <button
+            @click="sessionMode = 'vt100'"
+            class="px-2 py-0.5 rounded text-[11px] transition-colors flex items-center gap-1"
+            :class="sessionMode === 'vt100' ? 'bg-zinc-800 text-cyan-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
+            title="VT100 终端: 原生 Linux 控制台、Shell 交互、Tab补全与 ANSI 颜色"
+          >
+            <Terminal class="w-3 h-3" />
+            <span>VT100 终端</span>
+          </button>
+        </div>
+
+        <div v-show="sessionMode === 'log'" class="flex items-center bg-zinc-950 border border-zinc-800 rounded p-0.5 ml-1">
           <button
             @click="viewMode = 'string'"
             class="px-2 py-0.5 rounded text-[11px] transition-colors"
@@ -452,23 +599,53 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- Toggles -->
-        <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer ml-1">
-          <input type="checkbox" v-model="showTimestamps" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
-          <Clock class="w-3 h-3" />
-          <span>时间戳</span>
-        </label>
+        <!-- Toggles for Log Stream -->
+        <template v-if="sessionMode === 'log'">
+          <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer ml-1">
+            <input type="checkbox" v-model="showTimestamps" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
+            <Clock class="w-3 h-3" />
+            <span>时间戳</span>
+          </label>
 
-        <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer">
-          <input type="checkbox" v-model="autoScroll" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
-          <ArrowDown class="w-3 h-3" />
-          <span>自动滚动</span>
-        </label>
+          <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer">
+            <input type="checkbox" v-model="autoScroll" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
+            <ArrowDown class="w-3 h-3" />
+            <span>自动滚动</span>
+          </label>
+
+          <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer">
+            <input type="checkbox" v-model="autoWrap" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
+            <WrapText class="w-3 h-3" />
+            <span>自动换行</span>
+          </label>
+        </template>
+
+        <!-- Protocol Dashboard Toggle Button -->
+        <button
+          @click="isDashboardOpen = !isDashboardOpen"
+          class="px-2 py-0.5 rounded text-[11px] transition-colors border flex items-center gap-1 ml-1"
+          :class="isDashboardOpen ? 'bg-emerald-950 text-emerald-300 border-emerald-700/80 font-bold' : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
+          title="切换自定义交互操控台 (滑动条/开关下发控制)"
+        >
+          <Sliders class="w-3.5 h-3.5 text-emerald-400" />
+          <span>交互操控</span>
+        </button>
+
+        <!-- Modbus RTU Drawer Toggle Button -->
+        <button
+          @click="isModbusDrawerOpen = !isModbusDrawerOpen"
+          class="px-2 py-0.5 rounded text-[11px] transition-colors border flex items-center gap-1 ml-0.5"
+          :class="isModbusDrawerOpen ? 'bg-amber-950 text-amber-300 border-amber-700/80 font-bold' : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
+          title="切换 Modbus RTU 读写与寄存器可视化抽屉"
+        >
+          <Layers class="w-3.5 h-3.5 text-amber-400" />
+          <span>Modbus</span>
+        </button>
 
         <!-- Command Group Toggle Button -->
         <button
           @click="isCommandPanelOpen = !isCommandPanelOpen"
-          class="px-2 py-0.5 rounded text-[11px] transition-colors border flex items-center gap-1 ml-1"
+          class="px-2 py-0.5 rounded text-[11px] transition-colors border flex items-center gap-1 ml-0.5"
           :class="isCommandPanelOpen ? 'bg-emerald-950 text-emerald-300 border-emerald-700/80 font-bold' : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
           title="切换右侧命令组管理面板"
         >
@@ -535,12 +712,23 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Main Center Viewport: Split Terminal Logs & Command Group Drawer -->
+    <!-- Main Center Viewport: Split Terminal Logs / VT100 & Drawers -->
     <div class="flex-1 flex overflow-hidden min-h-0">
-      <!-- Left: Terminal Log Viewport -->
+      <!-- Left: Terminal Log Viewport or VT100 Terminal View -->
+      <div v-show="sessionMode === 'vt100'" class="flex-1 h-full overflow-hidden">
+        <SerialXtermView
+          ref="xtermRef"
+          :port-name="portName"
+          :is-connected="isConnected"
+          @bytes-sent="handleBytesSent"
+          @log="appendLog"
+        />
+      </div>
+
       <div
+        v-show="sessionMode === 'log'"
         ref="logContainer"
-        class="flex-1 overflow-y-auto p-3 space-y-1 select-text bg-zinc-950 font-mono text-[11.5px] leading-relaxed"
+        class="flex-1 overflow-auto p-3 space-y-0.5 select-text bg-zinc-950 font-mono text-[11.5px] leading-relaxed"
       >
         <div v-if="logs.length === 0" class="h-full flex flex-col items-center justify-center text-zinc-600 select-none">
           <Terminal class="w-10 h-10 mb-2 stroke-1 opacity-40" />
@@ -551,15 +739,16 @@ onUnmounted(() => {
         <div
           v-for="item in logs"
           :key="item.id"
-          class="flex items-start gap-2 hover:bg-zinc-900/50 rounded px-1 -mx-1"
+          class="flex items-start gap-1.5 hover:bg-zinc-900/50 rounded px-1 -mx-1"
         >
           <!-- Timestamp -->
           <span v-if="showTimestamps" class="text-zinc-600 text-[10px] shrink-0 select-none">
             [{{ item.timestamp }}]
           </span>
 
-          <!-- Direction Badge -->
+          <!-- Direction Badge (only shown if timestamps are on or message is non-rx) -->
           <span
+            v-if="showTimestamps || item.type !== 'rx'"
             class="text-[9px] px-1 py-0.2 rounded font-bold uppercase shrink-0 select-none"
             :class="{
               'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40': item.type === 'rx',
@@ -571,17 +760,49 @@ onUnmounted(() => {
             {{ item.type }}
           </span>
 
-          <!-- Content -->
+          <!-- Content: switch between whitespace-pre-wrap (wrapping) and whitespace-pre (no-wrap horizontal scroll) -->
           <span
-            class="flex-1 break-all whitespace-pre-wrap"
-            :class="{
-              'text-emerald-300': item.type === 'rx',
-              'text-sky-300 font-medium': item.type === 'tx',
-              'text-amber-300': item.type === 'info',
-              'text-rose-400 font-semibold': item.type === 'error',
-            }"
+            class="flex-1"
+            :class="[
+              autoWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre overflow-x-visible',
+              {
+                'text-emerald-300': item.type === 'rx',
+                'text-sky-300 font-medium': item.type === 'tx',
+                'text-amber-300': item.type === 'info',
+                'text-rose-400 font-semibold': item.type === 'error',
+              }
+            ]"
           >{{ item.text }}</span>
         </div>
+      </div>
+
+      <!-- Right: Collapsible Custom Protocol Dashboard -->
+      <div
+        v-show="isDashboardOpen"
+        class="shrink-0 overflow-hidden"
+      >
+        <ProtocolDashboard
+          :port-name="portName"
+          :is-connected="isConnected"
+          @close="isDashboardOpen = false"
+          @log="appendLog"
+          @bytes-sent="handleBytesSent"
+        />
+      </div>
+
+      <!-- Right: Collapsible Modbus RTU Drawer -->
+      <div
+        v-show="isModbusDrawerOpen"
+        class="shrink-0 overflow-hidden"
+      >
+        <ModbusDrawer
+          ref="modbusDrawerRef"
+          :port-name="portName"
+          :is-connected="isConnected"
+          @close="isModbusDrawerOpen = false"
+          @log="appendLog"
+          @bytes-sent="handleBytesSent"
+        />
       </div>
 
       <!-- Right: Collapsible Command Group Panel -->
@@ -592,6 +813,7 @@ onUnmounted(() => {
         <CommandGroupPanel
           ref="cmdPanelRef"
           :is-connected="isConnected"
+          :port-name="portName"
           @log="appendLog"
           @bytes-sent="handleBytesSent"
           @group-changed="(g) => activeGroup = g"
@@ -684,6 +906,20 @@ onUnmounted(() => {
         <option value="lf">+LF (\n)</option>
         <option value="cr">+CR (\r)</option>
         <option value="none">无换行</option>
+      </select>
+
+      <!-- Automatic Checksum Append Selector -->
+      <select
+        v-model="checksumAlgo"
+        class="bg-zinc-950 border border-zinc-800 text-[11px] py-1.5 px-2 rounded outline-none font-mono transition-colors"
+        :class="checksumAlgo !== 'none' ? 'text-amber-400 border-amber-700/80 font-bold bg-amber-950/30' : 'text-zinc-400'"
+        title="发送时在数据末尾自动追加校验码 (Rust 原生高性能查表法加速)"
+      >
+        <option value="none">校验: 无</option>
+        <option value="modbus_crc16">校验: Modbus CRC16 (低位在前)</option>
+        <option value="crc16_ccitt">校验: CRC16-CCITT / XModem</option>
+        <option value="checksum8">校验: Checksum-8 (累加和)</option>
+        <option value="xor8">校验: XOR-8 (异或和)</option>
       </select>
 
       <div class="flex-1 relative">

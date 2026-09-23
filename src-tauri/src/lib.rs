@@ -71,6 +71,10 @@ pub fn run() {
 
     let serial = Arc::new(SerialManager::new());
     let daemon = Arc::new(DaemonManager::new());
+    let network = Arc::new(hardware::network_manager::NetworkManager::new(
+        Arc::clone(&serial.protocol_engine),
+        Arc::clone(&serial.waveform_source),
+    ));
 
     let serial_exit = Arc::clone(&serial);
     let daemon_exit = Arc::clone(&daemon);
@@ -104,6 +108,7 @@ pub fn run() {
         })
         .manage(AppState {
             serial: Arc::clone(&serial),
+            network: Arc::clone(&network),
             daemon: Arc::clone(&daemon),
         })
         .invoke_handler(tauri::generate_handler![
@@ -146,6 +151,18 @@ pub fn run() {
             commands::list_active_serial_sessions,
             commands::set_waveform_source,
             commands::get_waveform_source,
+            commands::compute_checksum,
+            commands::modbus_build_request,
+            commands::modbus_parse_response,
+            commands::dsp_measure_waveform,
+            commands::dsp_compute_fft,
+            commands::start_network_stream,
+            commands::stop_network_stream,
+            commands::list_network_streams,
+            commands::send_network_data,
+            commands::pyocd_detect_rtos,
+            commands::pyocd_capture_framebuffer,
+            commands::modbus_build_ascii_request,
         ])
         .build(tauri::generate_context!()) {
             Ok(a) => {

@@ -97,6 +97,21 @@ def package(custom_version: str = None):
         except Exception:
             pass
 
+    # Optional build check: Ensure release exe is built with latest frontend
+    auto_build = os.environ.get("SKIP_BUILD") != "1"
+    if auto_build:
+        print("[0/5] Building latest frontend and Tauri release executable...")
+        try:
+            subprocess.run(
+                ["pnpm", "tauri", "build", "--no-bundle"],
+                cwd=str(ROOT_DIR),
+                check=True,
+                shell=True
+            )
+            print("  [OK] Build completed successfully.")
+        except Exception as e:
+            print(f"  [WARN] Tauri build returned non-zero or failed: {e}. Will attempt to use existing binary.")
+
     # Clean previous output
     if target_dir.exists():
         shutil.rmtree(target_dir, ignore_errors=True)
@@ -170,12 +185,18 @@ def package(custom_version: str = None):
         shutil.copy2(license_file, target_dir / "LICENSE")
         print(f"  [OK] Copied LICENSE")
 
-    # Copy packs
+    # Copy packs: only include the official default pack to keep release clean and free of testing debris
+    default_pack_name = "INGChips.INGCHIPS_DeviceFamilyPack.1.0.1.pack"
     packs_src = ROOT_DIR / "packs"
-    if packs_src.exists():
-        for p in packs_src.glob("*.pack"):
-            shutil.copy2(p, target_dir / "packs" / p.name)
-            print(f"  [OK] Copied pack: {p.name}")
+    if (packs_src / default_pack_name).exists():
+        shutil.copy2(packs_src / default_pack_name, target_dir / "packs" / default_pack_name)
+        print(f"  [OK] Copied default pack: {default_pack_name}")
+    else:
+        # Fallback to any INGChips pack if version differs
+        ing_packs = list(packs_src.glob("INGChips*.pack"))
+        if ing_packs:
+            shutil.copy2(ing_packs[0], target_dir / "packs" / ing_packs[0].name)
+            print(f"  [OK] Copied pack: {ing_packs[0].name}")
 
     # Compress into zip
     print(f"[5/5] Compressing package into {zip_path.name}...")

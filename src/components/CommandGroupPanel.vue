@@ -26,6 +26,7 @@ import {
 
 const props = defineProps<{
   isConnected: boolean;
+  portName?: string;
 }>();
 
 const emit = defineEmits<{
@@ -71,7 +72,10 @@ async function sendSingleCommand(cmd: CommandItem) {
 
   try {
     const { bytes, textDisplay } = encodeCommand(cmd);
-    const count: number = await safeInvoke('send_serial_data', { data: bytes });
+    const count: number = await safeInvoke('send_serial_data', { 
+      data: bytes,
+      portName: props.portName
+    });
     emit('bytesSent', count);
     emit('log', `[TX] ${textDisplay}`, 'tx');
   } catch (err: any) {

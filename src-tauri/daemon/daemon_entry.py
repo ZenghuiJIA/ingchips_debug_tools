@@ -65,6 +65,22 @@ except Exception as e:
 _DISCOVERED_PACKS = []
 _PACKS_LOCK = threading.Lock()
 
+def get_primary_packs_dir() -> str:
+    """Returns the primary packs directory alongside the executable or project root."""
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        primary = os.path.join(exe_dir, "packs")
+    else:
+        # Development mode
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        primary = os.path.join(script_dir, "..", "..", "packs")
+    primary = os.path.abspath(primary)
+    try:
+        os.makedirs(primary, exist_ok=True)
+    except Exception:
+        pass
+    return primary
+
 def discover_and_load_packs() -> List[str]:
     """Find and dynamically populate targets & algorithms from .pack files in packs/ directories."""
     global _DISCOVERED_PACKS
@@ -73,6 +89,7 @@ def discover_and_load_packs() -> List[str]:
 
     with _PACKS_LOCK:
         candidates = []
+        candidates.append(get_primary_packs_dir())
         if getattr(sys, "frozen", False):
             exe_dir = os.path.dirname(os.path.abspath(sys.executable))
             candidates.append(os.path.join(exe_dir, "packs"))
@@ -132,8 +149,61 @@ def trim_process_memory():
         pass
 
 
+def decode_shcsr(shcsr: int) -> Dict[str, Any]:
+    """Decode Cortex-M SHCSR (System Handler Control and State Register 0xE000ED24)."""
+    flags = []
+    explanations = []
+
+    if shcsr & (1 << 0):
+        flags.append("MEMFAULTACT")
+        explanations.append("MemFault 内存管理异常中断当前正处于活动触发状态 (Active)。")
+    if shcsr & (1 << 1):
+        flags.append("BUSFAULTACT")
+        explanations.append("BusFault 总线异常中断当前正处于活动触发状态 (Active)。")
+    if shcsr & (1 << 3):
+        flags.append("USGFAULTACT")
+        explanations.append("UsageFault 用法异常中断当前正处于活动触发状态 (Active)。")
+    if shcsr & (1 << 7):
+        flags.append("SVCALLACT")
+        explanations.append("SVC 异常中断当前处于活动状态。")
+    if shcsr & (1 << 8):
+        flags.append("MONITORACT")
+        explanations.append("Debug Monitor 调试监视异常当前处于活动状态。")
+    if shcsr & (1 << 10):
+        flags.append("PENDSVACT")
+        explanations.append("PendSV 异常当前处于活动状态 (通常为 RTOS 上下文切换)。")
+    if shcsr & (1 << 11):
+        flags.append("SYSTICKACT")
+        explanations.append("SysTick 滴答定时器异常当前处于活动状态。")
+
+    # Pending bits
+    if shcsr & (1 << 12):
+        flags.append("USGFAULTPENDED")
+        explanations.append("UsageFault 异常已被挂起 (Pending)。")
+    if shcsr & (1 << 13):
+        flags.append("MEMFAULTPENDED")
+        explanations.append("MemFault 异常已被挂起 (Pending)。")
+    if shcsr & (1 << 14):
+        flags.append("BUSFAULTPENDED")
+        explanations.append("BusFault 异常已被挂起 (Pending)。")
+
+    # Enable bits
+    mem_ena = bool(shcsr & (1 << 16))
+    bus_ena = bool(shcsr & (1 << 17))
+    usg_ena = bool(shcsr & (1 << 18))
+
+    return {
+        "raw_shcsr": f"0x{shcsr:08X}",
+        "memfault_enabled": mem_ena,
+        "busfault_enabled": bus_ena,
+        "usgfault_enabled": usg_ena,
+        "flags": flags,
+        "explanations": explanations
+    }
+
+
 def decode_cfsr(cfsr: int, mmfar: int, bfar: int) -> Dict[str, Any]:
-    """Decode Cortex-M CFSR (Configurable Fault Status Register)."""
+    """Decode Cortex-M CFSR (Configurable Fault Status Register 0xE000ED28)."""
     mmfsr = cfsr & 0xFF
     bfsr = (cfsr >> 8) & 0xFF
     ufsr = (cfsr >> 16) & 0xFFFF
@@ -144,65 +214,65 @@ def decode_cfsr(cfsr: int, mmfar: int, bfar: int) -> Dict[str, Any]:
     # MemManage Faults
     if mmfsr & (1 << 0):
         flags.append("IACCVIOL")
-        explanations.append("Instruction access violation: processor attempted an instruction fetch from a restricted region.")
+        explanations.append("IACCVIOL: 指令访问违规。处理器试图从 MPU 未授权区域或不可执行 (XN) 内存区预取指令。")
     if mmfsr & (1 << 1):
         flags.append("DACCVIOL")
-        explanations.append("Data access violation: load/store attempted at a restricted memory address.")
+        explanations.append("DACCVIOL: 数据访问违规。处理器试图读写 MPU 限制区域或非法受保护内存。")
     if mmfsr & (1 << 3):
         flags.append("MUNSTKERR")
-        explanations.append("MemManage unstacking error during exception return.")
+        explanations.append("MUNSTKERR: 异常返回出栈时发生 MemManage 内存违规。堆栈指针 SP 已损坏。")
     if mmfsr & (1 << 4):
         flags.append("MSTKERR")
-        explanations.append("MemManage stacking error during exception entry.")
+        explanations.append("MSTKERR: 异常入栈操作时发生 MemManage 内存违规。堆栈溢出 (Stack Overflow) 触碰到 MPU 保护警戒线。")
     if mmfsr & (1 << 5):
         flags.append("MLSPERR")
-        explanations.append("MemManage floating-point lazy state preservation error.")
+        explanations.append("MLSPERR: 浮点 FPU 懒惰压栈 (Lazy Stacking) 期间发生 MemManage 内存违规。")
     if mmfsr & (1 << 7):
         flags.append(f"MMARVALID (Address: 0x{mmfar:08X})")
-        explanations.append(f"MMFAR holds valid faulting address: 0x{mmfar:08X}.")
+        explanations.append(f"MMARVALID: MMFAR 记录了发生内存访问违规的确切物理地址: 0x{mmfar:08X}。")
 
     # Bus Faults
     if bfsr & (1 << 0):
         flags.append("IBUSERR")
-        explanations.append("Instruction bus error during instruction prefetch.")
+        explanations.append("IBUSERR: 指令总线错误。在指令预取时总线返回错误。常见原因：错误的函数指针调用、跳转至无效未映射地址。")
     if bfsr & (1 << 1):
         flags.append("PRECISERR")
-        explanations.append("Precise data access bus fault. Fault address is known.")
+        explanations.append(f"PRECISERR: 精确数据总线访问错误！堆栈 PC 正好指向引发崩溃的代码指令。常见原因：未使能外设时钟 (RCC) 即访问外设寄存器、解引用野指针。")
     if bfsr & (1 << 2):
         flags.append("IMPRECISERR")
-        explanations.append("Imprecise data access bus fault. Fault occurred asynchronously.")
+        explanations.append("IMPRECISERR: 不精确数据总线访问错误 (异步写入总线缓冲导致)。建议：临时开启 CPU 禁用写缓冲 (DISDEFWBUF=1) 将其定位为精确错误。")
     if bfsr & (1 << 3):
         flags.append("UNSTKERR")
-        explanations.append("Bus fault on unstacking during exception return.")
+        explanations.append("UNSTKERR: 异常返回出栈操作时发生总线错误。通常由于堆栈溢出破坏了栈帧。")
     if bfsr & (1 << 4):
         flags.append("STKERR")
-        explanations.append("Bus fault on stacking during exception entry.")
+        explanations.append("STKERR: 中断入栈操作时发生总线错误。通常为堆栈指针 SP 跑飞越界访问非法 RAM 区域。")
     if bfsr & (1 << 5):
         flags.append("LSPERR")
-        explanations.append("Bus fault during floating-point lazy state preservation.")
+        explanations.append("LSPERR: 浮点 FPU 懒惰压栈期间发生总线错误。")
     if bfsr & (1 << 7):
         flags.append(f"BFARVALID (Address: 0x{bfar:08X})")
-        explanations.append(f"BFAR holds valid bus fault address: 0x{bfar:08X}. Common causes: uninitialized peripheral clock, null pointer dereference.")
+        explanations.append(f"BFARVALID: BFAR 记录了发生总线错误的确切崩溃物理地址: 0x{bfar:08X}。排查重点：该外设的时钟是否开启？指针是否越界？")
 
     # Usage Faults
     if ufsr & (1 << 0):
         flags.append("UNDEFINSTR")
-        explanations.append("Undefined instruction executed.")
+        explanations.append("UNDEFINSTR: 执行了未定义机器指令。常见原因：函数指针未置位 Thumb 位 (bit0 必须为1)、Flash 数据损坏或固件未对齐。")
     if ufsr & (1 << 1):
         flags.append("INVSTATE")
-        explanations.append("Invalid execution state (e.g. attempted to execute ARM code instead of Thumb mode).")
+        explanations.append("INVSTATE: 非法执行状态。Cortex-M 只支持 Thumb 状态 (EPSR.T=1)，程序试图切换至 ARM 32位状态或向量表地址最低位为0。")
     if ufsr & (1 << 2):
         flags.append("INVPC")
-        explanations.append("Invalid EXC_RETURN value loaded into PC on exception return.")
+        explanations.append("INVPC: 非法 EXC_RETURN 加载。异常返回时装载了非法的 LR 值，或中断返回模式与当前硬件状态冲突。")
     if ufsr & (1 << 3):
         flags.append("NOCP")
-        explanations.append("Attempted to access coprocessor / FPU without enabling coprocessor clock/access.")
+        explanations.append("NOCP: 尝试访问未开启的协处理器 (通常是硬件 FPU)。排查：编译开启了硬件浮点，但启动代码未在 SCB->CPACR 使能 CP10/CP11！")
     if ufsr & (1 << 8):
         flags.append("UNALIGNED")
-        explanations.append("Unaligned memory access performed with alignment trap enabled.")
+        explanations.append("UNALIGNED: 非对齐内存访问引发异常 (CCR.UNALIGN_TRP 开启)。检查多字节指针强制转换是否 2/4 字节对齐。")
     if ufsr & (1 << 9):
         flags.append("DIVBYZERO")
-        explanations.append("SDIV or UDIV instruction executed with divisor equal to 0.")
+        explanations.append("DIVBYZERO: 除以零异常 (CCR.DIV_0_TRP 开启)。程序执行了 SDIV 或 UDIV 指令且除数为 0。")
 
     return {
         "raw_cfsr": f"0x{cfsr:08X}",
@@ -215,19 +285,19 @@ def decode_cfsr(cfsr: int, mmfar: int, bfar: int) -> Dict[str, Any]:
 
 
 def decode_hfsr(hfsr: int) -> Dict[str, Any]:
-    """Decode Cortex-M HFSR (HardFault Status Register)."""
+    """Decode Cortex-M HFSR (HardFault Status Register 0xE000ED2C)."""
     flags = []
     explanations = []
 
     if hfsr & (1 << 1):
         flags.append("VECTTBL")
-        explanations.append("Vector table read fault during exception processing.")
+        explanations.append("VECTTBL: 在异常向量表读取期间发生总线错误。向量表起始基地址 (VTOR) 配置错误或指向了无效 Flash/RAM。")
     if hfsr & (1 << 30):
         flags.append("FORCED")
-        explanations.append("Forced HardFault: a configurable fault (MemManage, Bus, Usage) escalated to HardFault because its handler is disabled.")
+        explanations.append("FORCED: 强制升级为 HardFault！原本由可配置异常 (MemManage, BusFault, UsageFault) 引发，但因未开启相应中断使能或中断优先级不足而被强制升级。请重点检查 CFSR 中的根本原因。")
     if hfsr & (1 << 31):
         flags.append("DEBUGEVT")
-        explanations.append("Debug event generated a HardFault.")
+        explanations.append("DEBUGEVT: 调试事件引发的硬故障 (断点或观察点触发)。")
 
     return {
         "raw_hfsr": f"0x{hfsr:08X}",
@@ -482,16 +552,19 @@ class PyOCDController:
                     core_regs[name.upper()] = "N/A"
 
             # SCB Fault Status Registers
+            SCB_SHCSR = 0xE000ED24
             SCB_CFSR  = 0xE000ED28
             SCB_HFSR  = 0xE000ED2C
             SCB_MMFAR = 0xE000ED34
             SCB_BFAR  = 0xE000ED38
 
+            shcsr = target.read32(SCB_SHCSR)
             cfsr = target.read32(SCB_CFSR)
             hfsr = target.read32(SCB_HFSR)
             mmfar = target.read32(SCB_MMFAR)
             bfar = target.read32(SCB_BFAR)
 
+            shcsr_decoded = decode_shcsr(shcsr)
             cfsr_decoded = decode_cfsr(cfsr, mmfar, bfar)
             hfsr_decoded = decode_hfsr(hfsr)
 
@@ -499,11 +572,13 @@ class PyOCDController:
                 "target": target.part_number or "Cortex-M",
                 "core_registers": core_regs,
                 "fault_registers": {
+                    "SHCSR": f"0x{shcsr:08X}",
                     "CFSR": f"0x{cfsr:08X}",
                     "HFSR": f"0x{hfsr:08X}",
                     "MMFAR": f"0x{mmfar:08X}",
                     "BFAR": f"0x{bfar:08X}",
                 },
+                "shcsr_decoded": shcsr_decoded,
                 "cfsr_decoded": cfsr_decoded,
                 "hfsr_decoded": hfsr_decoded,
             }
@@ -578,6 +653,22 @@ class PyOCDController:
         if deep_analysis:
             result["deep_analysis"] = deep_analysis
         return result
+
+    @staticmethod
+    def detect_rtos_kernel(elf_path: str) -> Dict[str, Any]:
+        """Detect underlying RTOS and inspect kernel symbol blocks from ELF/AXF file."""
+        from rtos_tracer import RtosTracer
+        return RtosTracer.detect_rtos_from_elf(elf_path)
+
+    @staticmethod
+    def capture_lcd_framebuffer(address: int, width: int, height: int, pixel_format: str = "rgb565",
+                                probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
+        """Capture LCD display buffer from MCU RAM and convert to PNG Base64."""
+        from lcd_mirror import LcdMirror
+        session = PyOCDController._create_session(probe_id, target_override)
+        with session:
+            target = session.board.target
+            return LcdMirror.capture_framebuffer(target, address, width, height, pixel_format)
 
 
 class RTTController:
@@ -2104,6 +2195,17 @@ MCP_TOOLS = [
         }
     },
     {
+        "name": "detect_rtos_kernel",
+        "description": "深度探测固件中的嵌入式操作系统 (FreeRTOS, RTX5, ThreadX, uCOS-II, uCOS-III, RT-Thread) 并分析内核控制块符号地址",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "elf_path": {"type": "string", "description": "固件 ELF/AXF/OUT 文件的绝对物理路径"}
+            },
+            "required": ["elf_path"]
+        }
+    },
+    {
         "name": "start_rtt",
         "description": "启动 SEGGER RTT 实时数据传输引擎 (支持 J-Link 及 DAPLink 探针)，建立本地高速双向流通信",
         "inputSchema": {
@@ -2485,6 +2587,17 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
     elif name == "diagnose_hardfault":
         axf_path = arguments.get("axf_path")
         return PyOCDController.diagnose_hardfault(probe_id, target_override, axf_path)
+    elif name == "detect_rtos_kernel":
+        elf_path = arguments["elf_path"]
+        return PyOCDController.detect_rtos_kernel(elf_path)
+    elif name == "capture_lcd_framebuffer":
+        address = arguments["address"]
+        if isinstance(address, str):
+            address = int(address, 16 if address.startswith("0x") else 10)
+        width = int(arguments.get("width", 320))
+        height = int(arguments.get("height", 240))
+        pixel_format = arguments.get("pixel_format", "rgb565")
+        return PyOCDController.capture_lcd_framebuffer(address, width, height, pixel_format, probe_id, target_override)
     elif name == "start_rtt":
         probe_type = arguments.get("probe_type")
         block_addr = arguments.get("block_address")

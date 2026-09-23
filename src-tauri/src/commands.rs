@@ -1,4 +1,5 @@
 use crate::daemon::process_manager::DaemonManager;
+use crate::hardware::network_manager::{NetworkManager, NetworkMode, NetworkStreamInfo};
 use crate::hardware::serial_manager::{PortInfo, SerialManager};
 use crate::system_metrics::{collect_metrics, SystemMetrics};
 use serde_json::{json, Value};
@@ -7,6 +8,7 @@ use tauri::{AppHandle, State};
 
 pub struct AppState {
     pub serial: Arc<SerialManager>,
+    pub network: Arc<NetworkManager>,
     pub daemon: Arc<DaemonManager>,
 }
 
@@ -58,6 +60,10 @@ pub fn close_serial_port(
     port_name: Option<String>,
 ) -> Result<(), String> {
     if let Some(ref name) = port_name {
+        if name.starts_with("TCP:") || name.starts_with("UDP:") {
+            state.network.stop_stream(name);
+            return Ok(());
+        }
         if name.starts_with("RTT") {
             let _ = state.daemon.call_rpc("stop_rtt", json!({}));
         }
@@ -73,7 +79,23 @@ pub fn send_serial_data(
     data: Vec<u8>,
     port_name: Option<String>,
 ) -> Result<usize, String> {
-    state.serial.write_data(&data, port_name.as_deref())
+    if let Some(ref name) = port_name {
+        if name.starts_with("TCP:") || name.starts_with("UDP:") {
+            return state.network.write_data(name, &data);
+        }
+    }
+    match state.serial.write_data(&data, port_name.as_deref()) {
+        Ok(sz) => Ok(sz),
+        Err(err) => {
+            // Fallback: check if network manager has this stream
+            if let Some(ref name) = port_name {
+                if let Ok(sz) = state.network.write_data(name, &data) {
+                    return Ok(sz);
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
 #[tauri::command]
@@ -114,7 +136,14 @@ pub fn get_serial_status(
 
 #[tauri::command]
 pub fn list_active_serial_sessions(state: State<'_, AppState>) -> Vec<String> {
-    state.serial.list_active_sessions()
+    let mut list = state.serial.list_active_sessions();
+    let net_list = state.network.list_sessions();
+    for n in net_list {
+        if n.is_connected && !list.contains(&n.name) {
+            list.push(n.name);
+        }
+    }
+    list
 }
 
 #[tauri::command]
@@ -610,4 +639,158 @@ pub fn clear_waveform_protocol(
     state.serial.clear_protocol();
     Ok(())
 }
+
+#[tauri::command]
+pub fn compute_checksum(
+    data: Vec<u8>,
+    algo: String,
+) -> Result<Vec<u8>, String> {
+    Ok(crate::hardware::checksum::append_checksum_by_algo(&data, &algo))
+}
+
+#[tauri::command]
+pub fn modbus_build_request(
+    slave_id: u8,
+    func_code: u8,
+    start_addr: u16,
+    count_or_val: u16,
+    extra_values: Option<Vec<u16>>,
+) -> Result<Vec<u8>, String> {
+    Ok(crate::hardware::modbus::build_modbus_request(
+        slave_id,
+        func_code,
+        start_addr,
+        count_or_val,
+        extra_values.as_deref(),
+    ))
+}
+
+#[tauri::command]
+pub fn modbus_parse_response(
+    port: String,
+    start_addr: u16,
+    frame: Vec<u8>,
+) -> Result<crate::hardware::modbus::ModbusResponsePayload, String> {
+    crate::hardware::modbus::parse_modbus_response(&port, start_addr, &frame)
+}
+
+#[tauri::command]
+pub fn dsp_measure_waveform(
+    samples: Vec<f64>,
+    sample_rate_hz: f64,
+) -> Result<crate::hardware::dsp::WaveformMeasurements, String> {
+    Ok(crate::hardware::dsp::measure_waveform(&samples, sample_rate_hz))
+}
+
+#[tauri::command]
+pub fn dsp_compute_fft(
+    samples: Vec<f64>,
+    sample_rate_hz: f64,
+    fft_size: usize,
+    window_type: String,
+) -> Result<crate::hardware::dsp::FftAnalysisResult, String> {
+    Ok(crate::hardware::dsp::compute_fft_spectrum(&samples, sample_rate_hz, fft_size, &window_type))
+}
+
+#[tauri::command]
+pub fn start_network_stream(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    mode: String,
+    host: String,
+    port: u16,
+) -> Result<(), String> {
+    let net_mode = match mode.to_lowercase().as_str() {
+        "tcp_client" | "tcpclient" | "client" => NetworkMode::TcpClient,
+        "tcp_server" | "tcpserver" | "server" => NetworkMode::TcpServer,
+        "udp" | "udp_socket" => NetworkMode::UdpSocket,
+        _ => return Err(format!("Unsupported network mode: {}", mode)),
+    };
+    state.network.start_stream(app, name, net_mode, host, port)
+}
+
+#[tauri::command]
+pub fn stop_network_stream(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<(), String> {
+    state.network.stop_stream(&name);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_network_streams(
+    state: State<'_, AppState>,
+) -> Result<Vec<NetworkStreamInfo>, String> {
+    Ok(state.network.list_sessions())
+}
+
+#[tauri::command]
+pub fn send_network_data(
+    state: State<'_, AppState>,
+    name: String,
+    data: Vec<u8>,
+) -> Result<usize, String> {
+    state.network.write_data(&name, &data)
+}
+
+#[tauri::command]
+pub fn pyocd_detect_rtos(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    elf_path: String,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "detect_rtos_kernel",
+        json!({
+            "elf_path": elf_path,
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn pyocd_capture_framebuffer(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    address: String,
+    width: u32,
+    height: u32,
+    pixel_format: String,
+    probe_id: Option<String>,
+    target_override: Option<String>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "capture_lcd_framebuffer",
+        json!({
+            "address": address,
+            "width": width,
+            "height": height,
+            "pixel_format": pixel_format,
+            "probe_id": probe_id,
+            "target_override": target_override,
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn modbus_build_ascii_request(
+    slave_id: u8,
+    func_code: u8,
+    start_addr: u16,
+    count_or_val: u16,
+    extra_values: Option<Vec<u16>>,
+) -> Result<Vec<u8>, String> {
+    Ok(crate::hardware::modbus::build_modbus_ascii_request(
+        slave_id,
+        func_code,
+        start_addr,
+        count_or_val,
+        extra_values.as_deref(),
+    ))
+}
+
+
 
