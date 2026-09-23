@@ -28,6 +28,8 @@ if not os.path.exists(DAEMON_EXE):
 else:
     print(f"[INFO] Using daemon executable: {DAEMON_EXE}")
 
+USER_HOME = Path.home()
+
 def is_same_daemon(cmd_str: str) -> bool:
     """Check if an existing command points to a valid hil-daemon executable."""
     if not cmd_str:
@@ -53,7 +55,7 @@ def backup_file(path: Path):
 
 def deploy_to_ccswitch():
     print(f"\n[1/7] Deploying to CCSwitch (Database)...")
-    db_path = Path(r"C:\Users\ming\.cc-switch\cc-switch.db")
+    db_path = USER_HOME / ".cc-switch" / "cc-switch.db"
     if not db_path.exists():
         print(f"  [SKIP] CCSwitch database not found at {db_path}")
         return
@@ -110,7 +112,7 @@ def deploy_to_ccswitch():
 
 def deploy_to_claude_code():
     print(f"\n[2/7] Deploying to Claude Code (.claude.json)...")
-    claude_json_path = Path(r"C:\Users\ming\.claude.json")
+    claude_json_path = USER_HOME / ".claude.json"
     if not claude_json_path.exists():
         print(f"  [SKIP] .claude.json not found at {claude_json_path}")
         return
@@ -144,7 +146,7 @@ def deploy_to_claude_code():
 
 def deploy_to_codex():
     print(f"\n[3/7] Deploying to OpenAI Codex (.codex/config.toml)...")
-    codex_toml_path = Path(r"C:\Users\ming\.codex\config.toml")
+    codex_toml_path = USER_HOME / ".codex" / "config.toml"
     if not codex_toml_path.exists():
         print(f"  [SKIP] Codex config.toml not found at {codex_toml_path}")
         return
@@ -186,7 +188,7 @@ def deploy_to_codex():
 
 def deploy_to_opencode():
     print(f"\n[4/7] Deploying to OpenCode (.config/opencode/opencode.json)...")
-    opencode_json_path = Path(r"C:\Users\ming\.config\opencode\opencode.json")
+    opencode_json_path = USER_HOME / ".config" / "opencode" / "opencode.json"
     if not opencode_json_path.exists():
         print(f"  [SKIP] OpenCode config not found at {opencode_json_path}")
         return
@@ -227,7 +229,7 @@ def deploy_to_opencode():
 
 def deploy_to_gemini():
     print(f"\n[5/7] Deploying to Gemini / Antigravity (.gemini/config/mcp_config.json)...")
-    gemini_mcp_path = Path(r"C:\Users\ming\.gemini\config\mcp_config.json")
+    gemini_mcp_path = USER_HOME / ".gemini" / "config" / "mcp_config.json"
     try:
         data = {}
         if gemini_mcp_path.exists():

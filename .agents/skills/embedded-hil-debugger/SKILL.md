@@ -59,13 +59,6 @@ description: >-
 * **动作指引**：
   - 调用 `list_probes` 列出当前宿主机所有可见的调试器唯一标识（Unique ID）、厂商名称及产品型号。
 
-### 场景 7：固件资源占用与内存开销分析 (Firmware Resource Analysis)
-* **触发特征**：
-  - 用户反馈：“帮我分析下编译出来的 axf/elf 占了多少 ROM 和 RAM”、“哪个模块占用最大”、“查看各个 .c 文件的代码和变量开销”、“评估 Flash 是否超标”。
-* **动作指引**：
-  - 调用 `analyze_firmware_resources(file_path=..., chip_flash_size=..., chip_ram_size=...)`。
-  - 自动识别 GCC、Keil ARMCC (AC5)、ARMClang (AC6) 编译器规则，输出总 ROM (Code + RO + RW) 和 RAM (RW + ZI) 占用，以及各个源文件模块资源开销排序。
-
 ---
 
 ## 2. MCP 工具详细参考与使用规范 (Tool Reference & Schema)
@@ -151,16 +144,6 @@ description: >-
   - **BusFault (BFSR)**：`PRECISERR` (精确总线错误), `IMPRECISERR` (非精确总线错误), `BFARVALID` (记录导致总线错误的非法访问地址)。
   - **UsageFault (UFSR)**：`UNDEFINSTR` (未定义指令), `INVSTATE` (非法 Thumb 状态), `UNALIGNED` (未对齐访问), `NOCP` (未开启浮点 FPU 协处理器)。
   - **HardFault (HFSR)**：`FORCED` (可配置错误升级为硬错误), `VECTTBL` (向量表读取失败)。
-
----
-
-### 8. `analyze_firmware_resources`
-* **功能**：**【固件资源开销分析】** 深入解析 `.axf` / `.elf` 二进制文件（支持 GCC、Keil ARMCC AC5、ARMClang AC6），统计 ROM (Flash) 与 RAM (SRAM) 总占用、Code/RO/RW/ZI 细分以及各个模块/源文件占用排行。
-* **参数**：
-  - `file_path` *(string, 必填)*：目标 ELF/AXF 二进制文件路径（无需后缀限制，自动检测 ELF 头）；
-  - `chip_flash_size` *(integer, 可选)*：芯片 Flash 总字节数（如 `524288` 代表 512KB）；
-  - `chip_ram_size` *(integer, 可选)*：芯片 RAM 总字节数（如 `65536` 代表 64KB）。
-* **返回数据**：`toolchain`（编译器类型及版本信息）、`summary`（总 ROM、总 RAM、Code、RO、RW、ZI 字节数与占比）、`modules`（各源文件级资源分析）、`sections`（原始 ELF 段表）。
 
 ---
 

@@ -27,6 +27,11 @@
 | **`flash_firmware`** | 通过 SWD 擦除并烧录固件到 Flash | `file_path`*(必填)*, `target_override`*(可选)* | 自动化烧录 `.bin` / `.hex` / `.elf` 镜像 |
 | **`reset_target`** | 硬件/软件复位目标单片机 | `halt`*(布尔值, 默认 false)* | 固件烧录后重启运行，或挂起 CPU 检查初始态 |
 | **`diagnose_hardfault`** | **【核心诊断】** 自动化提取 HardFault 现场并输出位域根因分析 | `probe_id`*(可选)*, `target_override`*(可选)* | 单片机死机、卡死、进入 HardFault_Handler |
+| **`list_serial_ports`** | 枚举系统可用串口及连接状态 | 无 | 查看当前物理/虚拟串口，识别默认端口 |
+| **`open_serial_port`** | 打开串口（支持波特率/校验/多串口并发） | `port_name`*(必填)*, `baudrate`*(默认115200)* | 建立指定串口通信会话 |
+| **`close_serial_port`** | 关闭串口句柄 | `port_name`*(单串口时可选)* | 释放串口资源 |
+| **`send_serial_data`** | 向串口发送数据（文本/HEX，单串口智能免选） | `data`*(必填)*, `port_name`*(可选)*, `is_hex` | 发送 AT 指令或十六进制二进制报文 |
+| **`read_serial_data`** | 从串口接收区读取数据（单串口智能免选） | `port_name`*(可选)*, `format`*(text/hex)* | 接收单片机输出日志、AT响应或二进制流 |
 
 ---
 

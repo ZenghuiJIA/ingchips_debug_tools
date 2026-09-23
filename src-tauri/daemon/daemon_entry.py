@@ -54,6 +54,14 @@ except Exception as e:
     logger.warning(f"CMSIS Pack import warning: {e}")
     CMSIS_PACK_AVAILABLE = False
 
+try:
+    import serial
+    import serial.tools.list_ports
+    SERIAL_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"pyserial import warning: {e}")
+    SERIAL_AVAILABLE = False
+
 _DISCOVERED_PACKS = []
 _PACKS_LOCK = threading.Lock()
 
@@ -1751,6 +1759,261 @@ class JScopeController:
             return {"status": "stopped"}
 
 
+class SerialController:
+    """多串口并发管理与智能端口调度控制器。
+    支持同时打开多个串口进行独立收发，当仅有一个串口活动时支持免传 port_name 智能路由。
+    """
+    _lock = threading.Lock()
+    _ports: Dict[str, Any] = {}          # port_name -> serial.Serial
+    _rx_buffers: Dict[str, bytearray] = {} # port_name -> bytearray
+    _rx_threads: Dict[str, threading.Thread] = {}
+    _running_flags: Dict[str, bool] = {}
+    _last_active_port: Optional[str] = None
+
+    @classmethod
+    def list_ports(cls) -> List[Dict[str, Any]]:
+        """枚举系统当前所有可用串口及状态。"""
+        if not SERIAL_AVAILABLE:
+            raise RuntimeError("pyserial 未安装或不可用")
+
+        ports = serial.tools.list_ports.comports()
+        result = []
+        with cls._lock:
+            for p in sorted(ports, key=lambda x: x.device):
+                is_open = p.device in cls._ports and cls._ports[p.device].is_open
+                result.append({
+                    "port": p.device,
+                    "description": p.description or "",
+                    "hwid": p.hwid or "",
+                    "is_open": is_open,
+                    "is_default": (p.device == cls._last_active_port) if cls._last_active_port else False
+                })
+        return result
+
+    @classmethod
+    def _read_worker(cls, port_name: str, ser: Any):
+        """后台持续读取线程，存入环形/定长缓存队列。"""
+        while cls._running_flags.get(port_name, False):
+            try:
+                if ser.in_waiting > 0:
+                    data = ser.read(ser.in_waiting)
+                    if data:
+                        with cls._lock:
+                            buf = cls._rx_buffers.setdefault(port_name, bytearray())
+                            buf.extend(data)
+                            # 保持最大 1MB 缓存，防止内存无限上涨
+                            if len(buf) > 1024 * 1024:
+                                del buf[:len(buf) - 1024 * 1024]
+                else:
+                    time.sleep(0.01)
+            except Exception as e:
+                logger.warning(f"Serial worker read error on {port_name}: {e}")
+                break
+
+    @classmethod
+    def open_port(
+        cls,
+        port_name: str,
+        baudrate: int = 115200,
+        data_bits: int = 8,
+        stop_bits: float = 1,
+        parity: str = "N",
+        timeout: float = 0.5
+    ) -> Dict[str, Any]:
+        """打开指定串口。"""
+        if not SERIAL_AVAILABLE:
+            raise RuntimeError("pyserial 未安装或不可用")
+
+        port_name = port_name.strip().upper() if port_name.upper().startswith("COM") else port_name.strip()
+        with cls._lock:
+            if port_name in cls._ports and cls._ports[port_name].is_open:
+                cls._last_active_port = port_name
+                return {
+                    "status": "already_open",
+                    "port": port_name,
+                    "baudrate": cls._ports[port_name].baudrate,
+                    "message": f"串口 {port_name} 已经处于打开状态"
+                }
+
+            # 解析串口参数
+            parity_map = {
+                "N": serial.PARITY_NONE,
+                "E": serial.PARITY_EVEN,
+                "O": serial.PARITY_ODD,
+                "M": serial.PARITY_MARK,
+                "S": serial.PARITY_SPACE
+            }
+            p_val = parity_map.get(parity.upper(), serial.PARITY_NONE)
+
+            stopbits_map = {
+                1: serial.STOPBITS_ONE,
+                1.5: serial.STOPBITS_ONE_POINT_FIVE,
+                2: serial.STOPBITS_TWO
+            }
+            s_val = stopbits_map.get(stop_bits, serial.STOPBITS_ONE)
+
+            ser = serial.Serial(
+                port=port_name,
+                baudrate=baudrate,
+                bytesize=data_bits,
+                parity=p_val,
+                stopbits=s_val,
+                timeout=timeout
+            )
+
+            cls._ports[port_name] = ser
+            cls._rx_buffers[port_name] = bytearray()
+            cls._running_flags[port_name] = True
+            cls._last_active_port = port_name
+
+            t = threading.Thread(target=cls._read_worker, args=(port_name, ser), daemon=True)
+            cls._rx_threads[port_name] = t
+            t.start()
+
+            active_ports = [p for p, s in cls._ports.items() if s.is_open]
+            return {
+                "status": "opened",
+                "port": port_name,
+                "baudrate": baudrate,
+                "data_bits": data_bits,
+                "stop_bits": stop_bits,
+                "parity": parity,
+                "total_open_ports": len(active_ports),
+                "open_ports": active_ports
+            }
+
+    @classmethod
+    def _resolve_port_name(cls, port_name: Optional[str] = None) -> str:
+        """智能解析目标串口：
+        1. 如果指定了 port_name 且已打开，直接使用。
+        2. 如果未指定：
+           - 若当前仅打开了一个串口，自动匹配使用该串口；
+           - 若打开了多个串口，优先回退到最近活跃的串口 _last_active_port（若仍在打开列表中）；
+           - 否则抛出明确提示，引导用户选择具体串口。
+        """
+        open_list = [p for p, s in cls._ports.items() if s.is_open]
+        if not open_list:
+            raise RuntimeError("当前未打开任何串口，请先调用 open_serial_port 打开目标串口")
+
+        if port_name:
+            target = port_name.strip().upper() if port_name.upper().startswith("COM") else port_name.strip()
+            if target in open_list:
+                return target
+            raise RuntimeError(f"指定的串口 {port_name} 未打开。当前已打开的串口列表: {open_list}")
+
+        # 未指定端口
+        if len(open_list) == 1:
+            return open_list[0]
+
+        if cls._last_active_port and cls._last_active_port in open_list:
+            return cls._last_active_port
+
+        raise RuntimeError(f"当前打开了多个串口 {open_list}，请在参数中指定 port_name 以明确操作目标")
+
+    @classmethod
+    def close_port(cls, port_name: Optional[str] = None) -> Dict[str, Any]:
+        """关闭串口。若仅打开一个串口可不传 port_name。"""
+        with cls._lock:
+            target = cls._resolve_port_name(port_name)
+            cls._running_flags[target] = False
+            ser = cls._ports.pop(target, None)
+            if ser:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+            cls._rx_buffers.pop(target, None)
+            cls._rx_threads.pop(target, None)
+            if cls._last_active_port == target:
+                remaining = [p for p, s in cls._ports.items() if s.is_open]
+                cls._last_active_port = remaining[-1] if remaining else None
+
+            remaining_ports = [p for p, s in cls._ports.items() if s.is_open]
+            return {
+                "status": "closed",
+                "port": target,
+                "remaining_open_ports": remaining_ports
+            }
+
+    @classmethod
+    def send_data(
+        cls,
+        data: str,
+        port_name: Optional[str] = None,
+        is_hex: bool = False,
+        append_crlf: bool = False
+    ) -> Dict[str, Any]:
+        """向串口发送数据。未指定 port_name 且只打开单个串口时自动免选。"""
+        with cls._lock:
+            target = cls._resolve_port_name(port_name)
+            ser = cls._ports[target]
+            cls._last_active_port = target
+
+            if is_hex:
+                hex_cleaned = "".join(data.split())
+                payload = bytes.fromhex(hex_cleaned)
+            else:
+                text_to_send = data
+                if append_crlf and not text_to_send.endswith("\r\n"):
+                    if text_to_send.endswith("\n"):
+                        text_to_send = text_to_send[:-1] + "\r\n"
+                    else:
+                        text_to_send += "\r\n"
+                payload = text_to_send.encode("utf-8", errors="replace")
+
+            bytes_written = ser.write(payload)
+            ser.flush()
+
+            return {
+                "status": "sent",
+                "port": target,
+                "bytes_written": bytes_written,
+                "is_hex": is_hex
+            }
+
+    @classmethod
+    def read_data(
+        cls,
+        port_name: Optional[str] = None,
+        max_bytes: int = 4096,
+        timeout: float = 0.5,
+        format_type: str = "text",
+        clear_buffer: bool = True
+    ) -> Dict[str, Any]:
+        """从串口接收缓存或总线读取数据。未指定 port_name 且只打开单个串口时自动免选。"""
+        target = cls._resolve_port_name(port_name)
+
+        # 稍微等待数据到达
+        start_wait = time.perf_counter()
+        while time.perf_counter() - start_wait < timeout:
+            with cls._lock:
+                buf = cls._rx_buffers.get(target, bytearray())
+                if len(buf) > 0:
+                    break
+            time.sleep(0.02)
+
+        with cls._lock:
+            cls._last_active_port = target
+            buf = cls._rx_buffers.get(target, bytearray())
+            read_len = min(len(buf), max_bytes)
+            raw = bytes(buf[:read_len])
+            if clear_buffer:
+                del buf[:read_len]
+
+        if format_type.lower() == "hex":
+            formatted_data = raw.hex().upper()
+        else:
+            formatted_data = raw.decode("utf-8", errors="replace")
+
+        return {
+            "port": target,
+            "bytes_read": len(raw),
+            "format": format_type,
+            "data": formatted_data,
+            "has_more": len(buf) > 0
+        }
+
+
 # MCP Tools Definitions
 MCP_TOOLS = [
     {
@@ -1845,7 +2108,9 @@ MCP_TOOLS = [
                 "probe_id": {"type": "string", "description": "探针 Unique ID (可选)"},
                 "target_override": {"type": "string", "description": "目标芯片型号 (如 Cortex-M4)"},
                 "probe_type": {"type": "string", "description": "探针驱动类型: 'jlink' 或 'daplink'"},
-                "block_address": {"type": "integer", "description": "SEGGER RTT 控制块在 RAM 中的起始物理地址 (可选)"}
+                "block_address": {"type": "integer", "description": "SEGGER RTT 控制块在 RAM 中的起始物理地址 (可选)"},
+                "ram_start": {"type": "integer", "description": "目标芯片 RAM 内存扫描起始地址 (如 0x20000000，可选)"},
+                "ram_size": {"type": "integer", "description": "目标芯片 RAM 内存扫描范围大小 (如 0x10000 表示 64KB，可选)"}
             }
         }
     },
@@ -2048,6 +2313,65 @@ MCP_TOOLS = [
             },
             "required": ["pack_path"]
         }
+    },
+    {
+        "name": "list_serial_ports",
+        "description": "列出系统当前所有可用的物理与虚拟串口设备及其打开状态和默认/活跃标识",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "open_serial_port",
+        "description": "打开指定的串口进行通信（支持波特率、数据位、停止位、校验位配置，支持多串口并行会话）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "port_name": {"type": "string", "description": "串口端口号（如 COM3 或 /dev/ttyUSB0）"},
+                "baudrate": {"type": "integer", "description": "波特率 (默认 115200)", "default": 115200},
+                "data_bits": {"type": "integer", "description": "数据位 (5, 6, 7, 8，默认 8)", "default": 8},
+                "stop_bits": {"type": "number", "description": "停止位 (1, 1.5, 2，默认 1)", "default": 1},
+                "parity": {"type": "string", "description": "校验位 ('N'=None, 'E'=Even, 'O'=Odd, 'M'=Mark, 'S'=Space，默认 'N')", "default": "N"},
+                "timeout": {"type": "number", "description": "读取超时秒数 (默认 0.5)", "default": 0.5}
+            },
+            "required": ["port_name"]
+        }
+    },
+    {
+        "name": "close_serial_port",
+        "description": "关闭指定串口释放系统句柄。若系统当前仅打开了一个串口，可不传 port_name 自动关闭该串口",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "port_name": {"type": "string", "description": "要关闭的串口端口号（如 COM3，单串口时可选）"}
+            }
+        }
+    },
+    {
+        "name": "send_serial_data",
+        "description": "向串口发送数据（支持文本字符串与 HEX 十六进制字节串）。若系统仅打开一个串口，无需指定 port_name 自动智能发送；若打开多个串口支持指定 port_name 或默认使用最近活跃串口",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "data": {"type": "string", "description": "要发送的文本内容或 HEX 字符串 (如 'AT\\r\\n' 或 'AA BB 01 02')"},
+                "port_name": {"type": "string", "description": "目标串口端口号（如 COM3，单串口时可选）"},
+                "is_hex": {"type": "boolean", "description": "是否为十六进制 HEX 字节串模式 (默认 false)", "default": False},
+                "append_crlf": {"type": "boolean", "description": "是否自动在末尾追加 \\r\\n 换行符 (仅文本模式有效，默认 false)", "default": False}
+            },
+            "required": ["data"]
+        }
+    },
+    {
+        "name": "read_serial_data",
+        "description": "从串口接收缓存区读取最新数据。若系统仅打开一个串口，无需指定 port_name 自动智能读取；若打开多个串口支持指定 port_name",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "port_name": {"type": "string", "description": "目标串口端口号（如 COM3，单串口时可选）"},
+                "max_bytes": {"type": "integer", "description": "最大读取字节数 (默认 4096)", "default": 4096},
+                "timeout": {"type": "number", "description": "等待数据到达超时秒数 (默认 0.5)", "default": 0.5},
+                "format": {"type": "string", "description": "数据返回格式: 'text' (UTF-8字符串) 或 'hex' (大写HEX串，默认 'text')", "default": "text"},
+                "clear_buffer": {"type": "boolean", "description": "读取后是否清空已读数据 (默认 true)", "default": True}
+            }
+        }
     }
 ]
 
@@ -2081,6 +2405,11 @@ DIRECT_TOOL_METHODS = [
     "svd_write_register",
     "svd_write_field",
     "svd_import_pack",
+    "list_serial_ports",
+    "open_serial_port",
+    "close_serial_port",
+    "send_serial_data",
+    "read_serial_data",
 ]
 
 
@@ -2244,6 +2573,50 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         from svd_manager import SvdManager
         pack_path = arguments["pack_path"]
         return SvdManager.import_pack(pack_path)
+    elif name == "list_serial_ports":
+        return SerialController.list_ports()
+    elif name == "open_serial_port":
+        port_name = arguments["port_name"]
+        baudrate = int(arguments.get("baudrate", 115200))
+        data_bits = int(arguments.get("data_bits", 8))
+        stop_bits = float(arguments.get("stop_bits", 1))
+        parity = str(arguments.get("parity", "N"))
+        timeout = float(arguments.get("timeout", 0.5))
+        return SerialController.open_port(
+            port_name=port_name,
+            baudrate=baudrate,
+            data_bits=data_bits,
+            stop_bits=stop_bits,
+            parity=parity,
+            timeout=timeout
+        )
+    elif name == "close_serial_port":
+        port_name = arguments.get("port_name")
+        return SerialController.close_port(port_name=port_name)
+    elif name == "send_serial_data":
+        data = arguments["data"]
+        port_name = arguments.get("port_name")
+        is_hex = bool(arguments.get("is_hex", False))
+        append_crlf = bool(arguments.get("append_crlf", False))
+        return SerialController.send_data(
+            data=data,
+            port_name=port_name,
+            is_hex=is_hex,
+            append_crlf=append_crlf
+        )
+    elif name == "read_serial_data":
+        port_name = arguments.get("port_name")
+        max_bytes = int(arguments.get("max_bytes", 4096))
+        timeout = float(arguments.get("timeout", 0.5))
+        fmt = str(arguments.get("format", "text"))
+        clear_buf = bool(arguments.get("clear_buffer", True))
+        return SerialController.read_data(
+            port_name=port_name,
+            max_bytes=max_bytes,
+            timeout=timeout,
+            format_type=fmt,
+            clear_buffer=clear_buf
+        )
     else:
         raise ValueError(f"Unknown MCP tool: {name}")
 
