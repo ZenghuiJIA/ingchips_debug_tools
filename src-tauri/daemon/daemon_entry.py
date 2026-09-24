@@ -62,6 +62,13 @@ except Exception as e:
     logger.warning(f"pyserial import warning: {e}")
     SERIAL_AVAILABLE = False
 
+try:
+    from intelhex import IntelHex
+    INTELHEX_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"intelhex import warning: {e}")
+    INTELHEX_AVAILABLE = False
+
 _DISCOVERED_PACKS = []
 _PACKS_LOCK = threading.Lock()
 
@@ -1594,6 +1601,253 @@ class AxfSymbolParser:
         }
 
 
+class FirmwareMerger:
+    """
+    Firmware Merger for HEX and BIN files.
+    - Merges multiple Intel HEX files into a single HEX or BIN file, with overlap detection.
+    - Merges multiple BIN files into a single BIN or HEX file based on specified load offsets.
+    - Provides segment information and memory layout preview.
+    """
+
+    @staticmethod
+    def inspect_file(file_path: str, file_type: Optional[str] = None, offset: int = 0) -> Dict[str, Any]:
+        """Inspects a firmware file (.hex or .bin) and returns address range, segments, and size."""
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"文件未找到: {file_path}")
+
+        ext = os.path.splitext(file_path)[1].lower()
+        t = (file_type or "").lower() or ("hex" if ext == ".hex" else "bin")
+        file_size = os.path.getsize(file_path)
+
+        if t == "hex":
+            if not INTELHEX_AVAILABLE:
+                raise RuntimeError("Python intelhex 模块未就绪，无法解析 HEX 文件")
+            ih = IntelHex(file_path)
+            if len(ih) == 0:
+                min_addr = 0
+                max_addr = 0
+                segments = []
+                data_size = 0
+            else:
+                min_addr = ih.minaddr()
+                max_addr = ih.maxaddr()
+                raw_segs = ih.segments()
+                segments = [{"start": f"0x{s[0]:08X}", "end": f"0x{s[1]:08X}", "size": s[1] - s[0], "raw_start": s[0], "raw_end": s[1]} for s in raw_segs]
+                data_size = len(ih)
+
+            return {
+                "file_path": file_path,
+                "file_name": os.path.basename(file_path),
+                "type": "hex",
+                "file_size": file_size,
+                "data_size": data_size,
+                "min_addr": f"0x{min_addr:08X}",
+                "max_addr": f"0x{max_addr:08X}",
+                "raw_min_addr": min_addr,
+                "raw_max_addr": max_addr,
+                "segments": segments
+            }
+        else:
+            # BIN file with specified base offset
+            raw_start = int(offset)
+            raw_end = raw_start + file_size
+            segments = [{
+                "start": f"0x{raw_start:08X}",
+                "end": f"0x{raw_end:08X}",
+                "size": file_size,
+                "raw_start": raw_start,
+                "raw_end": raw_end
+            }]
+            return {
+                "file_path": file_path,
+                "file_name": os.path.basename(file_path),
+                "type": "bin",
+                "file_size": file_size,
+                "data_size": file_size,
+                "min_addr": f"0x{raw_start:08X}",
+                "max_addr": f"0x{max_end:08X}" if (max_end := max(0, raw_end - 1)) else "0x00000000",
+                "raw_min_addr": raw_start,
+                "raw_max_addr": max(0, raw_end - 1),
+                "segments": segments
+            }
+
+    @staticmethod
+    def merge_hex_files(
+        files: List[Dict[str, Any]],
+        output_path: str,
+        output_format: str = "hex",
+        overlap_strategy: str = "error",
+        pad_byte: int = 0xFF
+    ) -> Dict[str, Any]:
+        """
+        Merge multiple HEX files into one target file (.hex or .bin).
+        - files: List of dicts, each with 'file_path', and optional 'offset' (to rebase if desired)
+        - output_path: Target destination path
+        - output_format: 'hex' or 'bin'
+        - overlap_strategy: 'error' (raise on conflict), 'ignore' (keep earlier), 'replace' (newer overwrites earlier)
+        - pad_byte: Filler byte (default 0xFF) when exporting to BIN
+        """
+        if not INTELHEX_AVAILABLE:
+            raise RuntimeError("Python intelhex 模块未就绪，无法执行 HEX 合并")
+
+        if not files:
+            raise ValueError("未指定要合并的 HEX 文件")
+
+        merged = IntelHex()
+        merge_mode = overlap_strategy if overlap_strategy in ("error", "ignore", "replace") else "error"
+        file_summaries = []
+
+        for item in files:
+            p = item.get("file_path")
+            if not p or not os.path.isfile(p):
+                raise FileNotFoundError(f"文件未找到: {p}")
+
+            rebase = item.get("offset")
+            ih_sub = IntelHex(p)
+            if rebase is not None and str(rebase).strip():
+                rb_val = int(str(rebase), 16 if str(rebase).startswith("0x") else 10)
+                if rb_val != 0:
+                    ih_sub.offset(rb_val)
+
+            sub_min = ih_sub.minaddr() if len(ih_sub) > 0 else 0
+            sub_max = ih_sub.maxaddr() if len(ih_sub) > 0 else 0
+
+            try:
+                merged.merge(ih_sub, overlap=merge_mode)
+            except Exception as e:
+                raise ValueError(f"合并文件 [{os.path.basename(p)}] 时发生地址段冲突重叠 (Overlap): {e}")
+
+            file_summaries.append({
+                "file_name": os.path.basename(p),
+                "file_path": p,
+                "size": len(ih_sub),
+                "min_addr": f"0x{sub_min:08X}",
+                "max_addr": f"0x{sub_max:08X}",
+            })
+
+        out_dir = os.path.dirname(os.path.abspath(output_path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        fmt = output_format.lower()
+        if fmt == "bin":
+            start_addr = merged.minaddr()
+            end_addr = merged.maxaddr()
+            merged.padding = pad_byte & 0xFF
+            merged.tobinfile(output_path, start=start_addr, end=end_addr)
+        else:
+            merged.write_hex_file(output_path)
+
+        total_size = os.path.getsize(output_path)
+        min_addr = merged.minaddr() if len(merged) > 0 else 0
+        max_addr = merged.maxaddr() if len(merged) > 0 else 0
+        segs = [{"start": f"0x{s[0]:08X}", "end": f"0x{s[1]:08X}", "size": s[1] - s[0]} for s in merged.segments()]
+
+        trim_process_memory()
+        return {
+            "status": "success",
+            "output_path": output_path,
+            "output_format": fmt,
+            "file_size": total_size,
+            "data_bytes": len(merged),
+            "min_addr": f"0x{min_addr:08X}",
+            "max_addr": f"0x{max_addr:08X}",
+            "segments": segs,
+            "merged_count": len(files),
+            "inputs": file_summaries
+        }
+
+    @staticmethod
+    def merge_bin_files(
+        files: List[Dict[str, Any]],
+        output_path: str,
+        output_format: str = "bin",
+        pad_byte: int = 0xFF,
+        overlap_strategy: str = "error"
+    ) -> Dict[str, Any]:
+        """
+        Merge multiple raw BIN files at defined target offsets into a unified BIN or HEX file.
+        - files: List of dicts with 'file_path' and 'offset' (hex string or int, e.g. '0x02000000')
+        - output_path: Output target path
+        - output_format: 'bin' or 'hex'
+        - pad_byte: Byte used to fill gaps between files (e.g. 0xFF or 0x00)
+        - overlap_strategy: 'error', 'ignore', 'replace'
+        """
+        if not files:
+            raise ValueError("未指定要合并的 BIN 文件列表")
+
+        if not INTELHEX_AVAILABLE:
+            raise RuntimeError("Python intelhex 模块未就绪，无法执行 BIN 地址合并")
+
+        merged = IntelHex()
+        merge_mode = overlap_strategy if overlap_strategy in ("error", "ignore", "replace") else "error"
+        file_summaries = []
+
+        for item in files:
+            p = item.get("file_path")
+            if not p or not os.path.isfile(p):
+                raise FileNotFoundError(f"文件未找到: {p}")
+
+            off_raw = item.get("offset", 0)
+            if isinstance(off_raw, str):
+                off = int(off_raw, 16 if off_raw.startswith("0x") else 10)
+            else:
+                off = int(off_raw)
+
+            sub = IntelHex()
+            sub.loadbin(p, offset=off)
+
+            sub_min = sub.minaddr() if len(sub) > 0 else off
+            sub_max = sub.maxaddr() if len(sub) > 0 else off
+
+            try:
+                merged.merge(sub, overlap=merge_mode)
+            except Exception as e:
+                raise ValueError(f"合并 BIN 文件 [{os.path.basename(p)}] @ 0x{off:08X} 发生冲突重叠 (Overlap): {e}")
+
+            file_summaries.append({
+                "file_name": os.path.basename(p),
+                "file_path": p,
+                "offset": f"0x{off:08X}",
+                "size": os.path.getsize(p),
+                "min_addr": f"0x{sub_min:08X}",
+                "max_addr": f"0x{sub_max:08X}",
+            })
+
+        out_dir = os.path.dirname(os.path.abspath(output_path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        fmt = output_format.lower()
+        if fmt == "hex":
+            merged.write_hex_file(output_path)
+        else:
+            start_addr = merged.minaddr()
+            end_addr = merged.maxaddr()
+            merged.padding = pad_byte & 0xFF
+            merged.tobinfile(output_path, start=start_addr, end=end_addr)
+
+        total_size = os.path.getsize(output_path)
+        min_addr = merged.minaddr() if len(merged) > 0 else 0
+        max_addr = merged.maxaddr() if len(merged) > 0 else 0
+        segs = [{"start": f"0x{s[0]:08X}", "end": f"0x{s[1]:08X}", "size": s[1] - s[0]} for s in merged.segments()]
+
+        trim_process_memory()
+        return {
+            "status": "success",
+            "output_path": output_path,
+            "output_format": fmt,
+            "file_size": total_size,
+            "data_bytes": len(merged),
+            "min_addr": f"0x{min_addr:08X}",
+            "max_addr": f"0x{max_addr:08X}",
+            "segments": segs,
+            "merged_count": len(files),
+            "inputs": file_summaries
+        }
+
+
+
 class JScopeController:
     """
     JScope-like background memory sampling engine.
@@ -2515,6 +2769,71 @@ MCP_TOOLS = [
                 "clear_buffer": {"type": "boolean", "description": "读取后是否清空已读数据 (默认 true)", "default": True}
             }
         }
+    },
+    {
+        "name": "inspect_firmware_file",
+        "description": "检测并解析固件文件 (.hex 或 .bin)，返回其地址段范围、分段 (Segments)、有效数据大小等信息",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "固件文件绝对路径 (.hex 或 .bin)"},
+                "file_type": {"type": "string", "description": "可选类型 ('hex' 或 'bin'，默认自动根据扩展名识别)"},
+                "offset": {"type": "integer", "description": "若是 bin 文件的装载基地址 (默认 0)"}
+            },
+            "required": ["file_path"]
+        }
+    },
+    {
+        "name": "merge_hex_files",
+        "description": "将多个 Intel HEX 文件合并为一个统一的目标固件文件（支持输出为 .hex 或 .bin），具备重叠冲突检测",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "description": "要合并的 HEX 文件列表，每项含 file_path 及可选的重定位 offset",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "offset": {"type": "string", "description": "地址重定位偏移 (可选，如 '0x00000000')"}
+                        },
+                        "required": ["file_path"]
+                    }
+                },
+                "output_path": {"type": "string", "description": "合并后保存的目标文件绝对路径"},
+                "output_format": {"type": "string", "description": "输出格式: 'hex' 或 'bin' (默认 'hex')", "default": "hex"},
+                "overlap_strategy": {"type": "string", "description": "地址冲突处理策略: 'error'(报错中断), 'ignore'(保留先入), 'replace'(覆盖更新)", "default": "error"},
+                "pad_byte": {"type": "integer", "description": "输出为 BIN 时空白区域的填充字节 (默认 0xFF)", "default": 255}
+            },
+            "required": ["files", "output_path"]
+        }
+    },
+    {
+        "name": "merge_bin_files",
+        "description": "将多个原始 BIN 二进制文件按指定起始偏移地址合并为一个统一的目标固件（支持输出为 .bin 或 .hex）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "description": "要合并的 BIN 文件列表，每项必须指定起始装载地址 offset 与 file_path",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "offset": {"type": "string", "description": "装载物理基地址 (如 '0x02000000')"}
+                        },
+                        "required": ["file_path", "offset"]
+                    }
+                },
+                "output_path": {"type": "string", "description": "合并后保存的目标文件绝对路径"},
+                "output_format": {"type": "string", "description": "输出格式: 'bin' 或 'hex' (默认 'bin')", "default": "bin"},
+                "pad_byte": {"type": "integer", "description": "段间空白填充字节 (默认 0xFF)", "default": 255},
+                "overlap_strategy": {"type": "string", "description": "地址重叠策略: 'error', 'ignore', 'replace'", "default": "error"}
+            },
+            "required": ["files", "output_path"]
+        }
     }
 ]
 
@@ -2553,6 +2872,9 @@ DIRECT_TOOL_METHODS = [
     "close_serial_port",
     "send_serial_data",
     "read_serial_data",
+    "inspect_firmware_file",
+    "merge_hex_files",
+    "merge_bin_files",
 ]
 
 
@@ -2770,6 +3092,37 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
             timeout=timeout,
             format_type=fmt,
             clear_buffer=clear_buf
+        )
+    elif name == "inspect_firmware_file":
+        file_path = arguments["file_path"]
+        file_type = arguments.get("file_type")
+        offset = int(arguments.get("offset", 0))
+        return FirmwareMerger.inspect_file(file_path, file_type, offset)
+    elif name == "merge_hex_files":
+        files = arguments["files"]
+        output_path = arguments["output_path"]
+        output_format = arguments.get("output_format", "hex")
+        overlap_strategy = arguments.get("overlap_strategy", "error")
+        pad_byte = int(arguments.get("pad_byte", 255))
+        return FirmwareMerger.merge_hex_files(
+            files=files,
+            output_path=output_path,
+            output_format=output_format,
+            overlap_strategy=overlap_strategy,
+            pad_byte=pad_byte
+        )
+    elif name == "merge_bin_files":
+        files = arguments["files"]
+        output_path = arguments["output_path"]
+        output_format = arguments.get("output_format", "bin")
+        pad_byte = int(arguments.get("pad_byte", 255))
+        overlap_strategy = arguments.get("overlap_strategy", "error")
+        return FirmwareMerger.merge_bin_files(
+            files=files,
+            output_path=output_path,
+            output_format=output_format,
+            pad_byte=pad_byte,
+            overlap_strategy=overlap_strategy
         )
     else:
         raise ValueError(f"Unknown MCP tool: {name}")

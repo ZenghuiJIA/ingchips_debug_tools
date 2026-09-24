@@ -468,6 +468,52 @@ pub async fn pick_firmware_file(title: Option<String>) -> Result<Option<String>,
 }
 
 #[tauri::command]
+pub async fn pick_multiple_firmware_files(title: Option<String>, filter_type: Option<String>) -> Result<Vec<String>, String> {
+    let t = filter_type.unwrap_or_else(|| "all".to_string()).to_lowercase();
+    let dialog_title = title.unwrap_or_else(|| "选择要合并的固件文件".to_string());
+    let mut builder = rfd::AsyncFileDialog::new().set_title(&dialog_title);
+
+    if t == "hex" {
+        builder = builder.add_filter("Intel HEX 固件 (*.hex)", &["hex"]);
+    } else if t == "bin" {
+        builder = builder.add_filter("原始 BIN 固件 (*.bin)", &["bin"]);
+    } else {
+        builder = builder
+            .add_filter("固件文件 (*.hex, *.bin)", &["hex", "bin"])
+            .add_filter("Intel HEX 固件 (*.hex)", &["hex"])
+            .add_filter("原始 BIN 固件 (*.bin)", &["bin"]);
+    }
+    builder = builder.add_filter("所有文件 (*.*)", &["*"]);
+
+    let files = builder.pick_files().await;
+    match files {
+        Some(list) => Ok(list.into_iter().map(|f| f.path().to_string_lossy().to_string()).collect()),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[tauri::command]
+pub async fn pick_save_firmware_file(title: Option<String>, default_name: Option<String>, file_type: Option<String>) -> Result<Option<String>, String> {
+    let t = file_type.unwrap_or_else(|| "hex".to_string()).to_lowercase();
+    let dialog_title = title.unwrap_or_else(|| "保存合并后的固件文件".to_string());
+    let default_file = default_name.unwrap_or_else(|| if t == "bin" { "merged_firmware.bin".to_string() } else { "merged_firmware.hex".to_string() });
+
+    let mut builder = rfd::AsyncFileDialog::new()
+        .set_title(&dialog_title)
+        .set_file_name(&default_file);
+
+    if t == "bin" {
+        builder = builder.add_filter("原始 BIN 固件 (*.bin)", &["bin"]);
+    } else {
+        builder = builder.add_filter("Intel HEX 固件 (*.hex)", &["hex"]);
+    }
+    builder = builder.add_filter("所有文件 (*.*)", &["*"]);
+
+    let file = builder.save_file().await;
+    Ok(file.map(|f| f.path().to_string_lossy().to_string()))
+}
+
+#[tauri::command]
 pub async fn pick_pack_file(title: Option<String>) -> Result<Option<String>, String> {
     let dialog_title = title.unwrap_or_else(|| "选择 CMSIS-Pack 文件 (*.pack)".to_string());
     let file = rfd::AsyncFileDialog::new()
@@ -478,6 +524,71 @@ pub async fn pick_pack_file(title: Option<String>) -> Result<Option<String>, Str
         .await;
 
     Ok(file.map(|f| f.path().to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub fn inspect_firmware_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    file_path: String,
+    file_type: Option<String>,
+    offset: Option<u64>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "inspect_firmware_file",
+        json!({
+            "file_path": file_path,
+            "file_type": file_type,
+            "offset": offset.unwrap_or(0),
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn merge_hex_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    files: Value,
+    output_path: String,
+    output_format: Option<String>,
+    overlap_strategy: Option<String>,
+    pad_byte: Option<u8>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "merge_hex_files",
+        json!({
+            "files": files,
+            "output_path": output_path,
+            "output_format": output_format.unwrap_or_else(|| "hex".to_string()),
+            "overlap_strategy": overlap_strategy.unwrap_or_else(|| "error".to_string()),
+            "pad_byte": pad_byte.unwrap_or(255),
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn merge_bin_files(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    files: Value,
+    output_path: String,
+    output_format: Option<String>,
+    pad_byte: Option<u8>,
+    overlap_strategy: Option<String>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "merge_bin_files",
+        json!({
+            "files": files,
+            "output_path": output_path,
+            "output_format": output_format.unwrap_or_else(|| "bin".to_string()),
+            "pad_byte": pad_byte.unwrap_or(255),
+            "overlap_strategy": overlap_strategy.unwrap_or_else(|| "error".to_string()),
+        }),
+    )
 }
 
 #[tauri::command]

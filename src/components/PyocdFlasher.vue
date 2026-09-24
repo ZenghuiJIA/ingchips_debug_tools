@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import { safeInvoke } from '../utils/ipc';
 import type { ProbeInfo } from '../types';
 import {
@@ -14,6 +14,10 @@ import {
   Package,
   X
 } from '@lucide/vue';
+
+const props = defineProps<{
+  initialFilePath?: string;
+}>();
 
 const emit = defineEmits<{
   (e: 'switch-tab', tab: string, payload?: any): void;
@@ -106,7 +110,14 @@ const targetPresets = [
   { label: 'Cortex-M4 通用', value: 'cortex_m4' },
 ];
 
-const filePath = ref<string>('');
+const filePath = ref<string>(props.initialFilePath || '');
+
+watch(() => props.initialFilePath, (newVal) => {
+  if (newVal) {
+    filePath.value = newVal;
+    logMsg(`已从外部载入固件: ${newVal}`, 'info');
+  }
+});
 const isFlashing = ref<boolean>(false);
 const isResetting = ref<boolean>(false);
 const flashLogs = ref<Array<{ time: string; text: string; status: 'info' | 'success' | 'error' }>>([]);

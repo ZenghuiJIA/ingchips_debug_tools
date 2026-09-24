@@ -11,6 +11,7 @@ import FirmwareResourceAnalyzer from './components/FirmwareResourceAnalyzer.vue'
 import SvdRegisterInspector from './components/SvdRegisterInspector.vue';
 import RTOSTracer from './components/RTOSTracer.vue';
 import LcdScreenMirror from './components/LcdScreenMirror.vue';
+import FirmwareMerger from './components/FirmwareMerger.vue';
 import AiCopilot from './components/AiCopilot.vue';
 import {
   Terminal,
@@ -23,11 +24,12 @@ import {
   Info,
   Sliders,
   Cpu,
-  Monitor
+  Monitor,
+  Merge
 } from '@lucide/vue';
 
 const activeSessionsCount = ref<number>(0);
-const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'ai'>('terminal');
+const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'merger' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'ai'>('terminal');
 const sharedFirmwarePath = ref<string>('');
 const runningInBrowser = ref<boolean>(!isTauri());
 
@@ -108,6 +110,17 @@ onUnmounted(() => {
           >
             <Zap class="w-3.5 h-3.5" />
             <span>SWD 固件烧录</span>
+          </button>
+
+          <button
+            @click="currentTab = 'merger'"
+            class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
+            :class="currentTab === 'merger' 
+              ? 'border-emerald-500 text-emerald-400 bg-zinc-800/40' 
+              : 'border-transparent text-zinc-400 hover:text-zinc-200'"
+          >
+            <Merge class="w-3.5 h-3.5 text-emerald-400" />
+            <span>HEX/BIN 合并器</span>
           </button>
 
           <button
@@ -202,6 +215,7 @@ onUnmounted(() => {
               currentTab === 'terminal' ? SerialTerminal :
               currentTab === 'plotter' ? WaveformPlotter :
               currentTab === 'flasher' ? PyocdFlasher :
+              currentTab === 'merger' ? FirmwareMerger :
               currentTab === 'analyzer' ? FirmwareResourceAnalyzer :
               currentTab === 'svd' ? SvdRegisterInspector :
               currentTab === 'rtos' ? RTOSTracer :

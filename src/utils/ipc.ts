@@ -606,6 +606,50 @@ export async function safeInvoke<T = any>(cmd: string, args: Record<string, any>
     return 'C:/ING918XX_SDK_SOURCE/examples-gcc/peripheral_console_liteos/peripheral_console_liteos.axf' as any;
   }
 
+  if (cmd === 'pick_multiple_firmware_files') {
+    return ['C:/firmware/bootloader.hex', 'C:/firmware/app.hex'] as any;
+  }
+
+  if (cmd === 'pick_save_firmware_file') {
+    return 'C:/firmware/merged_firmware.hex' as any;
+  }
+
+  if (cmd === 'inspect_firmware_file') {
+    return {
+      file_path: args?.file_path || 'C:/firmware/app.hex',
+      file_name: 'app.hex',
+      type: 'hex',
+      file_size: 65536,
+      data_size: 49152,
+      min_addr: '0x02002000',
+      max_addr: '0x0200E000',
+      segments: [
+        { start: '0x02002000', end: '0x0200E000', size: 49152 }
+      ]
+    } as any;
+  }
+
+  if (cmd === 'merge_hex_files' || cmd === 'merge_bin_files') {
+    return {
+      status: 'success',
+      output_path: args?.output_path || 'C:/firmware/merged_firmware.hex',
+      output_format: args?.output_format || 'hex',
+      file_size: 131072,
+      data_bytes: 98304,
+      min_addr: '0x02000000',
+      max_addr: '0x02020000',
+      segments: [
+        { start: '0x02000000', end: '0x02004000', size: 16384 },
+        { start: '0x02004000', end: '0x02020000', size: 114688 }
+      ],
+      merged_count: args?.files?.length || 2,
+      inputs: [
+        { file_name: 'bootloader.hex', size: 16384, min_addr: '0x02000000', max_addr: '0x02003FFF' },
+        { file_name: 'app.hex', size: 114688, min_addr: '0x02004000', max_addr: '0x0201FFFF' }
+      ]
+    } as any;
+  }
+
   if (cmd === 'pick_pack_file') {
     return 'C:/packs/INGChips.INGCHIPS_DeviceFamilyPack.1.0.1.pack' as any;
   }
