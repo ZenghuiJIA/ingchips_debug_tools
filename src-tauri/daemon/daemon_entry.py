@@ -127,14 +127,51 @@ def discover_and_load_packs() -> List[str]:
 def normalize_target(target_name: Optional[str]) -> Optional[str]:
     """
     Normalize target MCU string to match PyOCD or J-Link supported targets.
-    Fixes cases like 'cortex-m4', 'cortex_m4', 'cortex_m3', 'cortex-m0+' by mapping to 'cortex_m'.
+    Fixes cases like:
+    - 'cortex-m4', 'cortex_m4', 'cortex_m3', 'cortex-m0+' -> 'cortex_m'
+    - 'ing200' -> 'ing2000'
+    - Case-insensitive / hyphen-insensitive matching against registered PyOCD TARGETs
     """
     if not target_name:
         return None
     raw = target_name.strip().lower().replace("-", "_")
+
+    # Common chip alias mapping
+    alias_map = {
+        "ing200": "ing2000",
+        "ing_200": "ing2000",
+        "ing_2000": "ing2000",
+        "ing918": "ing91800",
+        "ing_918": "ing91800",
+        "ing_91800": "ing91800",
+        "ing916": "ing91600",
+        "ing_916": "ing91600",
+        "ing_91600": "ing91600",
+    }
+    if raw in alias_map:
+        raw = alias_map[raw]
+
     # Universal ARM Cortex-M targets
     if raw.startswith("cortex_m") or raw == "cortex_m" or raw in ("cortexm", "cortexm0", "cortexm3", "cortexm4", "cortexm7"):
         return "cortex_m"
+
+    # Match against PyOCD registered targets if available
+    try:
+        from pyocd.target import TARGET
+        # Direct match
+        if raw in TARGET:
+            return raw
+        # Try raw without underscores
+        no_under = raw.replace("_", "")
+        if no_under in TARGET:
+            return no_under
+        # Fuzzy match registered targets
+        for key in TARGET.keys():
+            if key.lower().replace("-", "").replace("_", "") == no_under:
+                return key
+    except Exception:
+        pass
+
     return raw
 
 

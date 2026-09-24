@@ -180,28 +180,58 @@ impl DaemonManager {
             }
         }
 
-        // Read line from child stdout
-        let mut resp_line = String::new();
+        // Read line from child stdout, skipping empty lines or non-JSON diagnostic noise
+        let mut resp_val: Option<Value> = None;
+        let mut last_raw_line = String::new();
         {
             let mut reader_guard = self.stdout_reader.lock().unwrap();
             if let Some(ref mut reader) = *reader_guard {
-                if let Err(e) = reader.read_line(&mut resp_line) {
-                    drop(reader_guard);
-                    self.stop();
-                    return Err(format!("Daemon read error: {}", e));
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => {
+                            // EOF
+                            break;
+                        }
+                        Ok(_) => {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            last_raw_line = line.clone();
+                            // Attempt to parse as JSON-RPC object
+                            if trimmed.starts_with('{') {
+                                if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+                                    resp_val = Some(val);
+                                    break;
+                                }
+                            }
+                            // Otherwise it might be stray diagnostic output on stdout, skip and keep reading
+                            println!("[DaemonManager] Ignored non-JSON stdout line: {}", trimmed);
+                        }
+                        Err(e) => {
+                            drop(reader_guard);
+                            self.stop();
+                            return Err(format!("Daemon read error: {}", e));
+                        }
+                    }
                 }
             } else {
                 return Err("Daemon stdout not available".to_string());
             }
         }
 
-        if resp_line.trim().is_empty() {
-            self.stop();
-            return Err("Daemon returned empty response (process may have terminated)".to_string());
-        }
-
-        let resp_val: Value = serde_json::from_str(&resp_line)
-            .map_err(|e| format!("Invalid JSON from daemon: {} -> raw: {}", e, resp_line))?;
+        let resp_val = match resp_val {
+            Some(v) => v,
+            None => {
+                self.stop();
+                if last_raw_line.trim().is_empty() {
+                    return Err("Daemon returned empty response (process may have terminated)".to_string());
+                } else {
+                    return Err(format!("Invalid JSON from daemon -> raw: {}", last_raw_line));
+                }
+            }
+        };
 
         if let Some(err) = resp_val.get("error") {
             let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown daemon error");
