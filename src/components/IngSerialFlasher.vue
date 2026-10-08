@@ -27,23 +27,43 @@ const emit = defineEmits<{
   (e: 'close'): void;
 }>();
 
-// Persistent storage keys
-const KEY_INI_PATH = 'ing_flasher_last_ini_path';
-const KEY_SINGLE_PATH = 'ing_flasher_last_single_path';
-const KEY_SINGLE_ADDR = 'ing_flasher_last_single_address';
-const KEY_FAMILY = 'ing_flasher_last_family';
-const KEY_MODE = 'ing_flasher_last_mode';
-const KEY_BAUD = 'ing_flasher_last_baud';
-const KEY_MANUAL_BOOT = 'ing_flasher_last_manual_boot';
+// Helper function to get port-specific storage key
+function getPortKey(baseKey: string): string {
+  const cleanPort = props.portName ? props.portName.replace(/[^a-zA-Z0-9_-]/g, '_') : 'default';
+  return `${baseKey}_${cleanPort}`;
+}
 
-// State
-const mode = ref<'ini' | 'single'>((localStorage.getItem(KEY_MODE) as 'ini' | 'single') || 'ini');
-const iniPath = ref<string>(localStorage.getItem(KEY_INI_PATH) || '');
-const singlePath = ref<string>(localStorage.getItem(KEY_SINGLE_PATH) || '');
-const singleAddress = ref<string>(localStorage.getItem(KEY_SINGLE_ADDR) || '0x02002000');
-const selectedFamily = ref<string>(localStorage.getItem(KEY_FAMILY) || 'auto');
-const selectedBaud = ref<number>(Number(localStorage.getItem(KEY_BAUD)) || 115200);
-const manualBoot = ref<boolean>(localStorage.getItem(KEY_MANUAL_BOOT) === 'true');
+// Persistent storage base keys
+const BASE_KEY_INI_PATH = 'ing_flasher_last_ini_path';
+const BASE_KEY_SINGLE_PATH = 'ing_flasher_last_single_path';
+const BASE_KEY_SINGLE_ADDR = 'ing_flasher_last_single_address';
+const BASE_KEY_FAMILY = 'ing_flasher_last_family';
+const BASE_KEY_MODE = 'ing_flasher_last_mode';
+const BASE_KEY_BAUD = 'ing_flasher_last_baud';
+const BASE_KEY_MANUAL_BOOT = 'ing_flasher_last_manual_boot';
+
+// State initialized per port with fallback to global default
+const mode = ref<'ini' | 'single'>(
+  (localStorage.getItem(getPortKey(BASE_KEY_MODE)) || localStorage.getItem(BASE_KEY_MODE) || 'ini') as 'ini' | 'single'
+);
+const iniPath = ref<string>(
+  localStorage.getItem(getPortKey(BASE_KEY_INI_PATH)) || localStorage.getItem(BASE_KEY_INI_PATH) || ''
+);
+const singlePath = ref<string>(
+  localStorage.getItem(getPortKey(BASE_KEY_SINGLE_PATH)) || localStorage.getItem(BASE_KEY_SINGLE_PATH) || ''
+);
+const singleAddress = ref<string>(
+  localStorage.getItem(getPortKey(BASE_KEY_SINGLE_ADDR)) || localStorage.getItem(BASE_KEY_SINGLE_ADDR) || '0x02002000'
+);
+const selectedFamily = ref<string>(
+  localStorage.getItem(getPortKey(BASE_KEY_FAMILY)) || localStorage.getItem(BASE_KEY_FAMILY) || 'auto'
+);
+const selectedBaud = ref<number>(
+  Number(localStorage.getItem(getPortKey(BASE_KEY_BAUD)) || localStorage.getItem(BASE_KEY_BAUD)) || 115200
+);
+const manualBoot = ref<boolean>(
+  (localStorage.getItem(getPortKey(BASE_KEY_MANUAL_BOOT)) || localStorage.getItem(BASE_KEY_MANUAL_BOOT)) === 'true'
+);
 
 const baudRates = [115200, 230400, 460800, 921600];
 
@@ -63,14 +83,53 @@ let nextLogId = 1;
 
 let unlistenProgress: UnlistenFn | null = null;
 
-// Watchers for persistence
-watch(mode, (v) => localStorage.setItem(KEY_MODE, v));
-watch(iniPath, (v) => localStorage.setItem(KEY_INI_PATH, v));
-watch(singlePath, (v) => localStorage.setItem(KEY_SINGLE_PATH, v));
-watch(singleAddress, (v) => localStorage.setItem(KEY_SINGLE_ADDR, v));
-watch(selectedFamily, (v) => localStorage.setItem(KEY_FAMILY, v));
-watch(selectedBaud, (v) => localStorage.setItem(KEY_BAUD, String(v)));
-watch(manualBoot, (v) => localStorage.setItem(KEY_MANUAL_BOOT, String(v)));
+// Switch & reload configuration whenever portName prop changes
+watch(() => props.portName, (newPort) => {
+  if (!newPort) return;
+  mode.value = (localStorage.getItem(getPortKey(BASE_KEY_MODE)) || localStorage.getItem(BASE_KEY_MODE) || 'ini') as 'ini' | 'single';
+  iniPath.value = localStorage.getItem(getPortKey(BASE_KEY_INI_PATH)) || localStorage.getItem(BASE_KEY_INI_PATH) || '';
+  singlePath.value = localStorage.getItem(getPortKey(BASE_KEY_SINGLE_PATH)) || localStorage.getItem(BASE_KEY_SINGLE_PATH) || '';
+  singleAddress.value = localStorage.getItem(getPortKey(BASE_KEY_SINGLE_ADDR)) || localStorage.getItem(BASE_KEY_SINGLE_ADDR) || '0x02002000';
+  selectedFamily.value = localStorage.getItem(getPortKey(BASE_KEY_FAMILY)) || localStorage.getItem(BASE_KEY_FAMILY) || 'auto';
+  selectedBaud.value = Number(localStorage.getItem(getPortKey(BASE_KEY_BAUD)) || localStorage.getItem(BASE_KEY_BAUD)) || 115200;
+  manualBoot.value = (localStorage.getItem(getPortKey(BASE_KEY_MANUAL_BOOT)) || localStorage.getItem(BASE_KEY_MANUAL_BOOT)) === 'true';
+
+  if (iniPath.value && mode.value === 'ini') {
+    loadAndParseIni(iniPath.value);
+  } else {
+    parsedIni.value = null;
+  }
+});
+
+// Watchers for persistence: save to port-scoped key as well as global last-used fallback
+watch(mode, (v) => {
+  localStorage.setItem(getPortKey(BASE_KEY_MODE), v);
+  localStorage.setItem(BASE_KEY_MODE, v);
+});
+watch(iniPath, (v) => {
+  localStorage.setItem(getPortKey(BASE_KEY_INI_PATH), v);
+  localStorage.setItem(BASE_KEY_INI_PATH, v);
+});
+watch(singlePath, (v) => {
+  localStorage.setItem(getPortKey(BASE_KEY_SINGLE_PATH), v);
+  localStorage.setItem(BASE_KEY_SINGLE_PATH, v);
+});
+watch(singleAddress, (v) => {
+  localStorage.setItem(getPortKey(BASE_KEY_SINGLE_ADDR), v);
+  localStorage.setItem(BASE_KEY_SINGLE_ADDR, v);
+});
+watch(selectedFamily, (v) => {
+  localStorage.setItem(getPortKey(BASE_KEY_FAMILY), v);
+  localStorage.setItem(BASE_KEY_FAMILY, v);
+});
+watch(selectedBaud, (v) => {
+  localStorage.setItem(getPortKey(BASE_KEY_BAUD), String(v));
+  localStorage.setItem(BASE_KEY_BAUD, String(v));
+});
+watch(manualBoot, (v) => {
+  localStorage.setItem(getPortKey(BASE_KEY_MANUAL_BOOT), String(v));
+  localStorage.setItem(BASE_KEY_MANUAL_BOOT, String(v));
+});
 
 function addLog(text: string, type: 'info' | 'success' | 'error' | 'warn' = 'info') {
   const d = new Date();
