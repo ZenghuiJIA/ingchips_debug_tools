@@ -94,19 +94,22 @@
               :key="preset.id"
               type="button"
               @click="selectPreset(preset.id)"
-              class="flex flex-col items-start p-2.5 rounded-lg border text-left transition-all relative overflow-hidden group"
+              class="flex flex-col items-start p-2.5 rounded-lg border text-left transition-all relative overflow-hidden group cursor-pointer"
               :class="currentThemeId === preset.id
-                ? 'border-blue-500 ring-1 ring-blue-500 bg-zinc-800/80 shadow-md'
-                : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700 hover:bg-zinc-800/40'"
+                ? 'border-emerald-500 ring-2 ring-emerald-500/30 bg-zinc-800 shadow-md'
+                : 'border-zinc-800 bg-zinc-950/60 hover:border-zinc-700 hover:bg-zinc-850'"
             >
-              <div class="flex items-center gap-2 w-full mb-1.5">
-                <div class="w-3.5 h-3.5 rounded-full border border-white/20 shadow-sm" :style="{ backgroundColor: preset.accentColor }"></div>
-                <span class="font-medium text-[11px] text-zinc-200 truncate">{{ t(preset.nameKey) }}</span>
+              <!-- Triple color swatch strip -->
+              <div class="flex items-center gap-1.5 w-full mb-2">
+                <div class="w-3.5 h-3.5 rounded-full border border-white/20 shadow-xs" :style="{ backgroundColor: preset.accentColor }" title="强调色"></div>
+                <div class="w-3 h-3 rounded-md border border-white/10" :style="{ backgroundColor: preset.cardColor }" title="卡片色"></div>
+                <div class="w-3 h-3 rounded-md border border-white/10" :style="{ backgroundColor: preset.bgColor }" title="背景色"></div>
+                <span class="ml-auto text-[9.5px] px-1 py-0.2 rounded font-mono font-medium" :class="preset.mode === 'dark' ? 'bg-zinc-900 text-zinc-400' : 'bg-zinc-200 text-zinc-700'">
+                  {{ preset.mode === 'dark' ? 'DARK' : 'LIGHT' }}
+                </span>
               </div>
-              <span class="text-[10px] text-zinc-500 truncate w-full">
-                {{ preset.mode === 'dark' ? t('settings_mode_dark') : t('settings_mode_light') }}
-              </span>
-              <div v-if="currentThemeId === preset.id" class="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-blue-500"></div>
+              <span class="font-medium text-[11px] text-zinc-200 truncate w-full leading-tight">{{ t(preset.nameKey) }}</span>
+              <div v-if="currentThemeId === preset.id" class="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></div>
             </button>
           </div>
         </div>

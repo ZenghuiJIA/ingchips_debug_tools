@@ -1,13 +1,17 @@
 import { ref } from 'vue';
 
 export type ThemeMode = 'dark' | 'light';
+
 export type ThemeId = 
   | 'dark-slate' 
   | 'dark-navy' 
   | 'dark-forest'
+  | 'dark-crimson'
+  | 'dark-purple'
   | 'light-white' 
   | 'light-warm' 
-  | 'light-ice';
+  | 'light-ice'
+  | 'light-sakura';
 
 export interface ThemeOption {
   id: ThemeId;
@@ -15,59 +19,103 @@ export interface ThemeOption {
   mode: ThemeMode;
   accentColor: string;
   bgColor: string;
+  cardColor: string;
+  tagColor: string;
 }
 
 export const THEME_PRESETS: ThemeOption[] = [
+  // --- Dark Themes ---
   {
     id: 'dark-slate',
-    nameKey: 'theme_default_dark',
+    nameKey: 'theme_dark_slate',
     mode: 'dark',
-    accentColor: '#10b981',
+    accentColor: '#10b981', // Emerald
     bgColor: '#09090b',
+    cardColor: '#141417',
+    tagColor: '#27272a',
   },
   {
     id: 'dark-navy',
-    nameKey: 'theme_ocean_dark',
+    nameKey: 'theme_dark_navy',
     mode: 'dark',
-    accentColor: '#38bdf8',
-    bgColor: '#070d19',
+    accentColor: '#38bdf8', // Sky Blue
+    bgColor: '#060d17',
+    cardColor: '#0b1626',
+    tagColor: '#17253b',
   },
   {
     id: 'dark-forest',
-    nameKey: 'theme_forest_dark',
+    nameKey: 'theme_dark_forest',
     mode: 'dark',
-    accentColor: '#4ade80',
-    bgColor: '#08120c',
+    accentColor: '#4ade80', // Mint Green
+    bgColor: '#051109',
+    cardColor: '#091c10',
+    tagColor: '#12331f',
   },
   {
+    id: 'dark-crimson',
+    nameKey: 'theme_dark_crimson',
+    mode: 'dark',
+    accentColor: '#f43f5e', // Rose
+    bgColor: '#12070a',
+    cardColor: '#1c0c11',
+    tagColor: '#36141e',
+  },
+  {
+    id: 'dark-purple',
+    nameKey: 'theme_dark_purple',
+    mode: 'dark',
+    accentColor: '#c084fc', // Purple Neon
+    bgColor: '#0c0714',
+    cardColor: '#150d21',
+    tagColor: '#2a1a42',
+  },
+
+  // --- Light Themes (Modern, clean, and elegant) ---
+  {
     id: 'light-white',
-    nameKey: 'theme_pure_light',
+    nameKey: 'theme_light_white',
     mode: 'light',
-    accentColor: '#059669',
-    bgColor: '#f8fafc',
+    accentColor: '#059669', // Emerald Teal
+    bgColor: '#f4f6f8',
+    cardColor: '#ffffff',
+    tagColor: '#e2e8f0',
   },
   {
     id: 'light-warm',
-    nameKey: 'theme_warm_light',
+    nameKey: 'theme_light_warm',
     mode: 'light',
-    accentColor: '#d97706',
-    bgColor: '#fdfbf7',
+    accentColor: '#d97706', // Amber Amber
+    bgColor: '#fbf9f4',
+    cardColor: '#ffffff',
+    tagColor: '#faeedb',
   },
   {
     id: 'light-ice',
-    nameKey: 'theme_ice_light',
+    nameKey: 'theme_light_ice',
     mode: 'light',
-    accentColor: '#0284c7',
-    bgColor: '#f0f4f8',
+    accentColor: '#0284c7', // Cyan Blue
+    bgColor: '#eef3f8',
+    cardColor: '#ffffff',
+    tagColor: '#dbeafe',
+  },
+  {
+    id: 'light-sakura',
+    nameKey: 'theme_light_sakura',
+    mode: 'light',
+    accentColor: '#e11d48', // Sakura Pink
+    bgColor: '#faf3f5',
+    cardColor: '#ffffff',
+    tagColor: '#ffe4e6',
   },
 ];
 
 export const FONT_PRESETS = [
-  { id: 'default', label: '系统默认 (System Default)', family: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' },
-  { id: 'jetbrains', label: 'JetBrains Mono', family: '"JetBrains Mono", Consolas, monospace' },
-  { id: 'firacode', label: 'Fira Code', family: '"Fira Code", Consolas, monospace' },
-  { id: 'cascadia', label: 'Cascadia Code / Consolas', family: '"Cascadia Code", Consolas, "Courier New", monospace' },
-  { id: 'consolas', label: 'Consolas (经典等宽)', family: 'Consolas, monospace' },
+  { id: 'default', label: '系统原生推荐 (System Default)', family: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif' },
+  { id: 'jetbrains', label: 'JetBrains Mono (开发者最爱)', family: '"JetBrains Mono", Consolas, "Courier New", monospace' },
+  { id: 'firacode', label: 'Fira Code (连字特性)', family: '"Fira Code", Consolas, monospace' },
+  { id: 'cascadia', label: 'Cascadia Code (微软现代等宽)', family: '"Cascadia Code", Consolas, monospace' },
+  { id: 'consolas', label: 'Consolas (经典工业标准)', family: 'Consolas, monospace' },
 ];
 
 const STORAGE_THEME_ID = 'ai_hil_theme_id';
@@ -105,7 +153,6 @@ export function applyTheme(themeId: ThemeId) {
 }
 
 export function setMode(mode: ThemeMode) {
-  // If current theme matches the mode, keep it; otherwise switch to first preset of that mode
   const current = THEME_PRESETS.find(t => t.id === currentThemeId.value);
   if (current && current.mode === mode) return;
 

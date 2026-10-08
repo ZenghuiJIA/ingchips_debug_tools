@@ -90,7 +90,7 @@ async function handleTakeScreenshot() {
         <Check v-if="screenshotTaken" class="w-4 h-4 text-emerald-400 animate-bounce" />
         <Camera v-else class="w-4 h-4 transition-transform group-hover:scale-110 duration-200" />
         <span class="text-[9px] mt-0.5 font-medium leading-none">
-          {{ screenshotTaken ? '已保存' : t('toolbar_screenshot') }}
+          {{ screenshotTaken ? t('toolbar_screenshot_saved') : t('toolbar_screenshot') }}
         </span>
       </button>
     </div>

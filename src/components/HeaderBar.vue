@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import { t } from '../utils/i18n';
 import type { SystemMetrics } from '../types';
 import {
   Cpu,
@@ -65,7 +66,7 @@ onUnmounted(() => {
               class="inline-block w-1.5 h-1.5 rounded-full"
               :class="activeSessionsCount > 0 ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'"
             ></span>
-            <span>{{ activeSessionsCount > 0 ? `硬件在线 · ${activeSessionsCount} 个端口已连接` : '等待连接硬件' }}</span>
+            <span>{{ activeSessionsCount > 0 ? `${t('hardware_online')} · ${activeSessionsCount} ${t('ports_connected')}` : t('waiting_hardware') }}</span>
           </div>
         </div>
       </div>
@@ -74,7 +75,7 @@ onUnmounted(() => {
       <div class="hidden lg:flex items-center gap-2 pl-3 border-l border-zinc-800">
         <div class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800 text-xs font-mono">
           <Activity class="w-3.5 h-3.5" :class="metrics.is_under_budget ? 'text-emerald-400' : 'text-amber-400'" />
-          <span class="text-zinc-400">RAM:</span>
+          <span class="text-zinc-400">{{ t('ram_usage') }}:</span>
           <span :class="metrics.is_under_budget ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'">
             {{ metrics.total_rss_mb }} MB
           </span>
@@ -89,7 +90,7 @@ onUnmounted(() => {
     <div class="hidden md:flex items-center gap-2 text-xs text-zinc-400">
       <span class="flex items-center gap-1.5 px-3 py-1 rounded-full bg-zinc-950/80 border border-zinc-800/80 text-[11px] font-sans">
         <Radio class="w-3.5 h-3.5 text-emerald-400" />
-        <span>多串口及硬件引脚 (DTR/RTS/复位) 均已由标签页独立自主管理</span>
+        <span>{{ t('pin_management_notice') }}</span>
       </span>
     </div>
 
@@ -100,11 +101,11 @@ onUnmounted(() => {
         class="flex items-center gap-2 bg-emerald-950/40 border border-emerald-800/40 px-2.5 py-1 rounded-md text-xs font-mono"
       >
         <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-        <span class="text-emerald-300 font-semibold">{{ activeSessionsCount }} 端口会话在线</span>
+        <span class="text-emerald-300 font-semibold">{{ activeSessionsCount }} {{ t('active_sessions_online') }}</span>
       </div>
 
       <div v-else class="text-[11px] text-zinc-500 font-mono hidden sm:block">
-        无活动连接
+        {{ t('no_active_conn') }}
       </div>
     </div>
   </header>

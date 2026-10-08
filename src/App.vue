@@ -16,6 +16,7 @@ import FirmwareMerger from './components/FirmwareMerger.vue';
 import AiCopilot from './components/AiCopilot.vue';
 import CollapsibleToolbar from './components/CollapsibleToolbar.vue';
 import GlobalSettingsModal from './components/GlobalSettingsModal.vue';
+import { t } from './utils/i18n';
 import {
   Terminal,
   Activity,
@@ -70,7 +71,7 @@ onUnmounted(() => {
     <div v-if="runningInBrowser" class="bg-amber-950/80 border-b border-amber-800 text-amber-300 px-4 py-1.5 flex items-center justify-between text-xs">
       <div class="flex items-center gap-2">
         <Info class="w-4 h-4 shrink-0" />
-        <span>当前处于 <strong>Web 浏览器预览模式</strong> (模拟数据)。访问物理硬件 (DAPLink / COM / SWD) 请运行 <code>.\src-tauri\target\release\app.exe</code> 或 <code>pnpm tauri dev</code> 桌面客户端。</span>
+        <span>{{ t('browser_mode_notice') }}</span>
       </div>
     </div>
 
@@ -92,7 +93,7 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <Terminal class="w-3.5 h-3.5" />
-            <span>串口高速监控</span>
+            <span>{{ t('tab_terminal') }}</span>
           </button>
 
           <button
@@ -103,7 +104,7 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <Activity class="w-3.5 h-3.5 text-cyan-400" />
-            <span>实时波形示波器</span>
+            <span>{{ t('tab_plotter') }}</span>
           </button>
 
           <button
@@ -114,7 +115,7 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <Zap class="w-3.5 h-3.5" />
-            <span>SWD 固件烧录</span>
+            <span>{{ t('tab_flasher') }}</span>
           </button>
 
           <button
@@ -125,7 +126,7 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <Merge class="w-3.5 h-3.5 text-emerald-400" />
-            <span>HEX/BIN 合并器</span>
+            <span>{{ t('tab_merger') }}</span>
           </button>
 
           <button
@@ -136,7 +137,7 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <PieChart class="w-3.5 h-3.5 text-emerald-400" />
-            <span>固件资源分析</span>
+            <span>{{ t('tab_analyzer') }}</span>
           </button>
 
           <button
@@ -147,7 +148,7 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <Sliders class="w-3.5 h-3.5 text-indigo-400" />
-            <span>SVD 外设寄存器</span>
+            <span>{{ t('tab_svd') }}</span>
           </button>
 
           <button
@@ -158,7 +159,7 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <Cpu class="w-3.5 h-3.5 text-purple-400" />
-            <span>RTOS 任务Trace</span>
+            <span>{{ t('tab_rtos') }}</span>
           </button>
 
           <button
@@ -169,7 +170,7 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <Monitor class="w-3.5 h-3.5 text-cyan-400" />
-            <span>屏幕显存镜像</span>
+            <span>{{ t('tab_lcd') }}</span>
           </button>
 
           <button
@@ -180,7 +181,7 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <AlertOctagon class="w-3.5 h-3.5 text-rose-400" />
-            <span>HardFault 寄存器诊断</span>
+            <span>{{ t('tab_hardfault') }}</span>
           </button>
 
           <button
@@ -191,7 +192,7 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <Database class="w-3.5 h-3.5 text-emerald-400" />
-            <span>内存查看与Dump</span>
+            <span>{{ t('tab_memory') }}</span>
           </button>
 
           <button
@@ -202,12 +203,12 @@ onUnmounted(() => {
               : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <Sparkles class="w-3.5 h-3.5 text-emerald-400" />
-            <span>AI 硬件在环助手 (MCP)</span>
+            <span>{{ t('tab_ai') }}</span>
           </button>
         </div>
 
         <div class="text-[11px] text-zinc-500 font-mono flex items-center gap-2">
-          <span>空载内存: &lt; 100MB 严格受控</span>
+          <span>{{ t('memory_strict_budget') }}</span>
         </div>
       </div>
 
@@ -251,7 +252,7 @@ onUnmounted(() => {
         <span>MCP stdio RPC 2.0</span>
       </div>
       <div>
-        <span class="text-emerald-500">● 硬件调度器正常运行</span>
+        <span class="text-emerald-500">● {{ t('hardware_scheduler_ok') }}</span>
       </div>
     </footer>
 

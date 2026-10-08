@@ -30,6 +30,7 @@ import ProtocolDashboard from './ProtocolDashboard.vue';
 import IngSerialFlasher from './IngSerialFlasher.vue';
 import { encodeCommand } from '../utils/commandEncoder';
 import { appendChecksum, type ChecksumAlgorithm } from '../utils/crc';
+import { t } from '../utils/i18n';
 import type { CommandGroup, CommandItem, TriggerRule, PortInfo } from '../types';
 
 const props = defineProps<{
@@ -572,7 +573,7 @@ onUnmounted(() => {
             :title="isFlashingActive ? '正在执行芯片固件烧录，串口已临时挂起' : (isConnected ? '关闭当前端口连接 (保留历史日志与会话标签)' : '打开/重新连接当前端口')"
           >
             <Power class="w-3 h-3" />
-            <span>{{ isFlashingActive ? '烧录中' : (isConnected ? '关闭' : '打开') }}</span>
+            <span>{{ isFlashingActive ? t('term_flashing') : (isConnected ? t('term_close') : t('term_open')) }}</span>
           </button>
         </div>
 
@@ -611,7 +612,7 @@ onUnmounted(() => {
               title="普通复位: RTS 0 (正常态) -> DTR 产生 100ms 复位脉冲"
             >
               <RotateCcw class="w-2.5 h-2.5" :class="{ 'animate-spin': isResetting }" />
-              <span>复位</span>
+              <span>{{ t('term_reset') }}</span>
             </button>
             <button
               @click="triggerReset('bootloader_reset')"
@@ -620,7 +621,7 @@ onUnmounted(() => {
               title="进入 BOOT 引导复位: RTS 1 -> 延时 500ms 建立电平 -> DTR 产生 100ms 复位脉冲"
             >
               <Zap class="w-2.5 h-2.5 text-amber-400" />
-              <span>BOOT</span>
+              <span>{{ t('term_boot') }}</span>
             </button>
           </div>
         </div>
@@ -633,7 +634,7 @@ onUnmounted(() => {
             :class="sessionMode === 'log' ? 'bg-zinc-800 text-emerald-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
             title="日志模式: 适合抓包、时间戳记录与调试日志流"
           >
-            日志流
+            {{ t('term_log_stream') }}
           </button>
           <button
             @click="sessionMode = 'vt100'"
@@ -642,7 +643,7 @@ onUnmounted(() => {
             title="VT100 终端: 原生 Linux 控制台、Shell 交互、Tab补全与 ANSI 颜色"
           >
             <Terminal class="w-3 h-3" />
-            <span>VT100 终端</span>
+            <span>{{ t('term_vt100') }}</span>
           </button>
         </div>
 
@@ -652,7 +653,7 @@ onUnmounted(() => {
             class="px-2 py-0.5 rounded text-[11px] transition-colors"
             :class="viewMode === 'string' ? 'bg-zinc-800 text-emerald-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
           >
-            ASCII 文本
+            {{ t('term_ascii') }}
           </button>
           <button
             @click="viewMode = 'hex'"
@@ -660,7 +661,7 @@ onUnmounted(() => {
             :class="viewMode === 'hex' ? 'bg-zinc-800 text-emerald-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
           >
             <Binary class="w-3 h-3" />
-            <span>HEX</span>
+            <span>{{ t('term_hex') }}</span>
           </button>
         </div>
 
@@ -669,19 +670,19 @@ onUnmounted(() => {
           <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer ml-1">
             <input type="checkbox" v-model="showTimestamps" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
             <Clock class="w-3 h-3" />
-            <span>时间戳</span>
+            <span>{{ t('term_timestamps') }}</span>
           </label>
 
           <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer">
             <input type="checkbox" v-model="autoScroll" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
             <ArrowDown class="w-3 h-3" />
-            <span>自动滚动</span>
+            <span>{{ t('term_autoscroll') }}</span>
           </label>
 
           <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer">
             <input type="checkbox" v-model="autoWrap" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
             <WrapText class="w-3 h-3" />
-            <span>自动换行</span>
+            <span>{{ t('term_autowrap') }}</span>
           </label>
         </template>
 
@@ -693,7 +694,7 @@ onUnmounted(() => {
           title="切换自定义交互操控台 (滑动条/开关下发控制)"
         >
           <Sliders class="w-3.5 h-3.5 text-emerald-400" />
-          <span>交互操控</span>
+          <span>{{ t('term_dashboard') }}</span>
         </button>
 
         <!-- Modbus RTU Drawer Toggle Button -->
@@ -704,7 +705,7 @@ onUnmounted(() => {
           title="切换 Modbus RTU 读写与寄存器可视化抽屉"
         >
           <Layers class="w-3.5 h-3.5 text-amber-400" />
-          <span>Modbus</span>
+          <span>{{ t('term_modbus') }}</span>
         </button>
 
         <!-- Command Group Toggle Button -->
@@ -715,7 +716,7 @@ onUnmounted(() => {
           title="切换右侧命令组管理面板"
         >
           <Layers class="w-3.5 h-3.5 text-emerald-400" />
-          <span>命令组 {{ activeGroup ? `(${activeGroup.commands.length})` : '' }}</span>
+          <span>{{ t('term_cmd_group') }} {{ activeGroup ? `(${activeGroup.commands.length})` : '' }}</span>
         </button>
 
         <!-- Smart Trigger / Auto-Responder Toggle Button -->
@@ -726,7 +727,7 @@ onUnmounted(() => {
           title="切换智能应答触发器面板"
         >
           <Zap class="w-3.5 h-3.5 text-amber-400" />
-          <span>自动应答</span>
+          <span>{{ t('term_auto_reply') }}</span>
         </button>
 
         <!-- Quick Jump to Waveform Plotter -->
@@ -736,7 +737,7 @@ onUnmounted(() => {
           title="切换到实时波形示波器"
         >
           <Activity class="w-3.5 h-3.5 text-cyan-400" />
-          <span>波形曲线</span>
+          <span>{{ t('term_waveform') }}</span>
         </button>
 
         <!-- INGChips 芯片串口烧录面板入口 -->
@@ -746,7 +747,7 @@ onUnmounted(() => {
           title="打开 ING916 / ING918 串口芯片高速烧录器 (支持 INI / HEX / BIN 烧录与路径记忆)"
         >
           <Cpu class="w-3.5 h-3.5 text-indigo-400" />
-          <span>ING 烧录</span>
+          <span>{{ t('term_ing_flasher') }}</span>
         </button>
 
         <!-- 显式清屏按钮 -->
@@ -756,7 +757,7 @@ onUnmounted(() => {
           title="清空串口接收与发送日志缓存 (清屏)"
         >
           <Trash2 class="w-3 h-3 text-rose-400" />
-          <span>清屏</span>
+          <span>{{ t('term_clear') }}</span>
         </button>
       </div>
 
@@ -972,8 +973,8 @@ onUnmounted(() => {
         @click="isCommandPanelOpen = !isCommandPanelOpen"
         class="ml-auto px-2 py-0.5 rounded text-[10.5px] text-emerald-400 hover:bg-emerald-950/60 border border-emerald-800/40 transition-colors shrink-0 flex items-center gap-1 font-medium"
       >
-        <Layers class="w-3 h-3" />
-        <span>{{ isCommandPanelOpen ? '隐藏抽屉' : '管理命令组' }}</span>
+        <Layers class="w-3.5 h-3.5" />
+        <span>{{ isCommandPanelOpen ? t('term_collapse_drawer') : t('term_manage_groups') }}</span>
       </button>
     </div>
 
@@ -983,8 +984,8 @@ onUnmounted(() => {
         v-model="inputMode"
         class="bg-zinc-950 border border-zinc-800 text-zinc-200 text-xs py-1.5 px-2 rounded outline-none"
       >
-        <option value="string">文本 (String)</option>
-        <option value="hex">HEX 格式</option>
+        <option value="string">{{ t('term_ascii') }}</option>
+        <option value="hex">{{ t('term_hex') }}</option>
       </select>
 
       <select
@@ -1005,11 +1006,11 @@ onUnmounted(() => {
         :class="checksumAlgo !== 'none' ? 'text-amber-400 border-amber-700/80 font-bold bg-amber-950/30' : 'text-zinc-400'"
         title="发送时在数据末尾自动追加校验码 (Rust 原生高性能查表法加速)"
       >
-        <option value="none">校验: 无</option>
-        <option value="modbus_crc16">校验: Modbus CRC16 (低位在前)</option>
-        <option value="crc16_ccitt">校验: CRC16-CCITT / XModem</option>
-        <option value="checksum8">校验: Checksum-8 (累加和)</option>
-        <option value="xor8">校验: XOR-8 (异或和)</option>
+        <option value="none">{{ t('term_chk_none') }}</option>
+        <option value="modbus_crc16">{{ t('term_chk_modbus') }}</option>
+        <option value="crc16_ccitt">{{ t('term_chk_crc16') }}</option>
+        <option value="checksum8">{{ t('term_chk_sum8') }}</option>
+        <option value="xor8">{{ t('term_chk_xor8') }}</option>
       </select>
 
       <div class="flex-1 relative">
@@ -1017,7 +1018,7 @@ onUnmounted(() => {
           v-model="inputMessage"
           @keydown.enter="handleSendMessage()"
           type="text"
-          :placeholder="inputMode === 'hex' ? '输入HEX字节，如: 01 03 00 00 00 02 C4 0B' : '输入发送指令，回车直接发送...'"
+          :placeholder="inputMode === 'hex' ? t('term_input_placeholder_hex') : t('term_input_placeholder_str')"
           class="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded px-3 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 outline-none transition-colors"
           :disabled="!isConnected"
         />
@@ -1029,7 +1030,7 @@ onUnmounted(() => {
         class="flex items-center gap-1 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold transition-colors disabled:opacity-40 disabled:hover:bg-emerald-600"
       >
         <Send class="w-3.5 h-3.5" />
-        <span>发送</span>
+        <span>{{ t('term_send') }}</span>
       </button>
     </div>
 

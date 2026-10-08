@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { safeInvoke, isTauri } from '../utils/ipc';
+import { t } from '../utils/i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { TerminalSessionTab, PortInfo, SvdDevice } from '../types';
 import SerialTerminalSession from './SerialTerminalSession.vue';
@@ -543,24 +544,24 @@ onUnmounted(() => {
 
         <!-- No Tabs Open State -->
         <div v-else class="text-xs text-zinc-500 px-2 py-1.5 flex items-center gap-2">
-          <span>暂无打开的串口设备</span>
+          <span>{{ t('term_no_ports_open') }}</span>
         </div>
 
         <!-- Add Port Tab Button -->
         <button
           @click="openNewPortDialog"
           class="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-emerald-400 border border-zinc-700/60 transition-colors ml-1"
-          title="打开并添加新的并行串口/RTT设备"
+          :title="t('term_open_new_port')"
         >
           <Plus class="w-3.5 h-3.5" />
-          <span>打开新端口</span>
+          <span>{{ t('term_open_new_port') }}</span>
         </button>
       </div>
 
       <!-- Right: Active Session Quick Controls -->
       <div v-if="tabs.length > 0" class="flex items-center gap-2 shrink-0 pb-1">
         <span class="text-[11px] text-zinc-500 font-mono hidden md:inline">
-          并发连接数: <strong class="text-emerald-400">{{ tabs.filter(t => t.isConnected).length }}</strong> / {{ tabs.length }}
+          {{ t('term_concurrent_conns') }}: <strong class="text-emerald-400">{{ tabs.filter(t => t.isConnected).length }}</strong> / {{ tabs.length }}
         </span>
       </div>
     </div>
@@ -595,8 +596,7 @@ onUnmounted(() => {
           <Radio class="w-7 h-7 stroke-1" />
         </div>
         <div class="text-center">
-          <p class="text-sm font-semibold text-zinc-300">多设备终端就绪</p>
-          <p class="text-xs text-zinc-500 mt-1">可在上方点击 <strong>【打开新端口】</strong> 添加并行串口、DAPLink 或 RTT 监视通道</p>
+          <p class="text-sm font-semibold text-zinc-300">{{ t('term_ready_desc') }}</p>
         </div>
         <button
           @click="openNewPortDialog"
