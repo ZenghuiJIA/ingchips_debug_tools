@@ -19,13 +19,15 @@ import {
   Check,
   Power,
   WrapText,
-  Sliders
+  Sliders,
+  Cpu
 } from '@lucide/vue';
 import CommandGroupPanel from './CommandGroupPanel.vue';
 import TriggerPanel from './TriggerPanel.vue';
 import SerialXtermView from './SerialXtermView.vue';
 import ModbusDrawer from './ModbusDrawer.vue';
 import ProtocolDashboard from './ProtocolDashboard.vue';
+import IngSerialFlasher from './IngSerialFlasher.vue';
 import { encodeCommand } from '../utils/commandEncoder';
 import { appendChecksum, type ChecksumAlgorithm } from '../utils/crc';
 import type { CommandGroup, CommandItem, TriggerRule, PortInfo } from '../types';
@@ -126,6 +128,7 @@ const isCommandPanelOpen = ref<boolean>(false);
 const isTriggerPanelOpen = ref<boolean>(false);
 const isModbusDrawerOpen = ref<boolean>(false);
 const isDashboardOpen = ref<boolean>(false);
+const isIngFlasherOpen = ref<boolean>(false);
 const cmdPanelRef = ref<any>(null);
 const triggerPanelRef = ref<any>(null);
 const modbusDrawerRef = ref<any>(null);
@@ -297,6 +300,15 @@ function clearLogs() {
   logs.value = [];
   rxBytesCount.value = 0;
   txBytesCount.value = 0;
+  if (xtermRef.value) {
+    try {
+      if (typeof xtermRef.value.clear === 'function') {
+        xtermRef.value.clear();
+      } else if (typeof xtermRef.value.clearTerminal === 'function') {
+        xtermRef.value.clearTerminal();
+      }
+    } catch (_) {}
+  }
   emit('update-stats', { rx: 0, tx: 0 });
 }
 
@@ -667,11 +679,31 @@ onUnmounted(() => {
         <!-- Quick Jump to Waveform Plotter -->
         <button
           @click="emit('switch-tab', 'plotter')"
-          class="px-2 py-0.5 rounded text-[11px] bg-zinc-800 hover:bg-zinc-700 text-cyan-300 border border-cyan-800/60 transition-colors flex items-center gap-1 ml-1"
+          class="px-2 py-0.5 rounded text-[11px] bg-zinc-800 hover:bg-zinc-700 text-cyan-300 border border-cyan-800/60 transition-colors flex items-center gap-1 ml-1 cursor-pointer"
           title="切换到实时波形示波器"
         >
           <Activity class="w-3.5 h-3.5 text-cyan-400" />
           <span>波形曲线</span>
+        </button>
+
+        <!-- INGChips 芯片串口烧录面板入口 -->
+        <button
+          @click="isIngFlasherOpen = true"
+          class="px-2 py-0.5 rounded text-[11px] bg-indigo-950/80 hover:bg-indigo-900 text-indigo-300 border border-indigo-700/80 transition-colors flex items-center gap-1 ml-1 cursor-pointer font-medium"
+          title="打开 ING916 / ING918 串口芯片高速烧录器 (支持 INI / HEX / BIN 烧录与路径记忆)"
+        >
+          <Cpu class="w-3.5 h-3.5 text-indigo-400" />
+          <span>ING 烧录</span>
+        </button>
+
+        <!-- 显式清屏按钮 -->
+        <button
+          @click="clearLogs"
+          class="px-2 py-0.5 rounded text-[11px] bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/80 hover:text-rose-300 transition-colors flex items-center gap-1 ml-1 cursor-pointer"
+          title="清空串口接收与发送日志缓存 (清屏)"
+        >
+          <Trash2 class="w-3 h-3 text-rose-400" />
+          <span>清屏</span>
         </button>
       </div>
 
@@ -942,5 +974,12 @@ onUnmounted(() => {
         <span>发送</span>
       </button>
     </div>
+
+    <!-- INGChips Serial Flasher Modal -->
+    <IngSerialFlasher
+      :port-name="portName"
+      :is-open="isIngFlasherOpen"
+      @close="isIngFlasherOpen = false"
+    />
   </div>
 </template>

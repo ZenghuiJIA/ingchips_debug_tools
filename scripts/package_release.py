@@ -29,7 +29,20 @@ def get_release_version() -> str:
             arg_ver = f"v{arg_ver}"
         return arg_ver
 
-    # 2. Git Tag (精确匹配)
+    # 2. package.json 版本优先（便于发布管理）
+    pkg_json = ROOT_DIR / "package.json"
+    if pkg_json.exists():
+        try:
+            import json
+            with open(pkg_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                v = data.get("version")
+                if v:
+                    return f"v{v}" if not v.startswith("v") else v
+        except Exception:
+            pass
+
+    # 3. Git Tag (精确匹配)
     try:
         res = subprocess.run(
             ["git", "describe", "--tags", "--exact-match"],
@@ -43,7 +56,7 @@ def get_release_version() -> str:
     except Exception:
         pass
 
-    # 3. Git Tag (最近 tag)
+    # 4. Git Tag (最近 tag)
     try:
         res = subprocess.run(
             ["git", "describe", "--tags", "--abbrev=0"],
@@ -57,20 +70,7 @@ def get_release_version() -> str:
     except Exception:
         pass
 
-    # 4. package.json 回退
-    pkg_json = ROOT_DIR / "package.json"
-    if pkg_json.exists():
-        try:
-            import json
-            with open(pkg_json, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                v = data.get("version")
-                if v:
-                    return f"v{v}" if not v.startswith("v") else v
-        except Exception:
-            pass
-
-    return "v1.0.0"
+    return "v1.2.1"
 
 def get_release_paths(ver: str):
     pkg_name = f"AI-HIL-Debugger-{ver}-windows-x64"

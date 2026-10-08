@@ -168,6 +168,11 @@ pub fn run() {
             commands::pyocd_detect_rtos,
             commands::pyocd_capture_framebuffer,
             commands::modbus_build_ascii_request,
+            commands::ing_pick_ini_file,
+            commands::ing_pick_firmware_file,
+            commands::ing_parse_ini,
+            commands::ing_start_flash,
+            commands::ing_cancel_flash,
         ])
         .build(tauri::generate_context!()) {
             Ok(a) => {

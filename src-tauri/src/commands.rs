@@ -903,5 +903,70 @@ pub fn modbus_build_ascii_request(
     ))
 }
 
+#[tauri::command]
+pub async fn ing_pick_ini_file(starting_dir: Option<String>) -> Result<Option<String>, String> {
+    let mut builder = rfd::AsyncFileDialog::new()
+        .set_title("选择 INGChips 固件烧录方案 (.ini)")
+        .add_filter("INGChips 方案配置 (*.ini)", &["ini"])
+        .add_filter("所有文件 (*.*)", &["*"]);
+
+    if let Some(dir) = starting_dir {
+        if !dir.is_empty() {
+            builder = builder.set_directory(std::path::Path::new(&dir));
+        }
+    }
+
+    let file = builder.pick_file().await;
+    Ok(file.map(|f| f.path().to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn ing_pick_firmware_file(starting_dir: Option<String>) -> Result<Option<String>, String> {
+    let mut builder = rfd::AsyncFileDialog::new()
+        .set_title("选择烧录固件文件 (.bin / .hex)")
+        .add_filter("固件文件 (*.bin, *.hex)", &["bin", "hex"])
+        .add_filter("原始 BIN 固件 (*.bin)", &["bin"])
+        .add_filter("Intel HEX 固件 (*.hex)", &["hex"])
+        .add_filter("所有文件 (*.*)", &["*"]);
+
+    if let Some(dir) = starting_dir {
+        if !dir.is_empty() {
+            builder = builder.set_directory(std::path::Path::new(&dir));
+        }
+    }
+
+    let file = builder.pick_file().await;
+    Ok(file.map(|f| f.path().to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub fn ing_parse_ini(ini_path: String) -> Result<crate::hardware::ing_flasher::IngIniConfig, String> {
+    crate::hardware::ing_flasher::parse_ini_file(&ini_path)
+}
+
+#[tauri::command]
+pub fn ing_start_flash(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: crate::hardware::ing_flasher::IngFlashRequest,
+) -> Result<(), String> {
+    // Release active serial manager session on this port to avoid conflicts
+    let _ = state.serial.close(Some(&request.port_name));
+    
+    // Spawn background flashing thread
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        crate::hardware::ing_flasher::run_flash_task(app_clone, request);
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn ing_cancel_flash() -> Result<(), String> {
+    crate::hardware::ing_flasher::FLASH_CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
 
 

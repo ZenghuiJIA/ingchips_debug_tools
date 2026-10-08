@@ -131,6 +131,7 @@ function copySelection() {
 defineExpose({
   writeRawBytes,
   clearTerminal,
+  clear: clearTerminal,
   fit: () => fitAddon?.fit(),
   focus: () => term?.focus()
 });

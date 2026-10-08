@@ -538,4 +538,36 @@ export interface TerminalSessionTab {
   rttBlockAddress?: number | null;
 }
 
+export interface IngBinItem {
+  index: number;
+  name: string;
+  checked: boolean;
+  file_name: string;
+  resolved_path: string;
+  address: number;
+  size_bytes: number | null;
+  file_exists: boolean;
+}
+
+export interface IngIniConfig {
+  file_path: string;
+  family: string;
+  baud: number;
+  entry_address: number | null;
+  set_entry: boolean;
+  launch: boolean;
+  reset_reserved_flash: boolean;
+  items: IngBinItem[];
+}
+
+export interface IngFlashProgressPayload {
+  stage: string;
+  file_name: string;
+  current_bytes: number;
+  total_bytes: number;
+  percentage: number;
+  speed_kbps: number;
+  message: string;
+}
+
 
