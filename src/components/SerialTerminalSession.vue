@@ -240,7 +240,24 @@ const rxBytesCount = ref<number>(0);
 const txBytesCount = ref<number>(0);
 
 let unlistenRx: UnlistenFn | null = null;
+let unlistenDisconnect: UnlistenFn | null = null;
 let worker: Worker | null = null;
+
+// Right-click context menu state
+const contextMenuVisible = ref<boolean>(false);
+const contextMenuX = ref<number>(0);
+const contextMenuY = ref<number>(0);
+
+function handleContextMenu(e: MouseEvent) {
+  e.preventDefault();
+  contextMenuX.value = e.clientX;
+  contextMenuY.value = e.clientY;
+  contextMenuVisible.value = true;
+}
+
+function closeContextMenu() {
+  contextMenuVisible.value = false;
+}
 
 function formatTimestamp(): string {
   const d = new Date();
@@ -442,8 +459,17 @@ onMounted(async () => {
           handleIncomingRxText(text);
         }
       });
+
+      unlistenDisconnect = await listen<{ port: string; reason: string }>('serial-disconnected', (event) => {
+        if (event.payload.port && event.payload.port === props.portName) {
+          appendLog(`⚠️ [系统提示] 串口 ${props.portName} 硬件连接已断开（设备可能已被拔出），请插回设备后点击【打开】重新连接`, 'error');
+          if (props.isConnected) {
+            emit('toggle-connection');
+          }
+        }
+      });
     } catch (err) {
-      console.warn('Failed to attach serial-rx listener:', err);
+      console.warn('Failed to attach serial event listeners:', err);
     }
   }
 
@@ -463,6 +489,7 @@ watch(() => props.isConnected, (connected: boolean) => {
 
 onUnmounted(() => {
   if (unlistenRx) unlistenRx();
+  if (unlistenDisconnect) unlistenDisconnect();
   if (worker) {
     worker.terminate();
     worker = null;
@@ -747,7 +774,11 @@ onUnmounted(() => {
     <!-- Main Center Viewport: Split Terminal Logs / VT100 & Drawers -->
     <div class="flex-1 flex overflow-hidden min-h-0">
       <!-- Left: Terminal Log Viewport or VT100 Terminal View -->
-      <div v-show="sessionMode === 'vt100'" class="flex-1 h-full overflow-hidden">
+      <div
+        v-show="sessionMode === 'vt100'"
+        class="flex-1 h-full overflow-hidden"
+        @contextmenu="handleContextMenu"
+      >
         <SerialXtermView
           ref="xtermRef"
           :port-name="portName"
@@ -760,6 +791,7 @@ onUnmounted(() => {
       <div
         v-show="sessionMode === 'log'"
         ref="logContainer"
+        @contextmenu="handleContextMenu"
         class="flex-1 overflow-auto p-3 space-y-0.5 select-text bg-zinc-950 font-mono text-[11.5px] leading-relaxed"
       >
         <div v-if="logs.length === 0" class="h-full flex flex-col items-center justify-center text-zinc-600 select-none">
@@ -981,5 +1013,45 @@ onUnmounted(() => {
       :is-open="isIngFlasherOpen"
       @close="isIngFlasherOpen = false"
     />
+
+    <!-- Right-click Context Menu for Clearing & Copying Logs -->
+    <div
+      v-if="contextMenuVisible"
+      class="fixed inset-0 z-50 select-none"
+      @click="closeContextMenu"
+      @contextmenu.prevent="closeContextMenu"
+    >
+      <div
+        class="absolute bg-zinc-900 border border-zinc-700/80 rounded-lg shadow-2xl py-1 w-44 text-xs text-zinc-200 divide-y divide-zinc-800"
+        :style="{ left: `${contextMenuX}px`, top: `${contextMenuY}px` }"
+        @click.stop
+      >
+        <div class="py-0.5">
+          <button
+            @click="clearLogs(); closeContextMenu()"
+            class="w-full text-left px-3 py-1.5 hover:bg-zinc-800 hover:text-rose-400 flex items-center gap-2 cursor-pointer transition-colors"
+          >
+            <Trash2 class="w-3.5 h-3.5 text-rose-400" />
+            <span>清屏 (清除所有数据)</span>
+          </button>
+        </div>
+        <div class="py-0.5">
+          <button
+            @click="copyAllLogs(); closeContextMenu()"
+            class="w-full text-left px-3 py-1.5 hover:bg-zinc-800 hover:text-zinc-100 flex items-center gap-2 cursor-pointer transition-colors"
+          >
+            <Copy class="w-3.5 h-3.5 text-emerald-400" />
+            <span>复制全部日志</span>
+          </button>
+          <button
+            @click="exportLogs(); closeContextMenu()"
+            class="w-full text-left px-3 py-1.5 hover:bg-zinc-800 hover:text-zinc-100 flex items-center gap-2 cursor-pointer transition-colors"
+          >
+            <Download class="w-3.5 h-3.5 text-sky-400" />
+            <span>导出日志文件</span>
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>

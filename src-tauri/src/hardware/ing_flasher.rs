@@ -193,6 +193,19 @@ pub fn parse_ini_file(ini_path_str: &str) -> Result<IngIniConfig, String> {
         }
     }
 
+    if sections.is_empty() || !sections.contains_key("main") {
+        let alt_candidate = parent_dir.join("flash_download.ini");
+        let hint = if alt_candidate.exists() {
+            format!("，同目录下检测到可用的烧录配置: {}", alt_candidate.display())
+        } else {
+            "".to_string()
+        };
+        return Err(format!(
+            "选中的 INI 文件格式不符合固件烧录规范（缺少 [main] 或 [bin-x] 配置节点）{}",
+            hint
+        ));
+    }
+
     let family = sections
         .get("main")
         .and_then(|m| m.get("family"))

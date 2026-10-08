@@ -37,6 +37,12 @@ pub struct WaveformPointsPayload {
     pub timestamp_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerialDisconnectPayload {
+    pub port: String,
+    pub reason: String,
+}
+
 /// A dedicated session for a single opened COM port or RTT TCP bridge
 pub struct PortSession {
     pub port_name: String,
@@ -389,6 +395,9 @@ impl SerialManager {
             }
         }
 
+        let sessions_clone = Arc::clone(&self.sessions);
+        let last_active_clone = Arc::clone(&self.last_active_port);
+        let app_handle_clone = app.clone();
         let is_running_clone = Arc::clone(&is_running);
         let current_port_name = port_name.to_string();
         let protocol_engine_clone = Arc::clone(&self.protocol_engine);
@@ -399,6 +408,7 @@ impl SerialManager {
             let mut batch_buffer: Vec<u8> = Vec::with_capacity(4096);
             let mut read_buf = [0u8; 1024];
             let mut last_flush = Instant::now();
+            let mut abnormal_exit = false;
 
             while is_running_clone.load(Ordering::SeqCst) {
                 match reader.read(&mut read_buf) {
@@ -441,6 +451,10 @@ impl SerialManager {
                     Ok(_) => {}
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
                     Err(_) => {
+                        // IO Error: Device pulled out, access denied or disconnected
+                        if is_running_clone.load(Ordering::SeqCst) {
+                            abnormal_exit = true;
+                        }
                         break;
                     }
                 }
@@ -465,6 +479,23 @@ impl SerialManager {
                 }
 
                 std::thread::sleep(Duration::from_millis(2));
+            }
+
+            if abnormal_exit {
+                // Device was disconnected / unplugged
+                is_running_clone.store(false, Ordering::SeqCst);
+                if let Ok(mut map) = sessions_clone.lock() {
+                    map.remove(&current_port_name);
+                }
+                if let Ok(mut last) = last_active_clone.lock() {
+                    if last.as_deref() == Some(&current_port_name) {
+                        *last = None;
+                    }
+                }
+                let _ = app_handle_clone.emit("serial-disconnected", SerialDisconnectPayload {
+                    port: current_port_name,
+                    reason: "串口硬件连接已断开（设备可能已被拔出）".to_string(),
+                });
             }
         });
 

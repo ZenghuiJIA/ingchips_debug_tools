@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue';
-import { safeInvoke } from '../utils/ipc';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { safeInvoke, isTauri } from '../utils/ipc';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { TerminalSessionTab, PortInfo, SvdDevice } from '../types';
 import SerialTerminalSession from './SerialTerminalSession.vue';
 import {
@@ -475,9 +476,32 @@ async function syncActiveSessions() {
   }
 }
 
+let unlistenDisconnect: UnlistenFn | null = null;
+
 onMounted(async () => {
   await refreshPortList();
   await syncActiveSessions();
+
+  if (isTauri()) {
+    try {
+      unlistenDisconnect = await listen<{ port: string; reason: string }>('serial-disconnected', (event) => {
+        const disconnectedPort = event.payload.port;
+        const targetTab = tabs.value.find(t => t.portName === disconnectedPort);
+        if (targetTab) {
+          targetTab.isConnected = false;
+        }
+      });
+    } catch (e) {
+      console.warn('Failed to listen to serial-disconnected:', e);
+    }
+  }
+});
+
+onUnmounted(() => {
+  if (unlistenDisconnect) {
+    unlistenDisconnect();
+    unlistenDisconnect = null;
+  }
 });
 </script>
 
