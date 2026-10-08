@@ -19,8 +19,16 @@
   --app-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --app-font-size: 13px;
 
-  /* Modern Subtle Grid Pattern (默认深色点阵底纹) */
-  --app-pattern: radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  /* Default theme color tokens (Cyberpunk Slate) */
+  --app-bg: #09090b;
+  --app-card-bg: #141417;
+  --app-card-subtle: #1a1a20;
+  --app-border: #27272a;
+  --app-border-subtle: #1e1e24;
+  --app-text: #fafafa;
+  --app-text-muted: #a1a1aa;
+  --app-accent: #10b981;
+  --app-pattern: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
   --app-pattern-size: 20px 20px;
 }
 
@@ -32,153 +40,168 @@
 html[data-theme="dark-slate"] {
   --app-bg: #09090b;
   --app-card-bg: #141417;
-  --app-card-hover: #1c1c20;
+  --app-card-subtle: #1c1c22;
   --app-border: #27272a;
   --app-border-subtle: #1e1e24;
   --app-text: #fafafa;
   --app-text-muted: #a1a1aa;
   --app-accent: #10b981;
-  --app-pattern: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  --app-pattern: radial-gradient(rgba(16, 185, 129, 0.07) 1px, transparent 1px);
 }
 
 html[data-theme="dark-navy"] {
-  --app-bg: #060d17;
-  --app-card-bg: #0b1626;
-  --app-card-hover: #102138;
-  --app-border: #1a2a44;
-  --app-border-subtle: #121f33;
+  --app-bg: #060e1a;
+  --app-card-bg: #0c182b;
+  --app-card-subtle: #11223d;
+  --app-border: #1e3354;
+  --app-border-subtle: #14233a;
   --app-text: #f0f6fc;
-  --app-text-muted: #8b949e;
+  --app-text-muted: #8b9db5;
   --app-accent: #38bdf8;
-  --app-pattern: radial-gradient(rgba(56, 189, 248, 0.06) 1px, transparent 1px);
+  --app-pattern: radial-gradient(rgba(56, 189, 248, 0.08) 1px, transparent 1px);
 }
 
 html[data-theme="dark-forest"] {
-  --app-bg: #051109;
-  --app-card-bg: #091c10;
-  --app-card-hover: #0e2918;
-  --app-border: #153821;
-  --app-border-subtle: #0d2415;
+  --app-bg: #041209;
+  --app-card-bg: #0a2113;
+  --app-card-subtle: #0f2e1b;
+  --app-border: #164024;
+  --app-border-subtle: #0d2b17;
   --app-text: #f0fdf4;
   --app-text-muted: #86efac;
   --app-accent: #22c55e;
-  --app-pattern: radial-gradient(rgba(34, 197, 94, 0.06) 1px, transparent 1px);
+  --app-pattern: radial-gradient(rgba(34, 197, 94, 0.08) 1px, transparent 1px);
 }
 
 html[data-theme="dark-crimson"] {
-  --app-bg: #12070a;
-  --app-card-bg: #1c0c11;
-  --app-card-hover: #291219;
-  --app-border: #3d1521;
-  --app-border-subtle: #290e16;
+  --app-bg: #14070a;
+  --app-card-bg: #220c12;
+  --app-card-subtle: #30111a;
+  --app-border: #4a1523;
+  --app-border-subtle: #330e18;
   --app-text: #fff1f2;
-  --app-text-muted: #f43f5e;
+  --app-text-muted: #fb7185;
   --app-accent: #f43f5e;
-  --app-pattern: radial-gradient(rgba(244, 63, 94, 0.06) 1px, transparent 1px);
+  --app-pattern: radial-gradient(rgba(244, 63, 94, 0.08) 1px, transparent 1px);
 }
 
 html[data-theme="dark-purple"] {
-  --app-bg: #0c0714;
-  --app-card-bg: #150d21;
-  --app-card-hover: #201433;
-  --app-border: #311c4d;
-  --app-border-subtle: #211333;
+  --app-bg: #0d0716;
+  --app-card-bg: #180e28;
+  --app-card-subtle: #24143d;
+  --app-border: #3b1b61;
+  --app-border-subtle: #271241;
   --app-text: #faf5ff;
-  --app-text-muted: #c084fc;
+  --app-text-muted: #d8b4fe;
   --app-accent: #c084fc;
-  --app-pattern: radial-gradient(rgba(192, 132, 252, 0.06) 1px, transparent 1px);
+  --app-pattern: radial-gradient(rgba(192, 132, 252, 0.08) 1px, transparent 1px);
 }
 
 /* 2. Light Mode Presets (高质感现代浅色，彻底告别单调灰白) */
 html[data-theme="light-white"],
 html.light-mode {
-  --app-bg: #f4f6f8;
+  --app-bg: #f3f5f8;
   --app-card-bg: #ffffff;
-  --app-card-hover: #f8fafc;
-  --app-border: #e2e8f0;
-  --app-border-subtle: #edf2f7;
+  --app-card-subtle: #e9eef5;
+  --app-border: #cbd5e1;
+  --app-border-subtle: #e2e8f0;
   --app-text: #0f172a;
-  --app-text-muted: #64748b;
+  --app-text-muted: #475569;
   --app-accent: #059669;
-  --app-pattern: radial-gradient(rgba(15, 23, 42, 0.05) 1px, transparent 1px);
+  --app-pattern: radial-gradient(rgba(15, 23, 42, 0.06) 1px, transparent 1px);
 }
 
 html[data-theme="light-warm"] {
-  --app-bg: #fbf9f4;
+  --app-bg: #f9f5ec;
   --app-card-bg: #ffffff;
-  --app-card-hover: #fbf8f0;
-  --app-border: #ebe3d5;
-  --app-border-subtle: #f5efe4;
+  --app-card-subtle: #f4ecdc;
+  --app-border: #ded2bd;
+  --app-border-subtle: #ece2d0;
   --app-text: #292524;
-  --app-text-muted: #78716c;
+  --app-text-muted: #57534e;
   --app-accent: #d97706;
-  --app-pattern: radial-gradient(rgba(217, 119, 6, 0.05) 1px, transparent 1px);
+  --app-pattern: radial-gradient(rgba(217, 119, 6, 0.06) 1px, transparent 1px);
 }
 
 html[data-theme="light-ice"] {
-  --app-bg: #eef3f8;
+  --app-bg: #eaf1f8;
   --app-card-bg: #ffffff;
-  --app-card-hover: #f1f6fb;
-  --app-border: #d0dce8;
-  --app-border-subtle: #e2ebf4;
+  --app-card-subtle: #dbe7f3;
+  --app-border: #b8cde2;
+  --app-border-subtle: #d0e0f0;
   --app-text: #1e293b;
-  --app-text-muted: #475569;
+  --app-text-muted: #334155;
   --app-accent: #0284c7;
-  --app-pattern: radial-gradient(rgba(2, 132, 199, 0.06) 1px, transparent 1px);
+  --app-pattern: radial-gradient(rgba(2, 132, 199, 0.07) 1px, transparent 1px);
 }
 
 html[data-theme="light-sakura"] {
-  --app-bg: #faf3f5;
+  --app-bg: #f9edf1;
   --app-card-bg: #ffffff;
-  --app-card-hover: #fcf6f8;
-  --app-border: #edd5dc;
-  --app-border-subtle: #f7e6eb;
+  --app-card-subtle: #f5dde4;
+  --app-border: #e4bfcc;
+  --app-border-subtle: #edd2dc;
   --app-text: #2b171d;
-  --app-text-muted: #704b56;
+  --app-text-muted: #5e3340;
   --app-accent: #e11d48;
-  --app-pattern: radial-gradient(rgba(225, 29, 72, 0.05) 1px, transparent 1px);
+  --app-pattern: radial-gradient(rgba(225, 29, 72, 0.06) 1px, transparent 1px);
+}
+
+/* ============================================================= */
+/* Global Semantic Background Mapping                            */
+/* 让换肤直接作用于全局每个区域背景，带来立竿见影的视觉效果         */
+/* ============================================================= */
+
+/* 页面主背景与底纹 */
+.bg-zinc-950,
+#app-root {
+  background-color: var(--app-bg) !important;
+}
+
+/* 工具栏、Header、Tab卡片背景 */
+.bg-zinc-900 {
+  background-color: var(--app-card-bg) !important;
+}
+
+.bg-zinc-900\/90,
+.bg-zinc-900\/80,
+.bg-zinc-900\/70,
+.bg-zinc-900\/60,
+.bg-zinc-900\/50 {
+  background-color: var(--app-card-bg) !important;
+}
+
+/* 按钮与次级卡片背景 */
+.bg-zinc-800,
+.bg-zinc-800\/80,
+.bg-zinc-800\/60,
+.bg-zinc-800\/50,
+.bg-zinc-800\/40 {
+  background-color: var(--app-card-subtle) !important;
+}
+
+/* 边框映射 */
+.border-zinc-800,
+.border-zinc-800\/80,
+.border-zinc-800\/60,
+.border-zinc-700,
+.border-zinc-700\/80,
+.border-zinc-700\/60 {
+  border-color: var(--app-border) !important;
 }
 
 /* ============================================================= */
 /* Comprehensive Light Mode Class Overrides                      */
-/* 彻底清除深色底纹、标签黑底，实现明亮柔和且层次分明的界面            */
+/* 彻底清除浅色下的黑色底纹、黑底标签与深暗色按钮                  */
 /* ============================================================= */
 
-/* 1. 背景色全量映射 */
-html.light-mode .bg-zinc-950 {
-  background-color: var(--app-bg) !important;
-}
-html.light-mode .bg-zinc-900 {
-  background-color: var(--app-card-bg) !important;
-}
-html.light-mode .bg-zinc-900\/90,
-html.light-mode .bg-zinc-900\/80,
-html.light-mode .bg-zinc-900\/70,
-html.light-mode .bg-zinc-900\/60 {
-  background-color: rgba(255, 255, 255, 0.94) !important;
-}
-html.light-mode .bg-zinc-800,
-html.light-mode .bg-zinc-800\/80,
-html.light-mode .bg-zinc-800\/50,
-html.light-mode .bg-zinc-800\/40 {
-  background-color: #e8ecf2 !important;
-}
+/* 1. 浅色模式按钮 hover 状态 */
 html.light-mode .hover\:bg-zinc-800:hover,
 html.light-mode .hover\:bg-zinc-700:hover {
   background-color: #dbe2ea !important;
 }
 
-/* 2. 边框线映射 */
-html.light-mode .border-zinc-800,
-html.light-mode .border-zinc-800\/80,
-html.light-mode .border-zinc-800\/60,
-html.light-mode .border-zinc-700,
-html.light-mode .border-zinc-700\/80,
-html.light-mode .border-zinc-700\/60 {
-  border-color: var(--app-border) !important;
-}
-
-/* 3. 文字颜色全面提亮对比度 (防止浅灰浅白看不清) */
+/* 2. 文字颜色全面提亮对比度 (防止浅灰浅白看不清) */
 html.light-mode .text-zinc-100,
 html.light-mode .text-zinc-200 {
   color: var(--app-text) !important;
@@ -196,7 +219,7 @@ html.light-mode .text-zinc-600 {
   color: #94a3b8 !important;
 }
 
-/* 4. 关键交互状态与深色勋章映射为清新明亮勋章 (防止深黑底色残留) */
+/* 3. 关键交互状态与深色勋章映射为清新明亮勋章 (防止深黑底色残留) */
 html.light-mode .bg-emerald-950,
 html.light-mode .bg-emerald-950\/80,
 html.light-mode .bg-emerald-950\/60,
@@ -269,7 +292,7 @@ html.light-mode .bg-purple-950\/80 {
   border-color: #e9d5ff !important;
 }
 
-/* 5. 浅色模式下输入框、下拉框与终端日志的现代白底与阴影 */
+/* 4. 浅色模式下输入框、下拉框与终端日志的现代白底与阴影 */
 html.light-mode input,
 html.light-mode select,
 html.light-mode textarea {
@@ -281,7 +304,7 @@ html.light-mode input::placeholder {
   color: #94a3b8 !important;
 }
 
-/* 6. 日志流与终端容器浅色高可读性优化 */
+/* 5. 日志流与终端容器浅色高可读性优化 */
 html.light-mode .select-text.bg-zinc-950 {
   background-color: #ffffff !important;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
@@ -290,7 +313,7 @@ html.light-mode .select-text .hover\:bg-zinc-900\/50:hover {
   background-color: #f1f5f9 !important;
 }
 
-/* 7. xterm 终端画布在浅色模式下的干净适配 */
+/* 6. xterm 终端画布在浅色模式下的干净适配 */
 html.light-mode .xterm-viewport {
   background-color: #ffffff !important;
 }

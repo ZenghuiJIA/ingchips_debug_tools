@@ -603,7 +603,7 @@ onUnmounted(() => {
           class="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow transition-colors"
         >
           <Plus class="w-4 h-4" />
-          <span>添加端口会话</span>
+          <span>{{ t('term_add_session') }}</span>
         </button>
       </div>
     </div>
@@ -623,7 +623,7 @@ onUnmounted(() => {
               class="flex items-center gap-1.5 px-3 py-1 rounded-md text-xs transition-all"
             >
               <Radio class="w-3.5 h-3.5" />
-              <span>串口 / RTT 硬件设备</span>
+              <span>{{ t('dialog_hardware_device') }}</span>
             </button>
             <button
               @click="newPortTabType = 'network'"
@@ -631,7 +631,7 @@ onUnmounted(() => {
               class="flex items-center gap-1.5 px-3 py-1 rounded-md text-xs transition-all"
             >
               <Network class="w-3.5 h-3.5" />
-              <span>网络通信流 (TCP / UDP)</span>
+              <span>{{ t('dialog_network_stream') }}</span>
             </button>
           </div>
           <button
@@ -647,7 +647,7 @@ onUnmounted(() => {
           <!-- Network Mode Options -->
           <div v-if="newPortTabType === 'network'" class="space-y-3.5">
             <div>
-              <label class="block text-xs text-zinc-300 mb-1.5">通信协议模式 (Protocol Mode):</label>
+              <label class="block text-xs text-zinc-300 mb-1.5">{{ t('dialog_protocol_mode') }}</label>
               <div class="grid grid-cols-3 gap-2">
                 <button
                   type="button"
@@ -656,8 +656,8 @@ onUnmounted(() => {
                   class="flex flex-col items-center justify-center p-2 rounded-lg border text-xs transition-all"
                 >
                   <Globe class="w-4 h-4 mb-1" />
-                  <span class="font-semibold">TCP 客户端</span>
-                  <span class="text-[10px] text-zinc-500">连接远程目标</span>
+                  <span class="font-semibold">{{ t('dialog_tcp_client') }}</span>
+                  <span class="text-[10px] text-zinc-500">{{ t('dialog_tcp_client_desc') }}</span>
                 </button>
                 <button
                   type="button"
@@ -666,8 +666,8 @@ onUnmounted(() => {
                   class="flex flex-col items-center justify-center p-2 rounded-lg border text-xs transition-all"
                 >
                   <Network class="w-4 h-4 mb-1" />
-                  <span class="font-semibold">TCP 服务端</span>
-                  <span class="text-[10px] text-zinc-500">监听本地端口</span>
+                  <span class="font-semibold">{{ t('dialog_tcp_server') }}</span>
+                  <span class="text-[10px] text-zinc-500">{{ t('dialog_tcp_server_desc') }}</span>
                 </button>
                 <button
                   type="button"
@@ -676,8 +676,8 @@ onUnmounted(() => {
                   class="flex flex-col items-center justify-center p-2 rounded-lg border text-xs transition-all"
                 >
                   <Radio class="w-4 h-4 mb-1" />
-                  <span class="font-semibold">UDP 广播/单播</span>
-                  <span class="text-[10px] text-zinc-500">无连接数据包</span>
+                  <span class="font-semibold">{{ t('dialog_udp_socket') }}</span>
+                  <span class="text-[10px] text-zinc-500">{{ t('dialog_udp_socket_desc') }}</span>
                 </button>
               </div>
             </div>
@@ -685,7 +685,7 @@ onUnmounted(() => {
             <div class="grid grid-cols-3 gap-3">
               <div class="col-span-2">
                 <label class="block text-xs text-zinc-300 mb-1">
-                  {{ networkMode === 'tcp_server' ? '本地监听 IP / 地址' : '远程目标主机 / IP' }}:
+                  {{ networkMode === 'tcp_server' ? t('dialog_local_bind_host') : t('dialog_remote_host') }}:
                 </label>
                 <input
                   v-model="networkHost"
@@ -695,7 +695,7 @@ onUnmounted(() => {
                 />
               </div>
               <div>
-                <label class="block text-xs text-zinc-300 mb-1">网络端口 (Port):</label>
+                <label class="block text-xs text-zinc-300 mb-1">{{ t('dialog_port') }}</label>
                 <input
                   v-model.number="networkPort"
                   type="number"
@@ -706,9 +706,9 @@ onUnmounted(() => {
             </div>
 
             <div class="bg-sky-950/40 border border-sky-800/50 rounded-lg p-2.5 text-[11px] text-sky-300/90 space-y-1">
-              <p class="font-semibold text-sky-200">🌐 网络数据流接入特性：</p>
-              <p>• 连接建立后自动接入全局流水线，终端会话可双向收发、HEX转码与校验追加。</p>
-              <p>• 接收到的网络遥测数据可直接在【波形显示器】实时绘图与测量分析。</p>
+              <p class="font-semibold text-sky-200">{{ t('dialog_network_feature_title') }}</p>
+              <p>{{ t('dialog_network_feature_1') }}</p>
+              <p>{{ t('dialog_network_feature_2') }}</p>
             </div>
           </div>
 
@@ -716,20 +716,20 @@ onUnmounted(() => {
           <div v-else class="space-y-4">
             <div>
               <div class="flex items-center justify-between text-xs text-zinc-300 mb-1.5">
-                <label>目标物理串口 / 虚拟通道:</label>
+                <label>{{ t('dialog_target_serial') }}</label>
                 <button
                   @click="refreshPortList"
                   class="flex items-center gap-1 text-[11px] text-emerald-400 hover:underline"
                 >
                   <RefreshCw class="w-3 h-3" :class="{ 'animate-spin': isRefreshingPorts }" />
-                  <span>刷新</span>
+                  <span>{{ t('dialog_refresh') }}</span>
                 </button>
               </div>
               <select
                 v-model="newPortSelected"
                 class="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none cursor-pointer"
               >
-                <option v-if="availablePorts.length === 0" value="">暂无可用串口</option>
+                <option v-if="availablePorts.length === 0" value="">{{ t('dialog_no_ports') }}</option>
                 <option
                   v-for="p in availablePorts"
                   :key="p.port_name"
@@ -743,13 +743,13 @@ onUnmounted(() => {
 
           <!-- Baud Rate (if not RTT) -->
           <div v-if="!newPortSelected.startsWith('RTT')">
-            <label class="block text-xs text-zinc-300 mb-1.5">波特率 (Baud Rate):</label>
+            <label class="block text-xs text-zinc-300 mb-1.5">{{ t('dialog_baud_rate') }}</label>
             <select
               v-model="newPortBaud"
               class="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none cursor-pointer"
             >
               <option v-for="b in baudRates" :key="b" :value="b" class="bg-zinc-900 text-zinc-200">
-                {{ b }} bps {{ b === 921600 ? '⚡ (极速推荐)' : '' }}
+                {{ b }} bps {{ b === 921600 ? t('dialog_baud_fast') : '' }}
               </option>
             </select>
           </div>
@@ -758,14 +758,14 @@ onUnmounted(() => {
           <div v-else class="space-y-3">
             <div>
               <div class="flex items-center justify-between text-xs text-zinc-300 mb-1.5">
-                <label>RTT RAM 扫描预设 / 范围:</label>
+                <label>{{ t('dialog_rtt_preset') }}</label>
                 <button
                   @click="importPackForNewPortRtt"
                   :disabled="isNewPortImportingPack"
                   class="text-[11px] text-purple-400 hover:text-purple-300 hover:underline flex items-center gap-1"
                 >
                   <FolderArchive class="w-3.5 h-3.5" />
-                  <span>导入Pack自动解析</span>
+                  <span>{{ t('dialog_rtt_import_pack') }}</span>
                 </button>
               </div>
               <select
@@ -792,11 +792,11 @@ onUnmounted(() => {
             <!-- Model Selection dropdown if Pack imported -->
             <div v-if="newPortPackDevices.length > 0" class="bg-zinc-950 border border-purple-900/60 rounded-lg p-2.5 space-y-2">
               <div class="flex items-center justify-between text-xs text-zinc-300">
-                <label class="font-semibold text-purple-300 text-[11px]">选择具体芯片型号 ({{ newPortPackDevices.length }} 个型号):</label>
+                <label class="font-semibold text-purple-300 text-[11px]">{{ t('dialog_rtt_select_chip') }} ({{ newPortPackDevices.length }}):</label>
                 <input
                   v-model="newPortPackDeviceSearch"
                   type="text"
-                  placeholder="搜索型号，如: GD32F450..."
+                  :placeholder="t('dialog_rtt_search_placeholder')"
                   class="bg-zinc-900 border border-zinc-800 focus:border-purple-500 rounded px-2 py-0.5 text-[11px] text-zinc-200 outline-none w-36"
                 />
               </div>
@@ -820,7 +820,7 @@ onUnmounted(() => {
             <div v-if="newPortRttRamPreset === -1" class="bg-zinc-950 border border-zinc-800 rounded-lg p-3 space-y-2.5 font-mono text-xs">
               <div class="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label class="block text-[11px] text-zinc-400 mb-1">RAM 起始地址 (Start):</label>
+                  <label class="block text-[11px] text-zinc-400 mb-1">{{ t('dialog_rtt_start_addr') }}</label>
                   <input
                     v-model="newPortRttCustomStartHex"
                     type="text"
@@ -829,7 +829,7 @@ onUnmounted(() => {
                   />
                 </div>
                 <div>
-                  <label class="block text-[11px] text-zinc-400 mb-1">RAM 大小 (Size):</label>
+                  <label class="block text-[11px] text-zinc-400 mb-1">{{ t('dialog_rtt_size') }}</label>
                   <input
                     v-model="newPortRttCustomSizeHex"
                     type="text"
@@ -841,12 +841,12 @@ onUnmounted(() => {
 
               <div>
                 <label class="block text-[11px] text-zinc-400 mb-1">
-                  指定 RTT 控制块地址 (选填，留空则自动扫描):
+                  {{ t('dialog_rtt_block_addr') }}
                 </label>
                 <input
                   v-model="newPortRttBlockAddrHex"
                   type="text"
-                  placeholder="例如 0x20001458 (留空则在RAM内自动扫描)"
+                  :placeholder="t('dialog_rtt_block_placeholder')"
                   class="w-full bg-zinc-900 border border-zinc-800 focus:border-purple-500 rounded px-2 py-1 text-zinc-200 outline-none"
                 />
               </div>
@@ -855,9 +855,9 @@ onUnmounted(() => {
           </div>
 
           <div class="bg-zinc-950/80 border border-zinc-800 rounded-lg p-3 text-[11px] text-zinc-400 space-y-1">
-            <p class="text-zinc-300 font-semibold">💡 并行多设备运行提示：</p>
-            <p>• 每个打开的串口拥有独立的后台通信线程、日志缓冲区与触发器应答规则。</p>
-            <p>• 切换不同标签页时，后台会话不会断开，数据无损实时接收。</p>
+            <p class="text-zinc-300 font-semibold">{{ t('dialog_multidevice_title') }}</p>
+            <p>{{ t('dialog_multidevice_1') }}</p>
+            <p>{{ t('dialog_multidevice_2') }}</p>
           </div>
         </div>
 
@@ -865,17 +865,17 @@ onUnmounted(() => {
         <div class="px-5 py-3.5 bg-zinc-950/60 border-t border-zinc-800 flex items-center justify-end gap-2">
           <button
             @click="isNewPortModalOpen = false"
-            class="px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+            class="px-3 py-1.5 rounded-lg text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors cursor-pointer"
           >
-            取消
+            {{ t('dialog_cancel') }}
           </button>
           <button
             @click="confirmOpenNewPort"
             :disabled="newPortTabType === 'serial' ? !newPortSelected : (!networkHost || !networkPort)"
-            class="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
+            class="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40 cursor-pointer"
           >
             <Power class="w-3.5 h-3.5" />
-            <span>{{ newPortTabType === 'network' ? '建立网络数据流' : '确认连接打开' }}</span>
+            <span>{{ newPortTabType === 'network' ? t('dialog_connect_network') : t('dialog_confirm_open') }}</span>
           </button>
         </div>
       </div>

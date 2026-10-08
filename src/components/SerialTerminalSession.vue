@@ -766,7 +766,7 @@ onUnmounted(() => {
         <div class="text-[11px] text-zinc-500 flex items-center gap-2 font-mono">
           <span>RX: <strong class="text-zinc-300">{{ rxBytesCount }}</strong> B</span>
           <span>TX: <strong class="text-zinc-300">{{ txBytesCount }}</strong> B</span>
-          <span>行数: <strong class="text-zinc-300">{{ logs.length }}</strong></span>
+          <span>{{ t('term_lines_count') }}: <strong class="text-zinc-300">{{ logs.length }}</strong></span>
         </div>
 
         <div class="h-3 w-px bg-zinc-800"></div>
@@ -774,7 +774,7 @@ onUnmounted(() => {
         <button
           @click="copyAllLogs"
           :disabled="logs.length === 0"
-          :title="isCopiedAll ? '已复制到剪贴板' : '复制终端全部日志'"
+          :title="isCopiedAll ? t('term_copied_toast') : t('term_copy_title')"
           class="p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors disabled:opacity-40"
         >
           <component :is="isCopiedAll ? Check : Copy" class="w-3.5 h-3.5" :class="{ 'text-emerald-400': isCopiedAll }" />
@@ -782,7 +782,7 @@ onUnmounted(() => {
 
         <button
           @click="exportLogs"
-          title="导出日志文件"
+          :title="t('term_export_title')"
           class="p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
         >
           <Download class="w-3.5 h-3.5" />
@@ -790,7 +790,7 @@ onUnmounted(() => {
 
         <button
           @click="clearLogs"
-          title="清空终端"
+          :title="t('term_clear_title')"
           class="p-1 text-zinc-400 hover:text-rose-400 hover:bg-zinc-800 rounded transition-colors"
         >
           <Trash2 class="w-3.5 h-3.5" />
@@ -823,8 +823,8 @@ onUnmounted(() => {
       >
         <div v-if="logs.length === 0" class="h-full flex flex-col items-center justify-center text-zinc-600 select-none">
           <Terminal class="w-10 h-10 mb-2 stroke-1 opacity-40" />
-          <p>[{{ portName }}] 串口就绪，等待数据输入或发送测试命令...</p>
-          <p class="text-[10px] text-zinc-700 mt-1">独立后台会话运行，多串口并发收发互不影响</p>
+          <p>[{{ portName }}] {{ t('term_ready_waiting') }}</p>
+          <p class="text-[10px] text-zinc-700 mt-1">{{ t('term_independent_desc') }}</p>
         </div>
 
         <div

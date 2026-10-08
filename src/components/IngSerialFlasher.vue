@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { safeInvoke } from '../utils/ipc';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { IngIniConfig, IngFlashProgressPayload } from '../types';
+import { t } from '../utils/i18n';
 import {
   FolderOpen,
   Play,
@@ -315,15 +316,15 @@ onUnmounted(() => {
           </div>
           <div>
             <div class="flex items-center gap-2">
-              <h2 class="text-sm font-bold text-zinc-100">INGChips 串口芯片高速烧录器</h2>
+              <h2 class="text-sm font-bold text-zinc-100">{{ t('ing_title') }}</h2>
               <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-950/90 text-indigo-300 border border-indigo-800">
-                ING916 / ING918 原生协议
+                {{ t('ing_subtitle') }}
               </span>
             </div>
             <p class="text-[11px] text-zinc-400 mt-0.5 flex items-center gap-2">
-              <span>当前烧录端口:</span>
+              <span>{{ t('ing_current_port') }}</span>
               <strong class="text-emerald-400 font-mono">{{ portName }}</strong>
-              <span class="text-zinc-500">(忽略 INI 中的 COM 设定，直接烧录到当前选定端口)</span>
+              <span class="text-zinc-500">{{ t('ing_port_override_note') }}</span>
             </p>
           </div>
         </div>
@@ -331,7 +332,7 @@ onUnmounted(() => {
         <button
           @click="emit('close')"
           class="p-1.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
-          title="关闭烧录面板"
+          :title="t('ing_close_title')"
         >
           <X class="w-4 h-4" />
         </button>
@@ -347,7 +348,7 @@ onUnmounted(() => {
             :class="mode === 'ini' ? 'bg-indigo-600 text-white shadow-xs font-semibold' : 'text-zinc-400 hover:text-zinc-200'"
           >
             <FileCode class="w-3.5 h-3.5" />
-            <span>INI 方案批量烧录</span>
+            <span>{{ t('ing_tab_ini') }}</span>
           </button>
           <button
             @click="mode = 'single'"
@@ -355,26 +356,26 @@ onUnmounted(() => {
             :class="mode === 'single' ? 'bg-indigo-600 text-white shadow-xs font-semibold' : 'text-zinc-400 hover:text-zinc-200'"
           >
             <HardDrive class="w-3.5 h-3.5" />
-            <span>单个固件 (BIN / HEX)</span>
+            <span>{{ t('ing_tab_single') }}</span>
           </button>
         </div>
 
         <!-- Target Chip Architecture & Baud Selection -->
         <div class="flex items-center gap-3 text-xs">
           <div class="flex items-center gap-1.5">
-            <span class="text-zinc-400">芯片系列:</span>
+            <span class="text-zinc-400">{{ t('ing_chip_series') }}</span>
             <select
               v-model="selectedFamily"
               class="bg-zinc-900 border border-zinc-700/80 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-hidden focus:border-indigo-500 font-mono"
             >
-              <option value="auto">自动判定 (跟随方案)</option>
+              <option value="auto">{{ t('ing_chip_auto') }}</option>
               <option value="ing916">ING916 / ING9168xx</option>
               <option value="ing918">ING918 / ING9188xx</option>
             </select>
           </div>
 
           <div class="flex items-center gap-1.5">
-            <span class="text-zinc-400">烧录波特率:</span>
+            <span class="text-zinc-400">{{ t('ing_baud') }}</span>
             <select
               v-model="selectedBaud"
               class="bg-zinc-900 border border-zinc-700/80 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-hidden focus:border-indigo-500 font-mono"
@@ -384,13 +385,13 @@ onUnmounted(() => {
           </div>
 
           <!-- Manual Boot Listening Mode Checkbox -->
-          <label class="flex items-center gap-1.5 text-xs cursor-pointer select-none ml-1 text-zinc-300 hover:text-zinc-100" title="不发送 RTS/DTR 脉冲，直接持续监听串口（最长15秒），等待用户手动按板载按键或上电进入 BOOT">
+          <label class="flex items-center gap-1.5 text-xs cursor-pointer select-none ml-1 text-zinc-300 hover:text-zinc-100" :title="t('ing_manual_boot_tip')">
             <input
               type="checkbox"
               v-model="manualBoot"
               class="rounded bg-zinc-950 border-zinc-700 text-indigo-500 focus:ring-0 cursor-pointer"
             />
-            <span :class="manualBoot ? 'text-amber-300 font-semibold' : 'text-zinc-400'">监听等待手动进入BOOT</span>
+            <span :class="manualBoot ? 'text-amber-300 font-semibold' : 'text-zinc-400'">{{ t('ing_manual_boot') }}</span>
           </label>
         </div>
       </div>
@@ -594,7 +595,7 @@ onUnmounted(() => {
           <!-- Action Buttons Bar -->
           <div class="flex items-center justify-between pt-1">
             <div class="text-[11px] text-zinc-500 flex items-center gap-2">
-              <span>上次烧录路径已由系统自动记忆</span>
+              <span>{{ t('ing_last_path_remembered') }}</span>
             </div>
 
             <div class="flex items-center gap-2">
@@ -604,7 +605,7 @@ onUnmounted(() => {
                 class="px-4 py-1.5 bg-rose-950 hover:bg-rose-900 text-rose-300 border border-rose-800 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
               >
                 <Square class="w-3.5 h-3.5 fill-current" />
-                <span>中止烧录</span>
+                <span>{{ t('ing_abort_flash') }}</span>
               </button>
 
               <button
@@ -613,7 +614,7 @@ onUnmounted(() => {
                 class="px-5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-md hover:shadow-indigo-500/20 transition-all cursor-pointer"
               >
                 <Play class="w-3.5 h-3.5 fill-current" />
-                <span>执行一键烧录</span>
+                <span>{{ t('ing_start_flash') }}</span>
               </button>
             </div>
           </div>
@@ -624,12 +625,12 @@ onUnmounted(() => {
           <div class="px-3 py-1.5 bg-zinc-900 border-b border-zinc-800 flex items-center justify-between text-xs text-zinc-400">
             <div class="flex items-center gap-1.5 font-medium">
               <Clock class="w-3 h-3 text-zinc-500" />
-              <span>底层通信与烧录日志</span>
+              <span>{{ t('ing_log_title') }}</span>
             </div>
             <button
               @click="clearFlasherLogs"
               class="text-zinc-500 hover:text-zinc-300 transition-colors p-0.5"
-              title="清空日志"
+              :title="t('ing_clear_log')"
             >
               <Trash2 class="w-3 h-3" />
             </button>
@@ -651,7 +652,7 @@ onUnmounted(() => {
               <span>{{ l.text }}</span>
             </div>
             <div v-if="logs.length === 0" class="text-zinc-600 italic">
-              暂无日志输出，点击“执行一键烧录”后将实时打印时序与进度...
+              {{ t('ing_no_logs') }}
             </div>
           </div>
         </div>
