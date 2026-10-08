@@ -34,6 +34,7 @@ const KEY_SINGLE_ADDR = 'ing_flasher_last_single_address';
 const KEY_FAMILY = 'ing_flasher_last_family';
 const KEY_MODE = 'ing_flasher_last_mode';
 const KEY_BAUD = 'ing_flasher_last_baud';
+const KEY_MANUAL_BOOT = 'ing_flasher_last_manual_boot';
 
 // State
 const mode = ref<'ini' | 'single'>((localStorage.getItem(KEY_MODE) as 'ini' | 'single') || 'ini');
@@ -42,6 +43,7 @@ const singlePath = ref<string>(localStorage.getItem(KEY_SINGLE_PATH) || '');
 const singleAddress = ref<string>(localStorage.getItem(KEY_SINGLE_ADDR) || '0x02002000');
 const selectedFamily = ref<string>(localStorage.getItem(KEY_FAMILY) || 'auto');
 const selectedBaud = ref<number>(Number(localStorage.getItem(KEY_BAUD)) || 115200);
+const manualBoot = ref<boolean>(localStorage.getItem(KEY_MANUAL_BOOT) === 'true');
 
 const baudRates = [115200, 230400, 460800, 921600];
 
@@ -68,6 +70,7 @@ watch(singlePath, (v) => localStorage.setItem(KEY_SINGLE_PATH, v));
 watch(singleAddress, (v) => localStorage.setItem(KEY_SINGLE_ADDR, v));
 watch(selectedFamily, (v) => localStorage.setItem(KEY_FAMILY, v));
 watch(selectedBaud, (v) => localStorage.setItem(KEY_BAUD, String(v)));
+watch(manualBoot, (v) => localStorage.setItem(KEY_MANUAL_BOOT, String(v)));
 
 function addLog(text: string, type: 'info' | 'success' | 'error' | 'warn' = 'info') {
   const d = new Date();
@@ -177,7 +180,9 @@ async function startFlash() {
         single_file_path: mode.value === 'single' ? singlePath.value : null,
         single_address: mode.value === 'single' ? singleAddress.value : null,
         family: selectedFamily.value,
-        target_baud: selectedBaud.value
+        target_baud: selectedBaud.value,
+        manual_boot: manualBoot.value,
+        timeout_sec: manualBoot.value ? 15 : 2
       }
     });
   } catch (err: any) {
@@ -318,6 +323,16 @@ onUnmounted(() => {
               <option v-for="b in baudRates" :key="b" :value="b">{{ b }} bps</option>
             </select>
           </div>
+
+          <!-- Manual Boot Listening Mode Checkbox -->
+          <label class="flex items-center gap-1.5 text-xs cursor-pointer select-none ml-1 text-zinc-300 hover:text-zinc-100" title="不发送 RTS/DTR 脉冲，直接持续监听串口（最长15秒），等待用户手动按板载按键或上电进入 BOOT">
+            <input
+              type="checkbox"
+              v-model="manualBoot"
+              class="rounded bg-zinc-950 border-zinc-700 text-indigo-500 focus:ring-0 cursor-pointer"
+            />
+            <span :class="manualBoot ? 'text-amber-300 font-semibold' : 'text-zinc-400'">监听等待手动进入BOOT</span>
+          </label>
         </div>
       </div>
 

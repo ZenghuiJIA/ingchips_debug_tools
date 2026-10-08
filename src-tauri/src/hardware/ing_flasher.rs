@@ -139,6 +139,8 @@ pub struct IngFlashRequest {
     pub single_address: Option<String>,
     pub family: Option<String>, // "auto" | "ing916" | "ing918"
     pub target_baud: Option<u32>,
+    pub manual_boot: Option<bool>,
+    pub timeout_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,34 +435,43 @@ impl FlasherSerial {
         self.read_exact(ACK.len())
     }
 
-    pub fn wait_hello(&mut self, target_hello: &[u8], timeout: Duration) -> Result<(), String> {
-        self.set_timeout(Duration::from_millis(200))?;
+    pub fn wait_hello_candidates(&mut self, candidates: &[(&str, &[u8])], timeout: Duration) -> Result<String, String> {
+        // Fast non-blocking / low-timeout polling (15ms timeout)
+        self.set_timeout(Duration::from_millis(15))?;
         let start = Instant::now();
-        let mut acc = Vec::new();
+        let mut acc = Vec::with_capacity(256);
+        let mut buf = [0u8; 64];
 
         while start.elapsed() < timeout {
             if FLASH_CANCEL.load(Ordering::SeqCst) {
                 return Err("烧录已被用户取消".to_string());
             }
 
-            let mut b = [0u8; 1];
-            match self.port.read(&mut b) {
-                Ok(1) => {
-                    acc.push(b[0]);
-                    if acc.len() >= target_hello.len() {
-                        let tail = &acc[acc.len() - target_hello.len()..];
-                        if tail == target_hello {
-                            return Ok(());
+            match self.port.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    acc.extend_from_slice(&buf[..n]);
+                    // Check against all candidate sequences in memory
+                    for (family_name, target_hello) in candidates {
+                        if acc.windows(target_hello.len()).any(|w| w == *target_hello) {
+                            return Ok(family_name.to_string());
                         }
+                    }
+                    // Keep sliding window size reasonable (prevent unbounded growth)
+                    if acc.len() > 1024 {
+                        let drain_len = acc.len() - 256;
+                        acc.drain(0..drain_len);
                     }
                 }
                 Ok(_) => {}
                 Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(e) => return Err(format!("握手读取出错: {}", e)),
             }
+
+            std::thread::sleep(Duration::from_millis(2));
         }
 
-        Err(format!("等待芯片握手信号超时 (未收到 {:?})，请检查硬件接线或按复位键", String::from_utf8_lossy(target_hello)))
+        let cand_names: Vec<&str> = candidates.iter().map(|(c, _)| *c).collect();
+        Err(format!("等待芯片握手信号超时 (未收到 {:?} Boot 握手响应)，请检查接线或重新上电/按复位键进入 BOOT", cand_names))
     }
 }
 
@@ -590,28 +601,53 @@ where
         return Err("没有可烧录的固件内容 (请确认文件已勾选且不为空)".to_string());
     }
 
+    let manual_boot = req.manual_boot.unwrap_or(false);
+    let wait_timeout_sec = req.timeout_sec.unwrap_or(if manual_boot { 15 } else { 2 });
+    let mut is_918 = family.contains("918");
+
+    // Prepare candidate greetings
+    let mut candidates: Vec<(&str, &[u8])> = Vec::new();
     if family == "auto" {
-        family = "ing916".to_string();
+        candidates.push(("ing916", BOOT_HELLO_916));
+        candidates.push(("ing920", BOOT_HELLO_920));
+        candidates.push(("ing918", BOOT_HELLO_918));
+    } else if is_918 {
+        candidates.push(("ing918", BOOT_HELLO_918));
+    } else {
+        candidates.push(("ing916", BOOT_HELLO_916));
+        candidates.push(("ing920", BOOT_HELLO_920));
     }
 
-    let is_918 = family.contains("918");
-    emit_progress("handshake", "", 0, 0, 0.0, 0.0, &format!("正在向芯片发送 RTS/DTR 复位序列，等待 {} Boot 握手...", if is_918 { "ING918" } else { "ING916" }));
+    if manual_boot {
+        emit_progress("handshake", "", 0, 0, 0.0, 0.0, 
+            &format!("【手动Boot模式】已开启串口监听（最长等待 {} 秒），请手动按住芯片复位/BOOT按键或重新上电...", wait_timeout_sec));
+    } else {
+        emit_progress("handshake", "", 0, 0, 0.0, 0.0, 
+            &format!("正在向芯片发送 RTS/DTR 脉冲，快速等待 {} Boot 握手...", if is_918 { "ING918" } else { "ING916" }));
+        let _ = flasher.toggle_reset_for_boot();
+    }
 
-    let _ = flasher.toggle_reset_for_boot();
-    let hello_seq = if is_918 { BOOT_HELLO_918 } else { BOOT_HELLO_916 };
-
-    if let Err(e) = flasher.wait_hello(hello_seq, Duration::from_secs(4)) {
-        if !is_918 {
-            let _ = flasher.toggle_reset_for_boot();
-            if let Err(e2) = flasher.wait_hello(BOOT_HELLO_920, Duration::from_secs(2)) {
-                return Err(format!("握手失败: {} / {}", e, e2));
+    let detected_family = match flasher.wait_hello_candidates(&candidates, Duration::from_secs(wait_timeout_sec)) {
+        Ok(f) => f,
+        Err(e) => {
+            if !manual_boot {
+                // If auto reset once failed, try a short second pulse (50ms) before giving up
+                let _ = flasher.toggle_reset_for_boot();
+                flasher.wait_hello_candidates(&candidates, Duration::from_millis(800))
+                    .map_err(|_| e)?
+            } else {
+                return Err(e);
             }
-        } else {
-            return Err(format!("握手失败: {}", e));
         }
+    };
+
+    if detected_family == "ing918" {
+        is_918 = true;
+    } else {
+        is_918 = false;
     }
 
-    emit_progress("unlock", "", 0, 0, 0.0, 0.0, "握手成功！检查芯片 Flash 加密与保护状态...");
+    emit_progress("unlock", "", 0, 0, 0.0, 0.0, &format!("芯片响应握手成功 (识别型号: {})！检查 Flash 加密与保护状态...", detected_family.to_uppercase()));
 
     // Check lock state
     if let Ok(rsp) = flasher.exec_cmd(CMD_QLOCKSTATE) {
