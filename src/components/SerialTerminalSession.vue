@@ -241,7 +241,11 @@ const txBytesCount = ref<number>(0);
 
 let unlistenRx: UnlistenFn | null = null;
 let unlistenDisconnect: UnlistenFn | null = null;
+let unlistenFlashActive: UnlistenFn | null = null;
+let unlistenFlashDone: UnlistenFn | null = null;
 let worker: Worker | null = null;
+
+const isFlashingActive = ref<boolean>(false);
 
 // Right-click context menu state
 const contextMenuVisible = ref<boolean>(false);
@@ -468,6 +472,23 @@ onMounted(async () => {
           }
         }
       });
+
+      unlistenFlashActive = await listen<{ port: string; original_baud?: number; message: string }>('serial-flash-active', (event) => {
+        if (event.payload.port && event.payload.port === props.portName) {
+          isFlashingActive.value = true;
+          appendLog(`⚡ [固件烧录接管] ${event.payload.message}`, 'info');
+        }
+      });
+
+      unlistenFlashDone = await listen<{ port: string; original_baud?: number; message: string }>('serial-flash-done', (event) => {
+        if (event.payload.port && event.payload.port === props.portName) {
+          isFlashingActive.value = false;
+          appendLog(`✅ [控制权归还] ${event.payload.message}`, 'info');
+          if (event.payload.original_baud && event.payload.original_baud !== props.baudRate) {
+            emit('change-baud', event.payload.original_baud);
+          }
+        }
+      });
     } catch (err) {
       console.warn('Failed to attach serial event listeners:', err);
     }
@@ -490,6 +511,8 @@ watch(() => props.isConnected, (connected: boolean) => {
 onUnmounted(() => {
   if (unlistenRx) unlistenRx();
   if (unlistenDisconnect) unlistenDisconnect();
+  if (unlistenFlashActive) unlistenFlashActive();
+  if (unlistenFlashDone) unlistenFlashDone();
   if (worker) {
     worker.terminate();
     worker = null;
@@ -539,14 +562,17 @@ onUnmounted(() => {
           <!-- Direct Open / Close Port Button inside Tab -->
           <button
             @click="emit('toggle-connection')"
-            class="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold transition-colors border shadow-xs ml-0.5 cursor-pointer"
-            :class="isConnected 
-              ? 'bg-rose-950/80 text-rose-300 border-rose-800 hover:bg-rose-900' 
-              : 'bg-emerald-950/90 text-emerald-300 border-emerald-700 hover:bg-emerald-900'"
-            :title="isConnected ? '关闭当前端口连接 (保留历史日志与会话标签)' : '打开/重新连接当前端口'"
+            :disabled="isFlashingActive"
+            class="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold transition-colors border shadow-xs ml-0.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            :class="isFlashingActive
+              ? 'bg-amber-950/80 text-amber-300 border-amber-800 animate-pulse'
+              : isConnected 
+                ? 'bg-rose-950/80 text-rose-300 border-rose-800 hover:bg-rose-900' 
+                : 'bg-emerald-950/90 text-emerald-300 border-emerald-700 hover:bg-emerald-900'"
+            :title="isFlashingActive ? '正在执行芯片固件烧录，串口已临时挂起' : (isConnected ? '关闭当前端口连接 (保留历史日志与会话标签)' : '打开/重新连接当前端口')"
           >
             <Power class="w-3 h-3" />
-            <span>{{ isConnected ? '关闭' : '打开' }}</span>
+            <span>{{ isFlashingActive ? '烧录中' : (isConnected ? '关闭' : '打开') }}</span>
           </button>
         </div>
 

@@ -4,8 +4,10 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+use super::serial_manager::SerialManager;
 
 // ----------------------------------------------------------------------------
 // CRC-16 (Modbus/ARC) Table matching icsdw.py
@@ -465,7 +467,12 @@ impl FlasherSerial {
 // ----------------------------------------------------------------------------
 // Flasher Routines
 // ----------------------------------------------------------------------------
-pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
+pub fn run_flash_task(
+    app: AppHandle,
+    req: IngFlashRequest,
+    serial_mgr: Arc<SerialManager>,
+    previous_baud: Option<u32>,
+) {
     FLASH_CANCEL.store(false, Ordering::SeqCst);
     let port_name = req.port_name.clone();
 
@@ -481,19 +488,34 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
         });
     };
 
+    // Run inner flash routine
+    let res = run_flash_core(&app, &req, &emit_progress);
+    if let Err(err_msg) = res {
+        emit_progress("error", "", 0, 0, 0.0, 0.0, &err_msg);
+    }
+
+    // Always restore the port if it was previously active in the serial terminal
+    if let Some(baud) = previous_baud {
+        emit_progress("restore", "", 0, 0, 0.0, 0.0, &format!("烧录已完成，正在恢复终端串口监听 (波特率: {})...", baud));
+        if let Err(e) = serial_mgr.resume_after_flashing(&app, &port_name, baud) {
+            eprintln!("Failed to restore serial port {} after flashing: {}", port_name, e);
+        }
+    }
+}
+
+fn run_flash_core<F>(_app: &AppHandle, req: &IngFlashRequest, emit_progress: &F) -> Result<(), String>
+where
+    F: Fn(&str, &str, usize, usize, f32, f32, &str),
+{
+    let port_name = req.port_name.clone();
     emit_progress("init", "", 0, 0, 0.0, 0.0, "准备初始化串口并建立硬件连接...");
 
-    let mut flasher = match FlasherSerial::new(&port_name, 115200) {
-        Ok(f) => f,
-        Err(e) => {
-            emit_progress("error", "", 0, 0, 0.0, 0.0, &format!("串口打开失败: {}", e));
-            return;
-        }
-    };
+    let mut flasher = FlasherSerial::new(&port_name, 115200)
+        .map_err(|e| format!("串口打开失败（请确认端口未被其他外部程序占用）: {}", e))?;
 
     // Determine target chips and firmware files
     let mut files_to_flash: Vec<(String, u32, Vec<u8>)> = Vec::new();
-    let mut family = req.family.unwrap_or_else(|| "auto".to_string()).to_lowercase();
+    let mut family = req.family.clone().unwrap_or_else(|| "auto".to_string()).to_lowercase();
     let mut target_baud = req.target_baud.unwrap_or(115200);
     let mut should_launch = true;
     let mut should_set_entry = false;
@@ -503,20 +525,11 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
     if req.mode == "ini" {
         let ini_p = match req.ini_path {
             Some(ref p) if !p.is_empty() => p,
-            _ => {
-                emit_progress("error", "", 0, 0, 0.0, 0.0, "未指定 INI 配置文件路径");
-                return;
-            }
+            _ => return Err("未指定 INI 配置文件路径".to_string()),
         };
 
         emit_progress("init", "", 0, 0, 0.0, 0.0, &format!("正在解析 INI 烧录配置: {}", ini_p));
-        let cfg = match parse_ini_file(ini_p) {
-            Ok(c) => c,
-            Err(e) => {
-                emit_progress("error", "", 0, 0, 0.0, 0.0, &format!("解析 INI 失败: {}", e));
-                return;
-            }
-        };
+        let cfg = parse_ini_file(ini_p)?;
 
         if family == "auto" {
             family = cfg.family;
@@ -534,8 +547,7 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
                 continue;
             }
             if !item.file_exists {
-                emit_progress("error", &item.name, 0, 0, 0.0, 0.0, &format!("文件不存在: {}", item.resolved_path));
-                return;
+                return Err(format!("固件文件不存在: {}", item.resolved_path));
             }
             let mut buf = Vec::new();
             if let Ok(mut f) = File::open(&item.resolved_path) {
@@ -547,41 +559,24 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
         // Single File Mode (BIN or HEX)
         let file_path_str = match req.single_file_path {
             Some(ref p) if !p.is_empty() => p,
-            _ => {
-                emit_progress("error", "", 0, 0, 0.0, 0.0, "未选择待烧录的 BIN 或 HEX 固件文件");
-                return;
-            }
+            _ => return Err("未选择待烧录的 BIN 或 HEX 固件文件".to_string()),
         };
         let p = Path::new(file_path_str);
         if !p.exists() {
-            emit_progress("error", "", 0, 0, 0.0, 0.0, &format!("固件文件不存在: {}", file_path_str));
-            return;
+            return Err(format!("固件文件不存在: {}", file_path_str));
         }
 
         let is_hex = file_path_str.to_lowercase().ends_with(".hex");
         if is_hex {
             emit_progress("init", "", 0, 0, 0.0, 0.0, "解析 Intel HEX 固件记录...");
-            match parse_intel_hex(p) {
-                Ok(segs) => {
-                    for (i, seg) in segs.into_iter().enumerate() {
-                        files_to_flash.push((format!("HEX_SEG_{} (0x{:08X})", i, seg.address), seg.address, seg.data));
-                    }
-                }
-                Err(e) => {
-                    emit_progress("error", "", 0, 0, 0.0, 0.0, &format!("解析 HEX 记录失败: {}", e));
-                    return;
-                }
+            let segs = parse_intel_hex(p).map_err(|e| format!("解析 HEX 记录失败: {}", e))?;
+            for (i, seg) in segs.into_iter().enumerate() {
+                files_to_flash.push((format!("HEX_SEG_{} (0x{:08X})", i, seg.address), seg.address, seg.data));
             }
         } else {
             // Raw BIN file
-            let addr_str = req.single_address.unwrap_or_else(|| "0x02002000".to_string());
-            let addr = match parse_hex_or_dec(&addr_str) {
-                Ok(a) => a,
-                Err(e) => {
-                    emit_progress("error", "", 0, 0, 0.0, 0.0, &format!("烧录地址格式错误: {}", e));
-                    return;
-                }
-            };
+            let addr_str = req.single_address.clone().unwrap_or_else(|| "0x02002000".to_string());
+            let addr = parse_hex_or_dec(&addr_str).map_err(|e| format!("烧录地址格式错误: {}", e))?;
             let mut buf = Vec::new();
             if let Ok(mut f) = File::open(p) {
                 let _ = f.read_to_end(&mut buf);
@@ -592,8 +587,7 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
     }
 
     if files_to_flash.is_empty() {
-        emit_progress("error", "", 0, 0, 0.0, 0.0, "没有可烧录的固件内容 (请确认文件已勾选且不为空)");
-        return;
+        return Err("没有可烧录的固件内容 (请确认文件已勾选且不为空)".to_string());
     }
 
     if family == "auto" {
@@ -610,12 +604,10 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
         if !is_918 {
             let _ = flasher.toggle_reset_for_boot();
             if let Err(e2) = flasher.wait_hello(BOOT_HELLO_920, Duration::from_secs(2)) {
-                emit_progress("error", "", 0, 0, 0.0, 0.0, &format!("握手失败: {} / {}", e, e2));
-                return;
+                return Err(format!("握手失败: {} / {}", e, e2));
             }
         } else {
-            emit_progress("error", "", 0, 0, 0.0, 0.0, &format!("握手失败: {}", e));
-            return;
+            return Err(format!("握手失败: {}", e));
         }
     }
 
@@ -669,8 +661,7 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
 
     for (file_idx, (name, addr, data)) in files_to_flash.iter().enumerate() {
         if FLASH_CANCEL.load(Ordering::SeqCst) {
-            emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, "烧录已被取消");
-            return;
+            return Err("烧录已被取消".to_string());
         }
 
         let file_total = data.len();
@@ -684,8 +675,7 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
             // ING918 Page-based Burn (8KB per page)
             while file_offset < file_total {
                 if FLASH_CANCEL.load(Ordering::SeqCst) {
-                    emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, "烧录已被取消");
-                    return;
+                    return Err("烧录已被取消".to_string());
                 }
 
                 let seg_len = (file_total - file_offset).min(PAGE_SIZE_918);
@@ -701,27 +691,19 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
                 match flasher.exec_cmd(&page_req) {
                     Ok(rsp) if rsp == ACK => {},
                     other => {
-                        emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, &format!("下发页地址失败: 0x{:08X}, 响应: {:?}", current_addr, other));
-                        return;
+                        return Err(format!("下发页地址失败: 0x{:08X}, 响应: {:?}", current_addr, other));
                     }
                 }
 
-                if let Err(e) = flasher.write_all(chunk) {
-                    emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, &format!("写入数据失败: {}", e));
-                    return;
-                }
+                flasher.write_all(chunk).map_err(|e| format!("写入数据失败: {}", e))?;
 
                 let crc = calc_crc_16(chunk);
-                if let Err(e) = flasher.write_all(&crc.to_le_bytes()) {
-                    emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, &format!("写入 CRC 校验失败: {}", e));
-                    return;
-                }
+                flasher.write_all(&crc.to_le_bytes()).map_err(|e| format!("写入 CRC 校验失败: {}", e))?;
 
                 match flasher.read_exact(ACK.len()) {
                     Ok(rsp) if rsp == ACK => {},
                     other => {
-                        emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, &format!("CRC 校验应答失败 (地址 0x{:08X}): {:?}", current_addr, other));
-                        return;
+                        return Err(format!("CRC 校验应答失败 (地址 0x{:08X}): {:?}", current_addr, other));
                     }
                 }
 
@@ -740,8 +722,7 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
             let mut sector_offset = 0usize;
             while sector_offset < file_total {
                 if FLASH_CANCEL.load(Ordering::SeqCst) {
-                    emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, "烧录已被取消");
-                    return;
+                    return Err("烧录已被取消".to_string());
                 }
 
                 let current_sector_addr = addr + sector_offset as u32;
@@ -752,8 +733,7 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
                     match flasher.exec_cmd(&erase_cmd) {
                         Ok(rsp) if rsp == ACK => {},
                         other => {
-                            emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, &format!("扇区擦除失败: 0x{:08X}, 响应: {:?}", current_sector_addr, other));
-                            return;
+                            return Err(format!("扇区擦除失败: 0x{:08X}, 响应: {:?}", current_sector_addr, other));
                         }
                     }
                 }
@@ -763,8 +743,7 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
 
                 while page_offset < sector_bytes {
                     if FLASH_CANCEL.load(Ordering::SeqCst) {
-                        emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, "烧录已被取消");
-                        return;
+                        return Err("烧录已被取消".to_string());
                     }
 
                     let page_len = (sector_bytes - page_offset).min(PAGE_SIZE_916);
@@ -780,27 +759,19 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
                     match flasher.exec_cmd(&page_cmd) {
                         Ok(rsp) if rsp == ACK => {},
                         other => {
-                            emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, &format!("写页指令失败: 0x{:08X}, 响应: {:?}", page_addr, other));
-                            return;
+                            return Err(format!("写页指令失败: 0x{:08X}, 响应: {:?}", page_addr, other));
                         }
                     }
 
-                    if let Err(e) = flasher.write_all(chunk) {
-                        emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, &format!("写入页面数据失败: {}", e));
-                        return;
-                    }
+                    flasher.write_all(chunk).map_err(|e| format!("写入页面数据失败: {}", e))?;
 
                     let crc = calc_crc_16(chunk);
-                    if let Err(e) = flasher.write_all(&crc.to_le_bytes()) {
-                        emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, &format!("写入 CRC 校验失败: {}", e));
-                        return;
-                    }
+                    flasher.write_all(&crc.to_le_bytes()).map_err(|e| format!("写入 CRC 校验失败: {}", e))?;
 
                     match flasher.read_exact(ACK.len()) {
                         Ok(rsp) if rsp == ACK => {},
                         other => {
-                            emit_progress("error", name, total_burned_bytes, grand_total_bytes, 0.0, 0.0, &format!("CRC 页面校验应答失败 (地址 0x{:08X}): {:?}", page_addr, other));
-                            return;
+                            return Err(format!("CRC 页面校验应答失败 (地址 0x{:08X}): {:?}", page_addr, other));
                         }
                     }
 
@@ -847,4 +818,10 @@ pub fn run_flash_task(app: AppHandle, req: IngFlashRequest) {
     emit_progress("success", "", grand_total_bytes, grand_total_bytes, 100.0, (grand_total_bytes as f32 / 1024.0) / elapsed_sec.max(0.001), 
         &format!("全部烧录成功！共写入 {} 字节，耗时 {:.2} 秒", grand_total_bytes, elapsed_sec)
     );
+
+    // Explicitly drop flasher before returning to immediately close the COM port handle
+    drop(flasher);
+    std::thread::sleep(Duration::from_millis(50));
+
+    Ok(())
 }

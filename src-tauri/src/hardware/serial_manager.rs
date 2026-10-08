@@ -43,9 +43,17 @@ pub struct SerialDisconnectPayload {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerialFlashEventPayload {
+    pub port: String,
+    pub original_baud: Option<u32>,
+    pub message: String,
+}
+
 /// A dedicated session for a single opened COM port or RTT TCP bridge
 pub struct PortSession {
     pub port_name: String,
+    pub baud_rate: u32,
     pub port: Option<Box<dyn SerialPort>>,
     pub rtt_stream: Option<TcpStream>,
     pub is_daplink: bool,
@@ -236,6 +244,7 @@ impl SerialManager {
         let is_running = Arc::new(AtomicBool::new(true));
         let session = Arc::new(Mutex::new(PortSession {
             port_name: port_name.to_string(),
+            baud_rate: 115200,
             port: None,
             rtt_stream: Some(stream),
             is_daplink: false,
@@ -376,6 +385,7 @@ impl SerialManager {
 
         let session = Arc::new(Mutex::new(PortSession {
             port_name: port_name.to_string(),
+            baud_rate,
             port: Some(port),
             rtt_stream: None,
             is_daplink,
@@ -645,5 +655,41 @@ impl SerialManager {
         } else {
             (false, None, false, false, false)
         }
+    }
+
+    /// Pause the port session for firmware flashing, returning the original baud rate if it was active
+    pub fn pause_for_flashing(&self, app: &AppHandle, port_name: &str) -> Option<u32> {
+        let mut original_baud = None;
+        {
+            let mut sessions_guard = self.sessions.lock().unwrap();
+            if let Some(session_arc) = sessions_guard.remove(port_name) {
+                let mut session = session_arc.lock().unwrap();
+                original_baud = Some(session.baud_rate);
+                session.close();
+            }
+        }
+        if let Some(baud) = original_baud {
+            let _ = app.emit("serial-flash-active", SerialFlashEventPayload {
+                port: port_name.to_string(),
+                original_baud: Some(baud),
+                message: format!("串口 {} 正在被固件烧录任务临时接管，终端数据监听已暂时挂起...", port_name),
+            });
+        }
+        // Give Windows OS kernel sufficient time to release the COM file handle
+        std::thread::sleep(Duration::from_millis(150));
+        original_baud
+    }
+
+    /// Resume the port session after firmware flashing finishes
+    pub fn resume_after_flashing(&self, app: &AppHandle, port_name: &str, baud_rate: u32) -> Result<(), String> {
+        // Sleep briefly to ensure flashing handle is completely closed
+        std::thread::sleep(Duration::from_millis(150));
+        let res = self.open(app.clone(), port_name, baud_rate);
+        let _ = app.emit("serial-flash-done", SerialFlashEventPayload {
+            port: port_name.to_string(),
+            original_baud: Some(baud_rate),
+            message: format!("固件烧录任务已结束，串口 {} 控制权已归还给终端（恢复波特率: {}）", port_name, baud_rate),
+        });
+        res
     }
 }

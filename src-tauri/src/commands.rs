@@ -950,13 +950,14 @@ pub fn ing_start_flash(
     state: State<'_, AppState>,
     request: crate::hardware::ing_flasher::IngFlashRequest,
 ) -> Result<(), String> {
-    // Release active serial manager session on this port to avoid conflicts
-    let _ = state.serial.close(Some(&request.port_name));
-    
+    // Check if the port was actively opened in the serial terminal; if so, pause it and record its baud rate
+    let previous_baud = state.serial.pause_for_flashing(&app, &request.port_name);
+    let serial_manager = Arc::clone(&state.serial);
+
     // Spawn background flashing thread
     let app_clone = app.clone();
     std::thread::spawn(move || {
-        crate::hardware::ing_flasher::run_flash_task(app_clone, request);
+        crate::hardware::ing_flasher::run_flash_task(app_clone, request, serial_manager, previous_baud);
     });
 
     Ok(())
