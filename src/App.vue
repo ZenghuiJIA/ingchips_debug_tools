@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
 import { isTauri } from './utils/ipc';
+import { initTheme } from './utils/themeManager';
 import HeaderBar from './components/HeaderBar.vue';
 import SerialTerminal from './components/SerialTerminal.vue';
 import WaveformPlotter from './components/WaveformPlotter.vue';
@@ -13,6 +14,8 @@ import RTOSTracer from './components/RTOSTracer.vue';
 import LcdScreenMirror from './components/LcdScreenMirror.vue';
 import FirmwareMerger from './components/FirmwareMerger.vue';
 import AiCopilot from './components/AiCopilot.vue';
+import CollapsibleToolbar from './components/CollapsibleToolbar.vue';
+import GlobalSettingsModal from './components/GlobalSettingsModal.vue';
 import {
   Terminal,
   Activity,
@@ -32,6 +35,7 @@ const activeSessionsCount = ref<number>(0);
 const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'merger' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'ai'>('terminal');
 const sharedFirmwarePath = ref<string>('');
 const runningInBrowser = ref<boolean>(!isTauri());
+const isSettingsOpen = ref<boolean>(false);
 
 function handleGlobalKeydown(e: KeyboardEvent) {
   // Prevent F5 or Ctrl+R (Cmd+R on Mac) or Ctrl+Shift+R from accidentally reloading the debugging session
@@ -49,6 +53,7 @@ function handleGlobalContextMenu(e: MouseEvent) {
 }
 
 onMounted(() => {
+  initTheme();
   window.addEventListener('keydown', handleGlobalKeydown, true);
   window.addEventListener('contextmenu', handleGlobalContextMenu, true);
 });
@@ -60,7 +65,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="h-screen w-screen flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden font-sans" @contextmenu.prevent>
+  <div id="app-root" class="h-screen w-screen flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden font-sans relative" @contextmenu.prevent>
     <!-- Web Browser Notice if opened in Chrome/Edge instead of Tauri -->
     <div v-if="runningInBrowser" class="bg-amber-950/80 border-b border-amber-800 text-amber-300 px-4 py-1.5 flex items-center justify-between text-xs">
       <div class="flex items-center gap-2">
@@ -249,5 +254,14 @@ onUnmounted(() => {
         <span class="text-emerald-500">● 硬件调度器正常运行</span>
       </div>
     </footer>
+
+    <!-- Collapsible Float Toolbar (侧边贴靠抽屉式工具栏) -->
+    <CollapsibleToolbar @open-settings="isSettingsOpen = true" />
+
+    <!-- Global Settings & Theme Modal (设置 / 皮肤 / 语言 / 字体弹窗) -->
+    <GlobalSettingsModal
+      :is-open="isSettingsOpen"
+      @close="isSettingsOpen = false"
+    />
   </div>
 </template>
