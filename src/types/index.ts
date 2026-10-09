@@ -570,4 +570,101 @@ export interface IngFlashProgressPayload {
   message: string;
 }
 
+// --- HIL Automated Test Sequencer Types ---
+
+export type HilStepAction =
+  | 'flash_firmware'
+  | 'reset_target'
+  | 'serial_send'
+  | 'serial_wait_match'
+  | 'swd_read_assert'
+  | 'svd_check_reg'
+  | 'delay';
+
+export interface HilStepParams {
+  // flash_firmware
+  flash_type?: 'pyocd' | 'ing_ini' | 'ing_single';
+  file_path?: string;
+  baud_rate?: number;
+  target_device?: string;
+  single_addr?: string;
+
+  // reset_target
+  reset_method?: 'swd_soft_reset' | 'pin_dtr_pulse' | 'bootloader_reset';
+  pulse_ms?: number;
+  port_name?: string;
+
+  // serial_send
+  send_data?: string;
+  send_format?: 'string' | 'hex';
+  send_ending?: 'crlf' | 'lf' | 'none';
+
+  // serial_wait_match
+  match_type?: 'contains' | 'regex';
+  pattern?: string;
+  timeout_ms?: number;
+
+  // swd_read_assert
+  memory_addr?: string;
+  read_width?: 8 | 16 | 32;
+  operator?: '==' | '!=' | '>' | '<' | '>=' | '<=';
+  expected_value?: string;
+
+  // svd_check_reg
+  peripheral?: string;
+  register?: string;
+  field_name?: string;
+  expected_reg_val?: string;
+
+  // delay
+  delay_ms?: number;
+}
+
+export interface HilTestStep {
+  id: string;
+  name: string;
+  action: HilStepAction;
+  enabled: boolean;
+  params: HilStepParams;
+  timeout_ms?: number;
+  on_failure?: 'abort' | 'continue' | 'retry';
+  retry_count?: number;
+}
+
+export interface HilTestPipeline {
+  name: string;
+  version: string;
+  description?: string;
+  loop_count: number;
+  stop_on_error: boolean;
+  steps: HilTestStep[];
+}
+
+export type HilStepStatus = 'idle' | 'running' | 'pass' | 'fail' | 'skipped';
+
+export interface HilStepResult {
+  step_id: string;
+  step_name: string;
+  status: HilStepStatus;
+  duration_ms: number;
+  message?: string;
+  actual_output?: string;
+  expected_output?: string;
+  timestamp: string;
+}
+
+export interface HilExecutionReport {
+  pipeline_name: string;
+  start_time: string;
+  end_time: string;
+  duration_ms: number;
+  total_loops: number;
+  total_steps: number;
+  pass_count: number;
+  fail_count: number;
+  success_rate: number;
+  results: HilStepResult[];
+}
+
+
 

@@ -13,6 +13,7 @@ import SvdRegisterInspector from './components/SvdRegisterInspector.vue';
 import RTOSTracer from './components/RTOSTracer.vue';
 import LcdScreenMirror from './components/LcdScreenMirror.vue';
 import FirmwareMerger from './components/FirmwareMerger.vue';
+import HilTestSequencer from './components/HilTestSequencer.vue';
 import AiCopilot from './components/AiCopilot.vue';
 import CollapsibleToolbar from './components/CollapsibleToolbar.vue';
 import GlobalSettingsModal from './components/GlobalSettingsModal.vue';
@@ -29,11 +30,12 @@ import {
   Sliders,
   Cpu,
   Monitor,
-  Merge
+  Merge,
+  Workflow
 } from '@lucide/vue';
 
 const activeSessionsCount = ref<number>(0);
-const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'merger' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'ai'>('terminal');
+const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'merger' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'sequencer' | 'ai'>('terminal');
 const sharedFirmwarePath = ref<string>('');
 const runningInBrowser = ref<boolean>(!isTauri());
 const isSettingsOpen = ref<boolean>(false);
@@ -196,6 +198,17 @@ onUnmounted(() => {
           </button>
 
           <button
+            @click="currentTab = 'sequencer'"
+            class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
+            :class="currentTab === 'sequencer' 
+              ? 'border-emerald-500 text-emerald-400 bg-zinc-800/40' 
+              : 'border-transparent text-zinc-400 hover:text-zinc-200'"
+          >
+            <Workflow class="w-3.5 h-3.5 text-emerald-400" />
+            <span>{{ t('tab_sequencer') }}</span>
+          </button>
+
+          <button
             @click="currentTab = 'ai'"
             class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
             :class="currentTab === 'ai' 
@@ -228,6 +241,7 @@ onUnmounted(() => {
               currentTab === 'lcd' ? LcdScreenMirror :
               currentTab === 'hardfault' ? HardFaultInspector :
               currentTab === 'memory' ? MemoryInspector :
+              currentTab === 'sequencer' ? HilTestSequencer :
               AiCopilot
             "
             :is-connected="activeSessionsCount > 0"
