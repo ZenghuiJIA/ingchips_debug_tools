@@ -20,6 +20,7 @@ import {
 } from '@lucide/vue';
 
 const props = defineProps<{
+  tabId?: string;
   portName: string;
   isOpen: boolean;
 }>();
@@ -28,10 +29,12 @@ const emit = defineEmits<{
   (e: 'close'): void;
 }>();
 
-// Helper function to get port-specific storage key
+// Helper function to get tab/port-specific storage key
 function getPortKey(baseKey: string): string {
-  const cleanPort = props.portName ? props.portName.replace(/[^a-zA-Z0-9_-]/g, '_') : 'default';
-  return `${baseKey}_${cleanPort}`;
+  const scope = props.tabId 
+    ? props.tabId.replace(/[^a-zA-Z0-9_-]/g, '_')
+    : (props.portName ? props.portName.replace(/[^a-zA-Z0-9_-]/g, '_') : 'default');
+  return `${baseKey}_${scope}`;
 }
 
 // Persistent storage base keys
@@ -43,27 +46,44 @@ const BASE_KEY_MODE = 'ing_flasher_last_mode';
 const BASE_KEY_BAUD = 'ing_flasher_last_baud';
 const BASE_KEY_MANUAL_BOOT = 'ing_flasher_last_manual_boot';
 
-// State initialized per port with fallback to global default
+// Helper to read setting scoped to tab/port, checking portName key as fallback before global default
+function readSetting(baseKey: string, defaultValue: string = ''): string {
+  // 1. Try tabId-scoped key
+  if (props.tabId) {
+    const tabVal = localStorage.getItem(getPortKey(baseKey));
+    if (tabVal !== null && tabVal !== '') return tabVal;
+  }
+  // 2. Try portName-scoped key
+  if (props.portName) {
+    const cleanPort = props.portName.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const portVal = localStorage.getItem(`${baseKey}_${cleanPort}`);
+    if (portVal !== null && portVal !== '') return portVal;
+  }
+  // 3. Fallback to global default or given default
+  return localStorage.getItem(baseKey) || defaultValue;
+}
+
+// State initialized per tab/port
 const mode = ref<'ini' | 'single'>(
-  (localStorage.getItem(getPortKey(BASE_KEY_MODE)) || localStorage.getItem(BASE_KEY_MODE) || 'ini') as 'ini' | 'single'
+  (readSetting(BASE_KEY_MODE, 'ini')) as 'ini' | 'single'
 );
 const iniPath = ref<string>(
-  localStorage.getItem(getPortKey(BASE_KEY_INI_PATH)) || localStorage.getItem(BASE_KEY_INI_PATH) || ''
+  readSetting(BASE_KEY_INI_PATH, '')
 );
 const singlePath = ref<string>(
-  localStorage.getItem(getPortKey(BASE_KEY_SINGLE_PATH)) || localStorage.getItem(BASE_KEY_SINGLE_PATH) || ''
+  readSetting(BASE_KEY_SINGLE_PATH, '')
 );
 const singleAddress = ref<string>(
-  localStorage.getItem(getPortKey(BASE_KEY_SINGLE_ADDR)) || localStorage.getItem(BASE_KEY_SINGLE_ADDR) || '0x02002000'
+  readSetting(BASE_KEY_SINGLE_ADDR, '0x02002000')
 );
 const selectedFamily = ref<string>(
-  localStorage.getItem(getPortKey(BASE_KEY_FAMILY)) || localStorage.getItem(BASE_KEY_FAMILY) || 'auto'
+  readSetting(BASE_KEY_FAMILY, 'auto')
 );
 const selectedBaud = ref<number>(
-  Number(localStorage.getItem(getPortKey(BASE_KEY_BAUD)) || localStorage.getItem(BASE_KEY_BAUD)) || 115200
+  Number(readSetting(BASE_KEY_BAUD, '115200')) || 115200
 );
 const manualBoot = ref<boolean>(
-  (localStorage.getItem(getPortKey(BASE_KEY_MANUAL_BOOT)) || localStorage.getItem(BASE_KEY_MANUAL_BOOT)) === 'true'
+  readSetting(BASE_KEY_MANUAL_BOOT, 'false') === 'true'
 );
 
 const baudRates = [115200, 230400, 460800, 921600];
@@ -78,22 +98,22 @@ const isFlashing = ref<boolean>(false);
 const progressPct = ref<number>(0);
 const progressSpeed = ref<number>(0);
 const progressStage = ref<string>('idle');
-const progressMsg = ref<string>('就绪');
+const progressMsg = ref<string>(t('ing_status_ready'));
 const logs = ref<Array<{ id: number; time: string; text: string; type: 'info' | 'success' | 'error' | 'warn' }>>([]);
 let nextLogId = 1;
 
 let unlistenProgress: UnlistenFn | null = null;
 
-// Switch & reload configuration whenever portName prop changes
-watch(() => props.portName, (newPort) => {
-  if (!newPort) return;
-  mode.value = (localStorage.getItem(getPortKey(BASE_KEY_MODE)) || localStorage.getItem(BASE_KEY_MODE) || 'ini') as 'ini' | 'single';
-  iniPath.value = localStorage.getItem(getPortKey(BASE_KEY_INI_PATH)) || localStorage.getItem(BASE_KEY_INI_PATH) || '';
-  singlePath.value = localStorage.getItem(getPortKey(BASE_KEY_SINGLE_PATH)) || localStorage.getItem(BASE_KEY_SINGLE_PATH) || '';
-  singleAddress.value = localStorage.getItem(getPortKey(BASE_KEY_SINGLE_ADDR)) || localStorage.getItem(BASE_KEY_SINGLE_ADDR) || '0x02002000';
-  selectedFamily.value = localStorage.getItem(getPortKey(BASE_KEY_FAMILY)) || localStorage.getItem(BASE_KEY_FAMILY) || 'auto';
-  selectedBaud.value = Number(localStorage.getItem(getPortKey(BASE_KEY_BAUD)) || localStorage.getItem(BASE_KEY_BAUD)) || 115200;
-  manualBoot.value = (localStorage.getItem(getPortKey(BASE_KEY_MANUAL_BOOT)) || localStorage.getItem(BASE_KEY_MANUAL_BOOT)) === 'true';
+// Switch & reload configuration whenever tabId or portName prop changes
+watch([() => props.tabId, () => props.portName], ([newTab, newPort]) => {
+  if (!newTab && !newPort) return;
+  mode.value = (readSetting(BASE_KEY_MODE, 'ini')) as 'ini' | 'single';
+  iniPath.value = readSetting(BASE_KEY_INI_PATH, '');
+  singlePath.value = readSetting(BASE_KEY_SINGLE_PATH, '');
+  singleAddress.value = readSetting(BASE_KEY_SINGLE_ADDR, '0x02002000');
+  selectedFamily.value = readSetting(BASE_KEY_FAMILY, 'auto');
+  selectedBaud.value = Number(readSetting(BASE_KEY_BAUD, '115200')) || 115200;
+  manualBoot.value = readSetting(BASE_KEY_MANUAL_BOOT, 'false') === 'true';
 
   if (iniPath.value && mode.value === 'ini') {
     loadAndParseIni(iniPath.value);
@@ -102,34 +122,49 @@ watch(() => props.portName, (newPort) => {
   }
 });
 
-// Watchers for persistence: save to port-scoped key as well as global last-used fallback
+// Watchers for persistence: save strictly to tab/port-scoped key (and port-name key if tabId exists)
+// Never overwrite the global BASE_KEY_* with current tab's specific path!
 watch(mode, (v) => {
   localStorage.setItem(getPortKey(BASE_KEY_MODE), v);
-  localStorage.setItem(BASE_KEY_MODE, v);
+  if (props.portName) {
+    localStorage.setItem(`${BASE_KEY_MODE}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, v);
+  }
 });
 watch(iniPath, (v) => {
   localStorage.setItem(getPortKey(BASE_KEY_INI_PATH), v);
-  localStorage.setItem(BASE_KEY_INI_PATH, v);
+  if (props.portName) {
+    localStorage.setItem(`${BASE_KEY_INI_PATH}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, v);
+  }
 });
 watch(singlePath, (v) => {
   localStorage.setItem(getPortKey(BASE_KEY_SINGLE_PATH), v);
-  localStorage.setItem(BASE_KEY_SINGLE_PATH, v);
+  if (props.portName) {
+    localStorage.setItem(`${BASE_KEY_SINGLE_PATH}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, v);
+  }
 });
 watch(singleAddress, (v) => {
   localStorage.setItem(getPortKey(BASE_KEY_SINGLE_ADDR), v);
-  localStorage.setItem(BASE_KEY_SINGLE_ADDR, v);
+  if (props.portName) {
+    localStorage.setItem(`${BASE_KEY_SINGLE_ADDR}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, v);
+  }
 });
 watch(selectedFamily, (v) => {
   localStorage.setItem(getPortKey(BASE_KEY_FAMILY), v);
-  localStorage.setItem(BASE_KEY_FAMILY, v);
+  if (props.portName) {
+    localStorage.setItem(`${BASE_KEY_FAMILY}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, v);
+  }
 });
 watch(selectedBaud, (v) => {
   localStorage.setItem(getPortKey(BASE_KEY_BAUD), String(v));
-  localStorage.setItem(BASE_KEY_BAUD, String(v));
+  if (props.portName) {
+    localStorage.setItem(`${BASE_KEY_BAUD}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, String(v));
+  }
 });
 watch(manualBoot, (v) => {
   localStorage.setItem(getPortKey(BASE_KEY_MANUAL_BOOT), String(v));
-  localStorage.setItem(BASE_KEY_MANUAL_BOOT, String(v));
+  if (props.portName) {
+    localStorage.setItem(`${BASE_KEY_MANUAL_BOOT}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, String(v));
+  }
 });
 
 function addLog(text: string, type: 'info' | 'success' | 'error' | 'warn' = 'info') {
@@ -167,11 +202,11 @@ async function loadAndParseIni(path: string) {
     if (selectedFamily.value === 'auto') {
       selectedFamily.value = res.family;
     }
-    addLog(`成功解析方案: ${path} (芯片: ${res.family.toUpperCase()}, 固件项: ${res.items.length})`, 'info');
+    addLog(t('ing_log_ini_parsed', { path, family: res.family.toUpperCase(), count: res.items.length }), 'info');
   } catch (err: any) {
     iniError.value = String(err);
     parsedIni.value = null;
-    addLog(`解析 INI 失败: ${err}`, 'error');
+    addLog(t('ing_log_ini_parse_err', { err }), 'error');
   } finally {
     isParsingIni.value = false;
   }
@@ -187,7 +222,7 @@ async function pickIniFile() {
       await loadAndParseIni(selected);
     }
   } catch (err: any) {
-    addLog(`选择文件失败: ${err}`, 'error');
+    addLog(t('ing_log_pick_err', { err }), 'error');
   }
 }
 
@@ -197,10 +232,10 @@ async function pickSingleFile() {
     const selected: string | null = await safeInvoke('ing_pick_firmware_file', { startingDir: currentDir });
     if (selected) {
       singlePath.value = selected;
-      addLog(`已选择固件: ${selected}`, 'info');
+      addLog(t('ing_log_file_selected', { file: selected }), 'info');
     }
   } catch (err: any) {
-    addLog(`选择文件失败: ${err}`, 'error');
+    addLog(t('ing_log_pick_err', { err }), 'error');
   }
 }
 
@@ -210,16 +245,16 @@ async function startFlash() {
 
   if (mode.value === 'ini') {
     if (!iniPath.value) {
-      alert('请先选择 INI 烧录方案文件！');
+      alert(t('ing_alert_select_ini'));
       return;
     }
     if (!parsedIni.value || parsedIni.value.items.filter(i => i.checked).length === 0) {
-      alert('当前方案未勾选任何有效固件或方案未成功解析！');
+      alert(t('ing_alert_no_firmware'));
       return;
     }
   } else {
     if (!singlePath.value) {
-      alert('请先选择待烧录的 BIN 或 HEX 固件文件！');
+      alert(t('ing_alert_select_file'));
       return;
     }
   }
@@ -228,8 +263,8 @@ async function startFlash() {
   progressPct.value = 0;
   progressSpeed.value = 0;
   progressStage.value = 'init';
-  progressMsg.value = '开始准备烧录...';
-  addLog(`[烧录启动] 目标串口: ${props.portName}, 模式: ${mode.value === 'ini' ? 'INI方案' : '单固件'}, 波特率: ${selectedBaud.value}`, 'info');
+  progressMsg.value = t('ing_status_preparing');
+  addLog(t('ing_log_flash_start', { port: props.portName, mode: mode.value === 'ini' ? 'INI' : 'SINGLE', baud: selectedBaud.value }), 'info');
 
   try {
     await safeInvoke('ing_start_flash', {
@@ -248,8 +283,8 @@ async function startFlash() {
   } catch (err: any) {
     isFlashing.value = false;
     progressStage.value = 'error';
-    progressMsg.value = `启动失败: ${err}`;
-    addLog(`烧录启动异常: ${err}`, 'error');
+    progressMsg.value = t('ing_status_start_fail', { err });
+    addLog(t('ing_log_start_err', { err }), 'error');
   }
 }
 
@@ -257,9 +292,9 @@ async function cancelFlash() {
   if (!isFlashing.value) return;
   try {
     await safeInvoke('ing_cancel_flash');
-    addLog('已向底层发送中止信号...', 'warn');
+    addLog(t('ing_log_abort_sent'), 'warn');
   } catch (err: any) {
-    addLog(`中止失败: ${err}`, 'error');
+    addLog(t('ing_log_abort_fail', { err }), 'error');
   }
 }
 
@@ -275,11 +310,11 @@ onMounted(async () => {
 
       if (p.stage === 'error') {
         isFlashing.value = false;
-        addLog(`[错误] ${p.message}`, 'error');
+        addLog(`[${t('common_error')}] ${p.message}`, 'error');
       } else if (p.stage === 'success') {
         isFlashing.value = false;
         progressPct.value = 100;
-        addLog(`[成功] ${p.message}`, 'success');
+        addLog(`[${t('common_success')}] ${p.message}`, 'success');
       } else {
         if (p.message) {
           addLog(p.message, p.stage === 'burn' ? 'info' : 'warn');
@@ -407,23 +442,23 @@ onUnmounted(() => {
               <input
                 v-model="iniPath"
                 type="text"
-                placeholder="请选择或粘贴 INGChips .ini 方案配置文件绝对路径..."
+                :placeholder="t('ing_ini_path_placeholder')"
                 class="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg px-3 py-1.5 text-xs text-zinc-100 font-mono focus:border-indigo-500 focus:outline-hidden"
               />
             </div>
             <button
               @click="pickIniFile"
               class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-600/80 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
-              title="弹出窗口选择 INI 文件 (自动记忆上次目录)"
+              :title="t('ing_btn_pick_ini_tip')"
             >
               <FolderOpen class="w-3.5 h-3.5 text-indigo-400" />
-              <span>选择 INI 文件</span>
+              <span>{{ t("ing_btn_pick_ini") }}</span>
             </button>
             <button
               @click="loadAndParseIni(iniPath)"
               :disabled="!iniPath || isParsingIni"
               class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 rounded-lg text-xs transition-colors disabled:opacity-40 cursor-pointer"
-              title="重新读取解析方案内容"
+              :title="t('ing_btn_reload_ini_tip')"
             >
               <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': isParsingIni }" />
             </button>
@@ -432,11 +467,11 @@ onUnmounted(() => {
           <!-- Parsed INI Bin Items Table -->
           <div v-if="parsedIni" class="border border-zinc-800 rounded-lg overflow-hidden bg-zinc-950/60">
             <div class="px-3 py-2 bg-zinc-950 border-b border-zinc-800 flex items-center justify-between text-xs">
-              <span class="font-semibold text-zinc-300">方案固件烧录列表 (勾选项将按序烧录)</span>
+              <span class="font-semibold text-zinc-300">{{ t("ing_list_title") }}</span>
               <div class="flex items-center gap-3 text-zinc-400 text-[11px] font-mono">
-                <span>系列: <strong class="text-indigo-300">{{ parsedIni.family.toUpperCase() }}</strong></span>
-                <span>复位启动: <strong class="text-emerald-400">{{ parsedIni.launch ? '是' : '否' }}</strong></span>
-                <span v-if="parsedIni.set_entry && parsedIni.entry_address">入口地址: <strong class="text-amber-400">{{ formatHexAddr(parsedIni.entry_address) }}</strong></span>
+                <span>{{ t("ing_info_family") }} <strong class="text-indigo-300">{{ parsedIni.family.toUpperCase() }}</strong></span>
+                <span>{{ t('ing_info_launch') }} <strong class="text-emerald-400">{{ parsedIni.launch ? t('ing_yes') : t('ing_no') }}</strong></span>
+                <span v-if="parsedIni.set_entry && parsedIni.entry_address">{{ t('ing_info_entry') }} <strong class="text-amber-400">{{ formatHexAddr(parsedIni.entry_address) }}</strong></span>
               </div>
             </div>
 
@@ -473,14 +508,14 @@ onUnmounted(() => {
                     class="inline-flex items-center gap-1 text-[11px] text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-900/50"
                   >
                     <CheckCircle2 class="w-3 h-3" />
-                    <span>文件就绪</span>
+                    <span>{{ t("ing_file_ready") }}</span>
                   </span>
                   <span
                     v-else
                     class="inline-flex items-center gap-1 text-[11px] text-rose-400 bg-rose-950/40 px-2 py-0.5 rounded border border-rose-900/50"
                   >
                     <XCircle class="w-3 h-3" />
-                    <span>文件未找到</span>
+                    <span>{{ t("ing_file_missing") }}</span>
                   </span>
                 </div>
               </div>
@@ -488,10 +523,10 @@ onUnmounted(() => {
           </div>
 
           <div v-else-if="iniError" class="p-3 bg-rose-950/30 border border-rose-800/60 rounded-lg text-xs text-rose-300">
-            方案解析错误: {{ iniError }}
+            {{ t("ing_ini_parse_error", { err: iniError }) }}
           </div>
           <div v-else class="p-6 text-center border border-dashed border-zinc-800 rounded-lg text-zinc-500 text-xs">
-            请点击上方“选择 INI 文件”按钮加载您的 INGChips 烧录方案配置。
+            {{ t("ing_load_ini_guide") }}
           </div>
         </div>
 
@@ -500,13 +535,13 @@ onUnmounted(() => {
           <!-- File selection -->
           <div class="space-y-1.5">
             <label class="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
-              <span>待烧录固件文件 (.bin 原始固件 或 .hex Intel HEX 格式):</span>
+              <span>{{ t("ing_single_file_label") }}</span>
             </label>
             <div class="flex items-center gap-2">
               <input
                 v-model="singlePath"
                 type="text"
-                placeholder="请选择或粘贴固件绝对路径 (.bin / .hex)..."
+                :placeholder="t('ing_single_file_placeholder')"
                 class="flex-1 bg-zinc-950 border border-zinc-700/80 rounded-lg px-3 py-1.5 text-xs text-zinc-100 font-mono focus:border-indigo-500 focus:outline-hidden"
               />
               <button
@@ -514,7 +549,7 @@ onUnmounted(() => {
                 class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-600/80 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
               >
                 <FolderOpen class="w-3.5 h-3.5 text-indigo-400" />
-                <span>导入 BIN / HEX</span>
+                <span>{{ t("ing_btn_import_bin_hex") }}</span>
               </button>
             </div>
           </div>
@@ -523,10 +558,10 @@ onUnmounted(() => {
           <div class="bg-zinc-950/60 border border-zinc-800 rounded-lg p-3.5 space-y-2">
             <div class="flex items-center justify-between">
               <label class="text-xs font-medium text-zinc-300">
-                <span>烧录目标物理地址 (HEX 自动从文件内解析，BIN 文件需指定):</span>
+                <span>{{ t("ing_target_addr_label") }}</span>
               </label>
               <div class="flex items-center gap-1 text-[11px] text-zinc-400">
-                <span>快速预设:</span>
+                <span>{{ t("ing_quick_presets") }}</span>
                 <button
                   type="button"
                   @click="singleAddress = '0x02002000'"
@@ -544,11 +579,11 @@ onUnmounted(() => {
               <input
                 v-model="singleAddress"
                 type="text"
-                placeholder="例如 0x02002000 或 33562624"
+                :placeholder="t('ing_addr_placeholder')"
                 class="w-64 bg-zinc-900 border border-zinc-700/80 rounded-lg px-3 py-1.5 text-xs text-amber-300 font-mono font-bold focus:border-indigo-500 focus:outline-hidden"
               />
               <span class="text-zinc-500 text-[11px]">
-                提示：支持十六进制 0x 前缀或十进制数字
+                {{ t("ing_addr_tip") }}
               </span>
             </div>
           </div>
@@ -558,7 +593,7 @@ onUnmounted(() => {
         <div class="bg-zinc-950 border border-zinc-800 rounded-lg p-4 space-y-3">
           <div class="flex items-center justify-between text-xs">
             <div class="flex items-center gap-2">
-              <span class="font-bold text-zinc-200">烧录进度:</span>
+              <span class="font-bold text-zinc-200">{{ t("ing_progress_label") }}</span>
               <span class="font-mono font-bold" :class="isFlashing ? 'text-indigo-400' : (progressStage === 'success' ? 'text-emerald-400' : 'text-zinc-400')">
                 {{ progressPct.toFixed(1) }}%
               </span>

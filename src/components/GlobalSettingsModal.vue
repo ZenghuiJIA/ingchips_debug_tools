@@ -101,9 +101,9 @@
             >
               <!-- Triple color swatch strip -->
               <div class="flex items-center gap-1.5 w-full mb-2">
-                <div class="w-3.5 h-3.5 rounded-full border border-white/20 shadow-xs" :style="{ backgroundColor: preset.accentColor }" title="强调色"></div>
-                <div class="w-3 h-3 rounded-md border border-white/10" :style="{ backgroundColor: preset.cardColor }" title="卡片色"></div>
-                <div class="w-3 h-3 rounded-md border border-white/10" :style="{ backgroundColor: preset.bgColor }" title="背景色"></div>
+                <div class="w-3.5 h-3.5 rounded-full border border-white/20 shadow-xs" :style="{ backgroundColor: preset.accentColor }" :title="t('settings_accent_color', { default: '强调色' })"></div>
+                <div class="w-3 h-3 rounded-md border border-white/10" :style="{ backgroundColor: preset.cardColor }" :title="t('settings_card_color', { default: '卡片色' })"></div>
+                <div class="w-3 h-3 rounded-md border border-white/10" :style="{ backgroundColor: preset.bgColor }" :title="t('settings_bg_color', { default: '背景色' })"></div>
                 <span class="ml-auto text-[9.5px] px-1 py-0.2 rounded font-mono font-medium" :class="preset.mode === 'dark' ? 'bg-zinc-900 text-zinc-400' : 'bg-zinc-200 text-zinc-700'">
                   {{ preset.mode === 'dark' ? 'DARK' : 'LIGHT' }}
                 </span>

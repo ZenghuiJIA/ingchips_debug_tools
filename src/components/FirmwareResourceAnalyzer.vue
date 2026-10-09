@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
+import { t } from '../utils/i18n';
 import { safeInvoke } from '../utils/ipc';
 import type {
   FirmwareResourceAnalysis,
@@ -54,8 +55,8 @@ interface ChipPreset {
   ramBytes: number;
 }
 
-const chipPresets: ChipPreset[] = [
-  { label: '自适应 / 不指定规格 (仅分析绝对大小)', flashBytes: 0, ramBytes: 0 },
+const chipPresets = computed<ChipPreset[]>(() => [
+  { label: t('fra_preset_auto_adaptive', { default: '自适应 / 不指定规格 (仅分析绝对大小)' }), flashBytes: 0, ramBytes: 0 },
   { label: 'ING9188xx / ING91800 (512KB Flash / 64KB RAM)', flashBytes: 512 * 1024, ramBytes: 64 * 1024 },
   { label: 'ING9168xx / ING91600 (2048KB Flash / 32KB RAM)', flashBytes: 2048 * 1024, ramBytes: 32 * 1024 },
   { label: 'ING208xx / ING2000 (2048KB Flash / 32KB RAM)', flashBytes: 2048 * 1024, ramBytes: 32 * 1024 },
@@ -64,8 +65,8 @@ const chipPresets: ChipPreset[] = [
   { label: 'STM32H743VI (2048KB Flash / 1024KB RAM)', flashBytes: 2048 * 1024, ramBytes: 1024 * 1024 },
   { label: 'RP2040 (2048KB Flash / 264KB RAM)', flashBytes: 2048 * 1024, ramBytes: 264 * 1024 },
   { label: 'NRF52840 (1024KB Flash / 256KB RAM)', flashBytes: 1024 * 1024, ramBytes: 256 * 1024 },
-  { label: '自定义容量 (手动指定)', flashBytes: -1, ramBytes: -1 },
-];
+  { label: t('fra_preset_custom_manual', { default: '自定义容量 (手动指定)' }), flashBytes: -1, ramBytes: -1 },
+]);
 
 const selectedPreset = ref<number>(1);
 const customFlashKB = ref<number>(512);
@@ -75,20 +76,20 @@ const effectiveFlashBytes = computed<number | null>(() => {
   if (selectedPreset.value === 0) {
     return null; // No limit preset
   }
-  if (selectedPreset.value === chipPresets.length - 1) {
+  if (selectedPreset.value === chipPresets.value.length - 1) {
     return (customFlashKB.value || 0) * 1024;
   }
-  return chipPresets[selectedPreset.value]?.flashBytes || null;
+  return chipPresets.value[selectedPreset.value]?.flashBytes || null;
 });
 
 const effectiveRamBytes = computed<number | null>(() => {
   if (selectedPreset.value === 0) {
     return null; // No limit preset
   }
-  if (selectedPreset.value === chipPresets.length - 1) {
+  if (selectedPreset.value === chipPresets.value.length - 1) {
     return (customRamKB.value || 0) * 1024;
   }
-  return chipPresets[selectedPreset.value]?.ramBytes || null;
+  return chipPresets.value[selectedPreset.value]?.ramBytes || null;
 });
 
 // Analysis results
@@ -175,7 +176,7 @@ const filteredModules = computed<FirmwareModule[]>(() => {
 async function analyzeFirmware(pathOverride?: string) {
   const targetPath = pathOverride || filePath.value.trim();
   if (!targetPath) {
-    errorMsg.value = '请先输入或选择 .axf / .elf / .map 固件文件路径';
+    errorMsg.value = t('fra_err_need_file_path', { default: '请先输入或选择 .axf / .elf / .map 固件文件路径' });
     return;
   }
 
@@ -204,7 +205,7 @@ async function analyzeFirmware(pathOverride?: string) {
       };
     }
   } catch (err: any) {
-    errorMsg.value = `固件资源分析失败: ${err}`;
+    errorMsg.value = t('fra_err_analysis_fail', { err, default: `固件资源分析失败: ${err}` });
     console.error('Firmware analysis error:', err);
   } finally {
     isAnalyzing.value = false;
@@ -214,7 +215,7 @@ async function analyzeFirmware(pathOverride?: string) {
 async function handlePickFile() {
   try {
     const selected: string | null = await safeInvoke('pick_firmware_file', {
-      title: '选择要分析的固件或链接映射文件 (.axf / .elf / .map / .hex / .bin)'
+      title: t('fra_pick_firmware_title', { default: '选择要分析的固件或链接映射文件 (.axf / .elf / .map / .hex / .bin)' })
     });
     if (selected) {
       filePath.value = selected;
@@ -235,9 +236,9 @@ function getToolchainBadge(type: string) {
     case 'armclang':
       return { label: 'ARMClang (AC6)', bg: 'bg-purple-500/20 text-purple-300 border-purple-500/40' };
     case 'map_file':
-      return { label: 'Keil Linker MAP 映射', bg: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40' };
+      return { label: t('fra_toolchain_map', { default: 'Keil Linker MAP 映射' }), bg: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40' };
     default:
-      return { label: 'ELF 编译器', bg: 'bg-zinc-700/50 text-zinc-300 border-zinc-600' };
+      return { label: t('fra_toolchain_elf', { default: 'ELF 编译器' }), bg: 'bg-zinc-700/50 text-zinc-300 border-zinc-600' };
   }
 }
 
@@ -335,7 +336,7 @@ const treemapTiles = computed<LayoutTile[]>(() => {
       const remainder = cat.size - itemsTotal;
       if (remainder > 0) {
         rawList.push({
-          name: `${cat.name} (其余微小项)`,
+          name: t('fra_cat_remainder', { name: cat.name, default: `${cat.name} (其余微小项)` }),
           size: remainder,
           size_str: formatBytes(remainder),
           category: cat.name,
@@ -542,10 +543,10 @@ onMounted(() => {
       <div class="flex items-center justify-between border-b border-slate-800 pb-2">
         <div class="flex items-center gap-2 font-semibold text-slate-200">
           <PieChart class="w-4 h-4 text-emerald-400" />
-          <span>固件与链接映射资源智能可视化分析器 (Keil MDK Map / ELF / AXF / GCC)</span>
+          <span>{{ t("fra_title") }}</span>
         </div>
         <div class="flex items-center gap-2 text-slate-400 text-[11px]">
-          <span>支持 ING916/ING918/ING20 系列、Keil MDK & GCC MAP 文件秒级解析</span>
+          <span>{{ t("fra_subtitle") }}</span>
         </div>
       </div>
 
@@ -554,14 +555,14 @@ onMounted(() => {
         <!-- File Path Input -->
         <div class="md:col-span-2 space-y-1">
           <label class="block text-slate-400 text-[11px] font-medium">
-            目标固件或 MAP 链接映射文件 (.map / .axf / .elf)
+            {{ t("fra_target_label") }}
           </label>
           <div class="flex gap-2">
             <div class="relative flex-1 flex items-center">
               <input
                 v-model="filePath"
                 type="text"
-                placeholder="点击右侧浏览选择文件，或粘贴绝对路径 (.map / .axf / .elf)"
+                :placeholder="t('fra_placeholder_path')"
                 class="w-full bg-slate-950 border border-slate-800 rounded px-3 py-1.5 pr-24 text-slate-200 outline-none focus:border-emerald-500 font-mono text-xs placeholder:text-slate-600"
                 @keydown.enter="analyzeFirmware()"
               />
@@ -569,10 +570,10 @@ onMounted(() => {
                 @click="handlePickFile"
                 type="button"
                 class="absolute right-1 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded text-xs flex items-center gap-1 transition-colors border border-slate-700"
-                title="打开系统文件选择对话框"
+                :title="t('fra_tip_browse')"
               >
                 <FolderOpen class="w-3.5 h-3.5" />
-                <span>浏览选择</span>
+                <span>{{ t("fra_btn_browse") }}</span>
               </button>
             </div>
             <button
@@ -581,14 +582,14 @@ onMounted(() => {
               class="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded font-medium transition-colors shadow-sm shrink-0"
             >
               <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': isAnalyzing }" />
-              <span>{{ isAnalyzing ? '分析中...' : '开始分析' }}</span>
+              <span>{{ isAnalyzing ? t('fra_btn_analyzing') : t('fra_btn_start_analyze') }}</span>
             </button>
           </div>
         </div>
 
         <!-- Target Chip Presets -->
         <div class="space-y-1">
-          <label class="block text-slate-400 text-[11px] font-medium">芯片规格预设 (计算物理容量占比)</label>
+          <label class="block text-slate-400 text-[11px] font-medium">{{ t("fra_preset_label") }}</label>
           <select
             v-model="selectedPreset"
             @change="analysisData && analyzeFirmware()"
@@ -603,7 +604,7 @@ onMounted(() => {
 
       <!-- Custom Chip Input if Custom selected -->
       <div v-if="selectedPreset === chipPresets.length - 1" class="flex items-center gap-4 bg-slate-950/60 p-2.5 rounded border border-slate-800">
-        <span class="text-slate-400 text-[11px] font-medium">自定义容量:</span>
+        <span class="text-slate-400 text-[11px] font-medium">{{ t("fra_preset_custom_cap") }}</span>
         <div class="flex items-center gap-2">
           <span class="text-slate-400 text-[11px]">Flash:</span>
           <input
@@ -626,7 +627,7 @@ onMounted(() => {
           @click="analysisData && analyzeFirmware()"
           class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[11px] transition-colors"
         >
-          重新测算
+          {{ t("fra_btn_recalc") }}
         </button>
       </div>
 
@@ -645,7 +646,7 @@ onMounted(() => {
           <div class="flex items-center justify-between pb-2 border-b border-slate-800">
             <div class="flex items-center gap-2">
               <Cpu class="w-4 h-4 text-emerald-400" />
-              <span class="font-semibold text-slate-200">目标编译环境</span>
+              <span class="font-semibold text-slate-200">{{ t("fra_card_env") }}</span>
             </div>
             <span
               class="px-2 py-0.5 rounded border text-[10px] font-mono font-medium"
@@ -657,22 +658,22 @@ onMounted(() => {
 
           <div class="space-y-1.5 mt-2.5 text-xs">
             <div class="flex justify-between items-center">
-              <span class="text-slate-400">固件文件:</span>
+              <span class="text-slate-400">{{ t("fra_card_file") }}</span>
               <span class="font-mono text-slate-200 font-medium truncate max-w-[170px]" :title="analysisData.file_path">
                 {{ analysisData.file_name }}
               </span>
             </div>
             <div class="flex justify-between items-center">
-              <span class="text-slate-400">目标架构:</span>
+              <span class="text-slate-400">{{ t("fra_card_arch") }}</span>
               <span class="font-mono text-slate-200">{{ analysisData.architecture }}</span>
             </div>
             <div class="flex justify-between items-center">
-              <span class="text-slate-400">固件大小:</span>
+              <span class="text-slate-400">{{ t("fra_card_size") }}</span>
               <span class="font-mono text-slate-300">{{ analysisData.file_size_str }}</span>
             </div>
             <div class="flex justify-between items-center">
-              <span class="text-slate-400">模块总计:</span>
-              <span class="font-mono text-emerald-400 font-semibold">{{ analysisData.modules.length }} 个编译单元</span>
+              <span class="text-slate-400">{{ t("fra_card_modules") }}</span>
+              <span class="font-mono text-emerald-400 font-semibold">{{ t("fra_units_compile", { count: analysisData.modules.length }) }}</span>
             </div>
           </div>
 
@@ -686,7 +687,7 @@ onMounted(() => {
           <div class="flex items-center justify-between pb-2 border-b border-slate-800">
             <div class="flex items-center gap-2">
               <HardDrive class="w-4 h-4 text-cyan-400" />
-              <span class="font-semibold text-slate-200">ROM 占用 (Flash)</span>
+              <span class="font-semibold text-slate-200">{{ t("fra_card_rom") }}</span>
             </div>
             <span class="text-xs font-mono font-bold text-cyan-400">
               {{ analysisData.summary.rom_total_str }}
@@ -696,9 +697,9 @@ onMounted(() => {
           <!-- Flash Progress Gauge -->
           <div class="mt-2.5 space-y-1">
             <div class="flex justify-between items-center text-[11px]">
-              <span class="text-slate-400">Flash 占用率:</span>
+              <span class="text-slate-400">{{ t("fra_flash_usage_pct") }}</span>
               <span class="font-mono font-bold" :class="analysisData.summary.flash_usage_percent && analysisData.summary.flash_usage_percent > 90 ? 'text-rose-400' : 'text-cyan-300'">
-                {{ analysisData.summary.flash_usage_percent !== null ? `${analysisData.summary.flash_usage_percent}%` : '未指定' }}
+                {{ analysisData.summary.flash_usage_percent !== null ? `${analysisData.summary.flash_usage_percent}%` : t('fra_unspecified') }}
               </span>
             </div>
             <!-- Progress Bar -->
@@ -709,7 +710,7 @@ onMounted(() => {
               ></div>
             </div>
             <div class="flex justify-between text-[10px] text-slate-500 font-mono">
-              <span>已用: {{ analysisData.summary.rom_total_str }}</span>
+              <span>{{ t("fra_used_label") }} {{ analysisData.summary.rom_total_str }}</span>
               <span>{{ analysisData.summary.chip_flash_str ? `规格: ${analysisData.summary.chip_flash_str} (余 ${analysisData.summary.flash_free_str})` : '未指定物理上限'}}</span>
             </div>
           </div>
@@ -717,7 +718,7 @@ onMounted(() => {
           <!-- Breakdown: Code + RO + RW -->
           <div class="mt-2.5 pt-2 border-t border-slate-800 grid grid-cols-3 gap-1.5 text-center">
             <div class="bg-slate-950/70 p-1 rounded border border-slate-800">
-              <div class="text-[9px] text-blue-400 font-medium">Code (代码)</div>
+              <div class="text-[9px] text-blue-400 font-medium">{{ t("fra_code_label") }}</div>
               <div class="font-mono font-semibold text-slate-200 text-[10px]">{{ analysisData.summary.code_str }}</div>
               <div class="text-[8px] text-slate-500 font-mono">{{ analysisData.summary.rom_code_ratio }}%</div>
             </div>
@@ -739,7 +740,7 @@ onMounted(() => {
           <div class="flex items-center justify-between pb-2 border-b border-slate-800">
             <div class="flex items-center gap-2">
               <Layers class="w-4 h-4 text-emerald-400" />
-              <span class="font-semibold text-slate-200">RAM 静态占用 (SRAM)</span>
+              <span class="font-semibold text-slate-200">{{ t("fra_card_ram") }}</span>
             </div>
             <span class="text-xs font-mono font-bold text-emerald-400">
               {{ analysisData.summary.ram_total_str }}
@@ -749,9 +750,9 @@ onMounted(() => {
           <!-- RAM Progress Gauge -->
           <div class="mt-2.5 space-y-1">
             <div class="flex justify-between items-center text-[11px]">
-              <span class="text-slate-400">RAM 占用率:</span>
+              <span class="text-slate-400">{{ t("fra_ram_usage_pct") }}</span>
               <span class="font-mono font-bold" :class="analysisData.summary.ram_usage_percent && analysisData.summary.ram_usage_percent > 90 ? 'text-rose-400' : 'text-emerald-300'">
-                {{ analysisData.summary.ram_usage_percent !== null ? `${analysisData.summary.ram_usage_percent}%` : '未指定' }}
+                {{ analysisData.summary.ram_usage_percent !== null ? `${analysisData.summary.ram_usage_percent}%` : t('fra_unspecified') }}
               </span>
             </div>
             <!-- Progress Bar -->
@@ -762,7 +763,7 @@ onMounted(() => {
               ></div>
             </div>
             <div class="flex justify-between text-[10px] text-slate-500 font-mono">
-              <span>已用: {{ analysisData.summary.ram_total_str }}</span>
+              <span>{{ t("fra_used_label") }} {{ analysisData.summary.ram_total_str }}</span>
               <span>{{ analysisData.summary.chip_ram_str ? `规格: ${analysisData.summary.chip_ram_str} (余 ${analysisData.summary.ram_free_str})` : '未指定物理上限' }}</span>
             </div>
           </div>
@@ -770,12 +771,12 @@ onMounted(() => {
           <!-- Breakdown: RW-Data + ZI-Data -->
           <div class="mt-2.5 pt-2 border-t border-slate-800 grid grid-cols-2 gap-2 text-center">
             <div class="bg-slate-950/70 p-1 rounded border border-slate-800">
-              <div class="text-[9px] text-purple-400 font-medium">RW-Data (初始变量)</div>
+              <div class="text-[9px] text-purple-400 font-medium">{{ t("fra_rw_label") }}</div>
               <div class="font-mono font-semibold text-slate-200 text-[10px]">{{ analysisData.summary.rw_data_str }}</div>
               <div class="text-[8px] text-slate-500 font-mono">{{ analysisData.summary.ram_rw_ratio }}%</div>
             </div>
             <div class="bg-slate-950/70 p-1 rounded border border-slate-800">
-              <div class="text-[9px] text-emerald-400 font-medium">ZI-Data (BSS 清零)</div>
+              <div class="text-[9px] text-emerald-400 font-medium">{{ t("fra_zi_label") }}</div>
               <div class="font-mono font-semibold text-slate-200 text-[10px]">{{ analysisData.summary.zi_data_str }}</div>
               <div class="text-[8px] text-slate-500 font-mono">{{ analysisData.summary.ram_zi_ratio }}%</div>
             </div>
@@ -801,7 +802,7 @@ onMounted(() => {
             <Sparkles class="w-4 h-4" />
           </div>
           <div class="min-w-0 flex-1">
-            <div class="text-[10px] text-slate-400">最大函数 (Max Func)</div>
+            <div class="text-[10px] text-slate-400">{{ t("fra_max_func_label") }}</div>
             <div class="font-bold text-slate-200 text-xs truncate" :title="analysisData.top_metrics.max_function.name">
               {{ analysisData.top_metrics.max_function.name }}
             </div>
@@ -827,7 +828,7 @@ onMounted(() => {
             <Box class="w-4 h-4" />
           </div>
           <div class="min-w-0 flex-1">
-            <div class="text-[10px] text-slate-400">最大变量/对象 (Max Obj)</div>
+            <div class="text-[10px] text-slate-400">{{ t("fra_max_obj_label") }}</div>
             <div class="font-bold text-slate-200 text-xs truncate" :title="analysisData.top_metrics.max_object.name">
               {{ analysisData.top_metrics.max_object.name }}
             </div>
@@ -843,11 +844,11 @@ onMounted(() => {
             <ShieldAlert class="w-4 h-4" />
           </div>
           <div class="min-w-0 flex-1">
-            <div class="text-[10px] text-slate-400">总对齐填充 (Padding)</div>
+            <div class="text-[10px] text-slate-400">{{ t("fra_total_pad_label") }}</div>
             <div class="font-bold text-slate-300 text-xs font-mono">
               {{ analysisData.top_metrics.total_padding.size_str }}
             </div>
-            <div class="text-[10px] text-slate-500">段对齐与字节空隙</div>
+            <div class="text-[10px] text-slate-500">{{ t("fra_pad_subtip") }}</div>
           </div>
         </div>
 
@@ -862,12 +863,12 @@ onMounted(() => {
           </div>
           <div class="min-w-0 flex-1">
             <div class="text-[10px] text-slate-400 flex items-center justify-between">
-              <span>堆栈安全间隙</span>
+              <span>{{ t("fra_heap_stack_gap") }}</span>
               <span
                 v-if="analysisData.top_metrics.heap_stack_gap.low_margin"
                 class="text-[9px] px-1 bg-rose-950 text-rose-400 rounded border border-rose-800"
               >
-                ⚠️ 低余量
+                {{ t("fra_low_margin_badge") }}
               </span>
             </div>
             <div class="font-bold text-slate-200 text-xs font-mono">
@@ -888,7 +889,7 @@ onMounted(() => {
             :class="activeSubTab === 'treemap' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'"
           >
             <LayoutGrid class="w-3.5 h-3.5" />
-            <span>Treemap 矩阵树图</span>
+            <span>{{ t("fra_tab_treemap") }}</span>
           </button>
           <button
             @click="activeSubTab = 'linear'"
@@ -896,7 +897,7 @@ onMounted(() => {
             :class="activeSubTab === 'linear' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'"
           >
             <BarChart3 class="w-3.5 h-3.5" />
-            <span>线性物理内存布局</span>
+            <span>{{ t("fra_tab_linear") }}</span>
           </button>
           <button
             @click="activeSubTab = 'modules'"
@@ -904,7 +905,7 @@ onMounted(() => {
             :class="activeSubTab === 'modules' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'"
           >
             <FileCode class="w-3.5 h-3.5" />
-            <span>模块明细表 ({{ analysisData.modules.length }})</span>
+            <span>{{ t("fra_tab_modules", { count: analysisData.modules.length }) }}</span>
           </button>
           <button
             @click="activeSubTab = 'sections'"
@@ -912,13 +913,13 @@ onMounted(() => {
             :class="activeSubTab === 'sections' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'"
           >
             <Layers class="w-3.5 h-3.5" />
-            <span>物理段分布 ({{ analysisData.sections.length }})</span>
+            <span>{{ t("fra_tab_sections", { count: analysisData.sections.length }) }}</span>
           </button>
         </div>
 
         <!-- Treemap Region Switcher (when treemap is active) -->
         <div v-if="activeSubTab === 'treemap'" class="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded border border-slate-800 text-xs">
-          <span class="text-slate-400 text-[11px]">观察域:</span>
+          <span class="text-slate-400 text-[11px]">{{ t("fra_scope_label") }}</span>
           <button
             @click="treemapRegion = 'flash'"
             class="px-2 py-0.5 rounded text-xs transition"
@@ -942,7 +943,7 @@ onMounted(() => {
             <input
               v-model="searchQuery"
               type="text"
-              placeholder="搜索源文件、函数名或变量..."
+              :placeholder="t('fra_search_placeholder')"
               class="w-full bg-slate-950 border border-slate-800 rounded pl-8 pr-3 py-1.5 text-slate-200 outline-none focus:border-indigo-500 text-xs"
             />
           </div>
@@ -955,25 +956,25 @@ onMounted(() => {
             @click="expandedModules.size > 0 ? collapseAllModules() : expandAllModules()"
             class="flex items-center gap-1 px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors text-xs"
           >
-            <span>{{ expandedModules.size > 0 ? '全部折叠' : '全部展开' }}</span>
+            <span>{{ expandedModules.size > 0 ? t('fra_btn_collapse_all') : t('fra_btn_expand_all') }}</span>
           </button>
 
           <button
             @click="exportMarkdownReport"
             class="flex items-center gap-1 px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors text-xs font-medium border border-slate-700"
-            title="生成 Markdown 格式分析总结并复制到剪贴板"
+            :title="t('fra_tip_export_md')"
           >
             <component :is="isCopied ? Check : Copy" class="w-3.5 h-3.5 text-emerald-400" />
-            <span>{{ isCopied ? '报告已复制!' : '导出 Markdown 报告' }}</span>
+            <span>{{ isCopied ? t('fra_btn_copied_md') : t('fra_btn_export_md') }}</span>
           </button>
 
           <button
             @click="exportCsv"
             class="flex items-center gap-1 px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors text-xs font-medium border border-slate-700"
-            title="导出 CSV 数据表便于在 Excel 中透视分析"
+            :title="t('fra_tip_export_csv')"
           >
             <Download class="w-3.5 h-3.5 text-cyan-400" />
-            <span>导出 CSV 表格</span>
+            <span>{{ t("fra_btn_export_csv") }}</span>
           </button>
         </div>
       </div>
@@ -985,7 +986,7 @@ onMounted(() => {
           <div class="flex items-center justify-between pb-2 border-b border-slate-800 text-xs font-semibold text-slate-200">
             <span class="flex items-center gap-1.5">
               <Layers class="w-3.5 h-3.5 text-indigo-400" />
-              <span>层级导航树 (Hierarchy)</span>
+              <span>{{ t("fra_hierarchy_title") }}</span>
             </span>
           </div>
 
@@ -1030,7 +1031,7 @@ onMounted(() => {
               </div>
             </template>
             <div v-else class="text-slate-500 text-center py-6">
-              解析器正在整理层级树...
+              {{ t("fra_loading_tree") }}
             </div>
           </div>
         </div>
@@ -1045,10 +1046,10 @@ onMounted(() => {
             <div class="flex items-center justify-between pb-2 border-b border-slate-800 text-xs gap-2">
               <div class="flex items-center gap-2">
                 <span class="font-semibold text-slate-200">
-                  {{ treemapRegion === 'flash' ? 'Flash 固件占用矩阵树图' : 'RAM 运行时静态内存矩阵树图' }}
+                  {{ treemapRegion === 'flash' ? t('fra_treemap_flash_title') : t('fra_treemap_ram_title') }}
                 </span>
                 <span class="text-[10px] text-slate-500 font-mono hidden md:inline">
-                  (按面积成正比，点击方块查看右侧属性)
+                  {{ t("fra_treemap_tip") }}
                 </span>
               </div>
               <div class="flex items-center gap-3">
@@ -1061,11 +1062,11 @@ onMounted(() => {
                 <button
                   @click="isTreemapExpanded = !isTreemapExpanded"
                   class="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 text-[11px] transition shadow-sm"
-                  :title="isTreemapExpanded ? '还原默认高度 (560px)' : '放大展开树图高度 (780px)'"
+                  :title="isTreemapExpanded ? t('fra_tip_treemap_restore') : t('fra_tip_treemap_expand')"
                 >
                   <Maximize2 v-if="!isTreemapExpanded" class="w-3 h-3" />
                   <Minimize2 v-else class="w-3 h-3" />
-                  <span>{{ isTreemapExpanded ? '还原' : '放大' }}</span>
+                  <span>{{ isTreemapExpanded ? t('fra_btn_restore') : t('fra_btn_expand') }}</span>
                 </button>
               </div>
             </div>
@@ -1166,7 +1167,7 @@ onMounted(() => {
                     {{ activeInspectItem.size_str }}
                   </span>
                   <span v-if="activeInspectItem.percent !== undefined" class="text-indigo-300 font-semibold text-[11px]">
-                    占比: {{ activeInspectItem.percent }}%
+                    {{ t("fra_percent_label", { pct: activeInspectItem.percent }) }}
                   </span>
                 </div>
               </div>
@@ -1176,8 +1177,8 @@ onMounted(() => {
           <!-- View 2: Linear Physical Memory Layout (Flash & RAM Contiguous Bars) -->
           <template v-else-if="activeSubTab === 'linear'">
             <div class="flex items-center justify-between pb-2 border-b border-slate-800 text-xs">
-              <span class="font-semibold text-slate-200">物理连续地址空间线性分布</span>
-              <span class="text-[10px] text-slate-500 font-mono">从低地址到高地址连续排布</span>
+              <span class="font-semibold text-slate-200">{{ t("fra_linear_dist_title") }}</span>
+              <span class="text-[10px] text-slate-500 font-mono">{{ t("fra_linear_dist_sub") }}</span>
             </div>
 
             <div class="flex-1 mt-3 space-y-6 overflow-y-auto pr-1">
@@ -1186,7 +1187,7 @@ onMounted(() => {
                 <div class="flex justify-between items-center text-xs">
                   <span class="font-bold text-cyan-400 flex items-center gap-1.5">
                     <HardDrive class="w-3.5 h-3.5" />
-                    <span>FLASH 物理线性空间 (0x00000000 ~ )</span>
+                    <span>{{ t("fra_flash_linear_title") }}</span>
                   </span>
                   <span class="font-mono text-slate-400 text-[11px]">
                     总容量: {{ analysisData.summary.chip_flash_str }} (已用 {{ analysisData.summary.rom_total_str }})
@@ -1246,7 +1247,7 @@ onMounted(() => {
                 <div class="flex justify-between items-center text-xs">
                   <span class="font-bold text-emerald-400 flex items-center gap-1.5">
                     <Layers class="w-3.5 h-3.5" />
-                    <span>SRAM 物理线性空间 (0x20000000 ~ )</span>
+                    <span>{{ t("fra_sram_linear_title") }}</span>
                   </span>
                   <span class="font-mono text-slate-400 text-[11px]">
                     总容量: {{ analysisData.summary.chip_ram_str }} (已用 {{ analysisData.summary.ram_total_str }})
@@ -1309,14 +1310,14 @@ onMounted(() => {
           <div class="flex items-center justify-between pb-2 border-b border-slate-800 text-xs font-semibold text-slate-200">
             <span class="flex items-center gap-1.5">
               <Info class="w-3.5 h-3.5 text-indigo-400" />
-              <span>所选条目详情 (Details)</span>
+              <span>{{ t("fra_details_title") }}</span>
             </span>
           </div>
 
           <div v-if="selectedItem" class="mt-3 space-y-3 text-xs overflow-y-auto">
             <!-- Name & Category -->
             <div class="bg-slate-950 p-2.5 rounded border border-slate-800 space-y-1">
-              <div class="text-[10px] text-slate-500 uppercase tracking-wider">符号 / 段名称</div>
+              <div class="text-[10px] text-slate-500 uppercase tracking-wider">{{ t("fra_th_sym_section") }}</div>
               <div class="font-bold text-white text-sm break-all font-mono">
                 {{ selectedItem.name }}
               </div>
@@ -1333,15 +1334,15 @@ onMounted(() => {
             <!-- Size & Percent -->
             <div class="bg-slate-950 p-2.5 rounded border border-slate-800 space-y-2 font-mono">
               <div class="flex justify-between items-center">
-                <span class="text-slate-400 font-sans">占用大小:</span>
+                <span class="text-slate-400 font-sans">{{ t("fra_detail_size") }}</span>
                 <span class="font-bold text-cyan-400 text-sm">{{ selectedItem.size_str }}</span>
               </div>
               <div class="flex justify-between items-center text-[11px]">
-                <span class="text-slate-500 font-sans">字节数:</span>
+                <span class="text-slate-500 font-sans">{{ t("fra_detail_bytes") }}</span>
                 <span class="text-slate-300">{{ selectedItem.size.toLocaleString() }} Bytes</span>
               </div>
               <div v-if="selectedItem.percent" class="flex justify-between items-center text-[11px]">
-                <span class="text-slate-500 font-sans">总占比:</span>
+                <span class="text-slate-500 font-sans">{{ t("fra_detail_pct") }}</span>
                 <span class="text-amber-400 font-semibold">{{ selectedItem.percent }}%</span>
               </div>
             </div>
@@ -1349,15 +1350,15 @@ onMounted(() => {
             <!-- Address / Range -->
             <div v-if="selectedItem.address || selectedItem.start" class="bg-slate-950 p-2.5 rounded border border-slate-800 space-y-1.5 font-mono text-[11px]">
               <div v-if="selectedItem.address" class="flex justify-between">
-                <span class="text-slate-500 font-sans">物理地址 (VMA):</span>
+                <span class="text-slate-500 font-sans">{{ t("fra_detail_vma") }}</span>
                 <span class="text-slate-200">{{ selectedItem.address }}</span>
               </div>
               <div v-if="selectedItem.start" class="flex justify-between">
-                <span class="text-slate-500 font-sans">起始地址:</span>
+                <span class="text-slate-500 font-sans">{{ t("fra_detail_start") }}</span>
                 <span class="text-slate-200">{{ selectedItem.start }}</span>
               </div>
               <div v-if="selectedItem.end" class="flex justify-between">
-                <span class="text-slate-500 font-sans">终止地址:</span>
+                <span class="text-slate-500 font-sans">{{ t("fra_detail_end") }}</span>
                 <span class="text-slate-200">{{ selectedItem.end }}</span>
               </div>
             </div>
@@ -1365,11 +1366,11 @@ onMounted(() => {
             <!-- Object / Library Info -->
             <div v-if="selectedItem.object || selectedItem.library" class="bg-slate-950 p-2.5 rounded border border-slate-800 space-y-1.5 text-[11px]">
               <div v-if="selectedItem.object">
-                <div class="text-slate-500 text-[10px]">所属目标文件 (Object):</div>
+                <div class="text-slate-500 text-[10px]">{{ t("fra_detail_obj") }}</div>
                 <div class="font-mono text-slate-200 break-all">{{ selectedItem.object }}</div>
               </div>
               <div v-if="selectedItem.library">
-                <div class="text-slate-500 text-[10px]">所属静态库 (Library):</div>
+                <div class="text-slate-500 text-[10px]">{{ t("fra_detail_lib") }}</div>
                 <div class="font-mono text-slate-200 break-all">{{ selectedItem.library }}</div>
               </div>
             </div>
@@ -1377,7 +1378,7 @@ onMounted(() => {
 
           <div v-else class="flex-1 flex flex-col items-center justify-center text-slate-500 text-center p-4">
             <LayoutGrid class="w-8 h-8 text-slate-700 mb-2" />
-            <p>在左侧树图或中间矩阵树图中点击任意代码块查看深入属性。</p>
+            <p>{{ t("fra_detail_hint") }}</p>
           </div>
         </div>
       </div>
@@ -1391,26 +1392,26 @@ onMounted(() => {
                 <th class="p-2.5 w-10 text-center">#</th>
                 <th class="p-2.5 cursor-pointer hover:text-slate-200" @click="sortField = 'name'; sortAsc = !sortAsc">
                   <div class="flex items-center gap-1">
-                    <span>模块源文件名 (Module / File)</span>
+                    <span>{{ t("fra_th_mod_name") }}</span>
                     <ArrowUpDown class="w-3 h-3 text-slate-500" />
                   </div>
                 </th>
                 <th class="p-2.5 cursor-pointer hover:text-slate-200" @click="sortField = 'rom_total'; sortAsc = !sortAsc">
                   <div class="flex items-center gap-1 justify-end">
-                    <span>ROM 总计</span>
+                    <span>{{ t("fra_th_rom_total") }}</span>
                     <ArrowUpDown class="w-3 h-3 text-cyan-400" />
                   </div>
                 </th>
                 <th class="p-2.5 cursor-pointer hover:text-slate-200" @click="sortField = 'code'; sortAsc = !sortAsc">
                   <div class="flex items-center gap-1 justify-end">
-                    <span>Code (代码)</span>
+                    <span>{{ t("fra_th_code") }}</span>
                     <ArrowUpDown class="w-3 h-3 text-slate-500" />
                   </div>
                 </th>
                 <th class="p-2.5 text-right">RO-Data</th>
                 <th class="p-2.5 cursor-pointer hover:text-slate-200" @click="sortField = 'ram_total'; sortAsc = !sortAsc">
                   <div class="flex items-center gap-1 justify-end">
-                    <span>RAM 总计</span>
+                    <span>{{ t("fra_th_ram_total") }}</span>
                     <ArrowUpDown class="w-3 h-3 text-emerald-400" />
                   </div>
                 </th>
@@ -1421,8 +1422,8 @@ onMounted(() => {
                     <ArrowUpDown class="w-3 h-3 text-slate-500" />
                   </div>
                 </th>
-                <th class="p-2.5 text-center w-24">函数/变量数</th>
-                <th class="p-2.5 text-center w-20">操作</th>
+                <th class="p-2.5 text-center w-24">{{ t("fra_th_sym_count") }}</th>
+                <th class="p-2.5 text-center w-20">{{ t("fra_th_action") }}</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-800/60 font-mono">
@@ -1464,7 +1465,7 @@ onMounted(() => {
                       @click="toggleExpandModule(mod.name)"
                       class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] transition-colors"
                     >
-                      {{ expandedModules.has(mod.name) ? '收起' : '明细' }}
+                      {{ expandedModules.has(mod.name) ? t('fra_btn_collapse') : t('fra_btn_detail') }}
                     </button>
                   </td>
                 </tr>
@@ -1475,26 +1476,26 @@ onMounted(() => {
                     <div class="bg-slate-900 border border-slate-800 rounded p-3 space-y-2">
                       <div class="flex items-center justify-between text-[11px] border-b border-slate-800 pb-1.5">
                         <span class="font-semibold text-slate-300">
-                          📦 模块符号明细: {{ mod.name }} (共 {{ mod.symbols.length }} 个符号)
+                          {{ t("fra_mod_sym_detail", { name: mod.name, count: mod.symbols.length }) }}
                         </span>
                         <span class="text-slate-500 font-mono text-[10px]">
-                          源路径: {{ mod.full_path }}
+                          {{ t("fra_mod_src_path", { path: mod.full_path }) }}
                         </span>
                       </div>
 
                       <div v-if="mod.symbols.length === 0" class="text-slate-500 py-2 text-center text-xs">
-                        该模块没有符号映射或由汇编静态分配
+                        {{ t("fra_mod_no_syms") }}
                       </div>
 
                       <div v-else class="max-h-60 overflow-y-auto pr-1">
                         <table class="w-full text-left border-collapse text-[11px] font-mono">
                           <thead>
                             <tr class="text-slate-500 border-b border-slate-800">
-                              <th class="py-1">符号名称 (Symbol Name)</th>
-                              <th class="py-1 w-24">类型</th>
-                              <th class="py-1 w-24">内存分类</th>
-                              <th class="py-1 w-28 text-right">物理地址</th>
-                              <th class="py-1 w-24 text-right">占用大小</th>
+                              <th class="py-1">{{ t("fra_th_sym_name") }}</th>
+                              <th class="py-1 w-24">{{ t("fra_th_type") }}</th>
+                              <th class="py-1 w-24">{{ t("fra_th_mem_cat") }}</th>
+                              <th class="py-1 w-28 text-right">{{ t("fra_th_phys_addr") }}</th>
+                              <th class="py-1 w-24 text-right">{{ t("fra_th_size_taken") }}</th>
                             </tr>
                           </thead>
                           <tbody class="divide-y divide-slate-800/60">
@@ -1507,7 +1508,7 @@ onMounted(() => {
                                   class="px-1.5 py-0.5 rounded text-[10px]"
                                   :class="sym.kind === 'func' ? 'bg-blue-900/40 text-blue-300' : 'bg-purple-900/40 text-purple-300'"
                                 >
-                                  {{ sym.kind === 'func' ? '函数 (Func)' : '对象 (Object)' }}
+                                  {{ sym.kind === 'func' ? t('fra_sym_func') : t('fra_sym_obj') }}
                                 </span>
                               </td>
                               <td class="py-1">
@@ -1547,13 +1548,13 @@ onMounted(() => {
             <thead>
               <tr class="bg-slate-950/80 border-b border-slate-800 text-slate-400 text-[11px] font-medium">
                 <th class="p-2.5 w-10 text-center">#</th>
-                <th class="p-2.5">段名称 (Section Name)</th>
-                <th class="p-2.5">ELF 类型 (Type)</th>
-                <th class="p-2.5">标志位 (Flags)</th>
-                <th class="p-2.5 text-right">加载基地址 (Address)</th>
-                <th class="p-2.5 text-right">段大小 (Size)</th>
-                <th class="p-2.5 text-center">存储目标</th>
-                <th class="p-2.5 text-center">归类属性</th>
+                <th class="p-2.5">{{ t("fra_th_sec_name") }}</th>
+                <th class="p-2.5">{{ t("fra_th_elf_type") }}</th>
+                <th class="p-2.5">{{ t("fra_th_flags") }}</th>
+                <th class="p-2.5 text-right">{{ t("fra_th_load_addr") }}</th>
+                <th class="p-2.5 text-right">{{ t("fra_th_sec_size") }}</th>
+                <th class="p-2.5 text-center">{{ t("fra_th_dest") }}</th>
+                <th class="p-2.5 text-center">{{ t("fra_th_category") }}</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-800/60">
@@ -1613,9 +1614,9 @@ onMounted(() => {
         <PieChart class="w-8 h-8" />
       </div>
       <div class="space-y-1 max-w-md">
-        <div class="font-semibold text-slate-200 text-sm">选择并分析固件或 Keil Linker MAP 映射</div>
+        <div class="font-semibold text-slate-200 text-sm">{{ t("fra_empty_guide_title") }}</div>
         <p class="text-slate-400 text-xs">
-          全面支持加载 Keil MDK (ARMCC / ARMClang) 导出的 <code class="text-emerald-400 bg-slate-800 px-1 py-0.5 rounded">*.map</code> 文件以及 ELF/AXF 目标文件。自动计算 Treemap 树图矩阵、物理线性内存分布以及最大函数/变量排行。
+          {{ t("fra_empty_guide_desc") }}
         </p>
       </div>
       <button
@@ -1623,27 +1624,27 @@ onMounted(() => {
         class="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-medium text-xs flex items-center gap-2 shadow-md transition-colors"
       >
         <FolderOpen class="w-4 h-4" />
-        <span>点击浏览选择本地 .map / .axf / .elf 文件</span>
+        <span>{{ t("fra_btn_browse_local") }}</span>
       </button>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-left max-w-lg w-full pt-2">
         <div class="bg-slate-950/80 p-3 rounded border border-slate-800 space-y-1">
           <div class="font-semibold text-cyan-400 text-[11px] flex items-center gap-1.5">
             <HardDrive class="w-3.5 h-3.5" />
-            <span>ROM (Flash) 开销计算规则</span>
+            <span>{{ t("fra_rule_rom_title") }}</span>
           </div>
           <p class="text-slate-400 text-[10px] font-mono leading-relaxed">
             ROM = Code + RO-Data + RW-Data<br />
-            (包含机器代码指令、只读静态常量及数据初始化烧录镜像)
+            {{ t("fra_rule_rom_desc") }}
           </p>
         </div>
         <div class="bg-slate-950/80 p-3 rounded border border-slate-800 space-y-1">
           <div class="font-semibold text-emerald-400 text-[11px] flex items-center gap-1.5">
             <Layers class="w-3.5 h-3.5" />
-            <span>RAM (SRAM) 开销计算规则</span>
+            <span>{{ t("fra_rule_ram_title") }}</span>
           </div>
           <p class="text-slate-400 text-[10px] font-mono leading-relaxed">
             RAM = RW-Data + ZI-Data (BSS)<br />
-            (包含可读写变量及上电时需由启动汇编清零的未初始化静态内存)
+            {{ t("fra_rule_ram_desc") }}
           </p>
         </div>
       </div>

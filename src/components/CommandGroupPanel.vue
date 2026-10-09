@@ -23,6 +23,7 @@ import {
   Repeat,
   Sparkles
 } from 'lucide-vue-next';
+import { t } from '../utils/i18n';
 
 const props = defineProps<{
   isConnected: boolean;
@@ -66,7 +67,7 @@ const loopCounter = ref<number>(0);
  */
 async function sendSingleCommand(cmd: CommandItem) {
   if (!props.isConnected) {
-    emit('log', `无法发送 [${cmd.label}]: 串口未连接`, 'error');
+    emit('log', t('cmd_send_err_no_conn', { label: cmd.label }), 'error');
     return;
   }
 
@@ -79,7 +80,7 @@ async function sendSingleCommand(cmd: CommandItem) {
     emit('bytesSent', count);
     emit('log', `[TX] ${textDisplay}`, 'tx');
   } catch (err: any) {
-    emit('log', `发送失败 [${cmd.label}]: ${err.message || err}`, 'error');
+    emit('log', t('cmd_send_err', { label: cmd.label, err: err.message || err }), 'error');
   }
 }
 
@@ -90,7 +91,7 @@ async function startBatchExecution() {
   if (!activeGroup.value || !props.isConnected) return;
   const enabledCmds = activeGroup.value.commands.filter(c => c.enabled);
   if (enabledCmds.length === 0) {
-    emit('log', '当前命令组中没有勾选任何指令', 'info');
+    emit('log', t('cmd_no_checked'), 'info');
     return;
   }
 
@@ -98,7 +99,7 @@ async function startBatchExecution() {
   abortController.value = false;
   loopCounter.value = 0;
 
-  emit('log', `▶ 开始执行命令组: [${activeGroup.value.name}] (共 ${enabledCmds.length} 条勾选指令)`, 'info');
+  emit('log', t('cmd_run_start', { name: activeGroup.value.name, count: enabledCmds.length }), 'info');
 
   do {
     loopCounter.value++;
@@ -128,14 +129,14 @@ async function startBatchExecution() {
   isBatchRunning.value = false;
   currentRunningIndex.value = -1;
   abortController.value = false;
-  emit('log', `⏹ 命令组执行完毕`, 'info');
+  emit('log', t('cmd_run_finish'), 'info');
 }
 
 function stopBatchExecution() {
   abortController.value = true;
   isBatchRunning.value = false;
   currentRunningIndex.value = -1;
-  emit('log', '⏹ 用户已手动中断批量执行', 'info');
+  emit('log', t('cmd_run_user_stop'), 'info');
 }
 
 onUnmounted(() => {
@@ -150,7 +151,7 @@ const isNewCommand = ref(false);
 function openAddCommandModal() {
   editingCommand.value = {
     id: 'cmd_' + Date.now(),
-    label: '新建指令',
+    label: t('cmd_new_item_label'),
     payload: 'AT',
     format: 'string',
     lineEnding: 'crlf',
@@ -193,7 +194,7 @@ function createNewGroup() {
   const newId = 'grp_' + Date.now();
   const newGroup: CommandGroup = {
     id: newId,
-    name: '新建命令组 ' + (groups.value.length + 1),
+    name: t('cmd_new_group_name', { index: groups.value.length + 1 }),
     commands: [],
     loop: false,
     loopIntervalMs: 1000,
@@ -204,10 +205,10 @@ function createNewGroup() {
 
 function deleteCurrentGroup() {
   if (groups.value.length <= 1) {
-    alert('至少需要保留一个命令组');
+    alert(t('cmd_keep_one_group'));
     return;
   }
-  if (confirm(`确定要删除命令组 "${activeGroup.value?.name}" 吗？`)) {
+  if (confirm(t('cmd_confirm_delete_group', { name: activeGroup.value?.name || '' }))) {
     groups.value = groups.value.filter(g => g.id !== activeGroupId.value);
     activeGroupId.value = groups.value[0]?.id || '';
   }
@@ -238,12 +239,12 @@ function importGroupsJson() {
         if (Array.isArray(parsed) && parsed.length > 0) {
           groups.value = parsed;
           activeGroupId.value = parsed[0].id;
-          emit('log', `成功导入 ${parsed.length} 个命令组`, 'info');
+          emit('log', t('cmd_import_success', { count: parsed.length }), 'info');
         } else {
-          alert('JSON 格式不符合命令组规范');
+          alert(t('cmd_import_invalid_format'));
         }
       } catch (err: any) {
-        alert('解析 JSON 失败: ' + err.message);
+        alert(t('cmd_import_parse_err', { err: err.message }));
       }
     };
     reader.readAsText(file);
@@ -266,33 +267,33 @@ defineExpose({
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-1.5 font-bold text-zinc-200">
           <Layers class="w-4 h-4 text-emerald-400" />
-          <span>快捷命令组管理</span>
+          <span>{{ t('cmd_title') }}</span>
         </div>
         <div class="flex items-center gap-1">
           <button
             @click="createNewGroup"
-            title="新建命令组"
+            :title="t('cmd_btn_new_group')"
             class="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors"
           >
             <Plus class="w-3.5 h-3.5" />
           </button>
           <button
             @click="exportGroupsJson"
-            title="导出全部命令组为 JSON"
+            :title="t('cmd_btn_export_json')"
             class="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors"
           >
             <Download class="w-3.5 h-3.5" />
           </button>
           <button
             @click="importGroupsJson"
-            title="从 JSON 文件导入命令组"
+            :title="t('cmd_btn_import_json')"
             class="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors"
           >
             <Upload class="w-3.5 h-3.5" />
           </button>
           <button
             @click="deleteCurrentGroup"
-            title="删除当前命令组"
+            :title="t('cmd_btn_delete_group')"
             class="p-1 rounded bg-zinc-800 hover:bg-rose-900/60 text-zinc-400 hover:text-rose-300 transition-colors"
           >
             <Trash2 class="w-3.5 h-3.5" />
@@ -307,7 +308,7 @@ defineExpose({
           class="flex-1 bg-zinc-900 border border-zinc-700/80 rounded px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-emerald-500"
         >
           <option v-for="g in groups" :key="g.id" :value="g.id">
-            {{ g.name }} ({{ g.commands.length }}条)
+            {{ g.name }} ({{ g.commands.length }})
           </option>
         </select>
       </div>
@@ -317,7 +318,7 @@ defineExpose({
         <input
           v-model="activeGroup.name"
           type="text"
-          placeholder="命令组名称"
+          :placeholder="t('cmd_group_name_placeholder')"
           class="flex-1 bg-zinc-900 border border-zinc-800 focus:border-zinc-700 rounded px-2 py-1 text-[11px] text-zinc-300 outline-none"
         />
       </div>
@@ -333,7 +334,7 @@ defineExpose({
             class="flex items-center gap-1.5 px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs transition-colors shadow-sm disabled:opacity-40 disabled:hover:bg-emerald-600"
           >
             <Play class="w-3.5 h-3.5 fill-current" />
-            <span>顺序执行勾选项</span>
+            <span>{{ t('cmd_seq_run') }}</span>
           </button>
           <button
             v-else
@@ -341,7 +342,7 @@ defineExpose({
             class="flex items-center gap-1.5 px-3 py-1.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs transition-colors shadow-sm animate-pulse"
           >
             <Square class="w-3.5 h-3.5 fill-current" />
-            <span>停止执行 (第{{ loopCounter }}轮)</span>
+            <span>{{ t('cmd_stop_run') }} (#{{ loopCounter }})</span>
           </button>
 
           <!-- Loop toggle -->
@@ -353,7 +354,7 @@ defineExpose({
             />
             <span class="flex items-center gap-0.5">
               <Repeat class="w-3 h-3" />
-              <span>循环</span>
+              <span>{{ t('cmd_loop') }}</span>
             </span>
           </label>
         </div>
@@ -364,7 +365,7 @@ defineExpose({
           class="flex items-center gap-1 px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors"
         >
           <Plus class="w-3 h-3" />
-          <span>添加指令</span>
+          <span>{{ t('cmd_add') }}</span>
         </button>
       </div>
     </div>
@@ -376,12 +377,12 @@ defineExpose({
         class="h-48 flex flex-col items-center justify-center text-zinc-500 text-center gap-2"
       >
         <Sparkles class="w-8 h-8 text-zinc-700" />
-        <span>当前组尚无指令</span>
+        <span>{{ t('cmd_empty') }}</span>
         <button
           @click="openAddCommandModal"
           class="px-3 py-1 rounded bg-emerald-950/80 border border-emerald-800 text-emerald-400 hover:bg-emerald-900 transition-colors text-xs"
         >
-          + 点击添加第一条指令
+          {{ t('cmd_empty_add') }}
         </button>
       </div>
 
@@ -402,7 +403,7 @@ defineExpose({
             <input
               type="checkbox"
               v-model="cmd.enabled"
-              title="是否包含在顺序批量执行中"
+              :title="t('cmd_include_in_batch')"
               class="accent-emerald-500 rounded cursor-pointer shrink-0"
             />
             <span class="text-[10px] font-mono text-zinc-500 shrink-0">#{{ idx + 1 }}</span>
@@ -415,17 +416,17 @@ defineExpose({
             <button
               @click="sendSingleCommand(cmd)"
               :disabled="!isConnected || isBatchRunning"
-              title="单独发送此条指令"
+              :title="t('cmd_single_send')"
               class="flex items-center gap-1 px-2 py-0.5 rounded bg-sky-950/80 hover:bg-sky-900 border border-sky-800/60 text-sky-300 font-medium text-[11px] transition-colors disabled:opacity-30"
             >
               <Send class="w-2.5 h-2.5" />
-              <span>单发</span>
+              <span>{{ t('cmd_single_send') }}</span>
             </button>
 
             <!-- Edit Button -->
             <button
               @click="openEditCommandModal(cmd)"
-              title="编辑此指令"
+              :title="t('cmd_edit_instruction')"
               class="p-1 rounded text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
             >
               <Edit2 class="w-3 h-3" />
@@ -434,7 +435,7 @@ defineExpose({
             <!-- Delete Button -->
             <button
               @click="deleteCommand(cmd.id)"
-              title="删除此指令"
+              :title="t('cmd_delete_instruction')"
               class="p-1 rounded text-zinc-500 hover:text-rose-400 hover:bg-zinc-800 transition-colors"
             >
               <Trash2 class="w-3 h-3" />
@@ -482,7 +483,7 @@ defineExpose({
                   ? '+LF (\\n)'
                   : cmd.lineEnding === 'cr'
                   ? '+CR (\\r)'
-                  : '无换行(RAW)'
+                  : t('cmd_line_ending_raw')
               }}
             </span>
           </div>
@@ -504,7 +505,7 @@ defineExpose({
       <div class="bg-zinc-900 border border-zinc-700 rounded-lg shadow-xl w-full max-w-sm p-4 flex flex-col gap-3 text-xs">
         <div class="flex items-center justify-between border-b border-zinc-800 pb-2">
           <span class="font-bold text-zinc-100 text-sm">
-            {{ isNewCommand ? '添加新指令' : '编辑指令' }}
+            {{ isNewCommand ? t('cmd_dialog_add') : t('cmd_dialog_edit') }}
           </span>
           <button @click="isEditModalOpen = false" class="text-zinc-400 hover:text-white">
             <X class="w-4 h-4" />
@@ -513,11 +514,11 @@ defineExpose({
 
         <!-- Label -->
         <div>
-          <label class="block text-zinc-400 text-[11px] mb-1">指令标签 / 名称:</label>
+          <label class="block text-zinc-400 text-[11px] mb-1">{{ t("cmd_field_label") }}</label>
           <input
             v-model="editingCommand.label"
             type="text"
-            placeholder="例如: AT握手、查询信号、唤醒帧"
+            :placeholder="t('cmd_field_label_placeholder')"
             class="w-full bg-zinc-950 border border-zinc-700 rounded px-2.5 py-1.5 text-zinc-100 outline-none focus:border-emerald-500"
           />
         </div>
@@ -525,27 +526,27 @@ defineExpose({
         <!-- Format & Line Ending -->
         <div class="grid grid-cols-2 gap-2">
           <div>
-            <label class="block text-zinc-400 text-[11px] mb-1">数据格式:</label>
+            <label class="block text-zinc-400 text-[11px] mb-1">{{ t("cmd_field_format") }}</label>
             <select
               v-model="editingCommand.format"
               class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1.5 text-zinc-100 outline-none"
             >
-              <option value="string">文本 (String)</option>
-              <option value="hex">十六进制 (HEX)</option>
+              <option value="string">{{ t("cmd_fmt_string") }}</option>
+              <option value="hex">{{ t("cmd_fmt_hex") }}</option>
             </select>
           </div>
 
           <div>
-            <label class="block text-zinc-400 text-[11px] mb-1">换行符结束标记:</label>
+            <label class="block text-zinc-400 text-[11px] mb-1">{{ t("cmd_field_line_ending") }}</label>
             <select
               v-model="editingCommand.lineEnding"
               :disabled="editingCommand.format === 'hex'"
               class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1.5 text-zinc-100 outline-none disabled:opacity-40"
             >
-              <option value="crlf">+CRLF (\r\n) [AT标准]</option>
+              <option value="crlf">{{ t("cmd_line_ending_crlf_at") }}</option>
               <option value="lf">+LF (\n) [Shell]</option>
               <option value="cr">+CR (\r)</option>
-              <option value="none">无换行 (RAW)</option>
+              <option value="none">{{ t("cmd_line_ending_none_raw") }}</option>
             </select>
           </div>
         </div>
@@ -553,22 +554,22 @@ defineExpose({
         <!-- Payload -->
         <div>
           <label class="block text-zinc-400 text-[11px] mb-1">
-            发送内容:
+            {{ t("cmd_field_payload") }}
             <span class="text-zinc-500 font-normal">
-              {{ editingCommand.format === 'hex' ? '(格式如: 01 03 00 00 00 02 C4 0B)' : '(无需输入\\r\\n，系统会自动追加)' }}
+              {{ editingCommand.format === 'hex' ? t('cmd_field_payload_tip_hex') : t('cmd_field_payload_tip_str') }}
             </span>
           </label>
           <textarea
             v-model="editingCommand.payload"
             rows="3"
-            placeholder="输入发送字符或 HEX 字节..."
+            :placeholder="t('cmd_payload_placeholder')"
             class="w-full bg-zinc-950 border border-zinc-700 rounded px-2.5 py-1.5 text-zinc-100 font-mono outline-none focus:border-emerald-500"
           ></textarea>
         </div>
 
         <!-- Delay -->
         <div>
-          <label class="block text-zinc-400 text-[11px] mb-1">连续执行后的等待延时 (毫秒):</label>
+          <label class="block text-zinc-400 text-[11px] mb-1">{{ t("cmd_field_delay") }}</label>
           <input
             v-model.number="editingCommand.delayAfterMs"
             type="number"
@@ -584,7 +585,7 @@ defineExpose({
             @click="isEditModalOpen = false"
             class="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
           >
-            取消
+            {{ t("cmd_btn_cancel") }}
           </button>
           <button
             @click="saveEditingCommand"
@@ -592,7 +593,7 @@ defineExpose({
             class="flex items-center gap-1 px-4 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold transition-colors disabled:opacity-40"
           >
             <Check class="w-3.5 h-3.5" />
-            <span>保存</span>
+            <span>{{ t("cmd_btn_save") }}</span>
           </button>
         </div>
       </div>

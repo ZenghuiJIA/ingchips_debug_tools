@@ -107,12 +107,12 @@ const isConnectingNetwork = ref<boolean>(false);
 
 // RTT RAM presets for new tab
 const rttRamPresets = [
-  { label: 'SRAM 0x20000000 (128KB 常用M4/M3)', start: 0x20000000, size: 0x20000 },
-  { label: 'SRAM 0x20000000 (64KB 常用M0/M3)', start: 0x20000000, size: 0x10000 },
-  { label: 'SRAM 0x20000000 (256KB 大RAM)', start: 0x20000000, size: 0x40000 },
-  { label: 'SRAM 0x20000000 (512KB 高性能M7/M4)', start: 0x20000000, size: 0x80000 },
-  { label: 'AXI-SRAM 0x24000000 (512KB H7系列)', start: 0x24000000, size: 0x80000 },
-  { label: '自定义 / Pack解析地址', start: -1, size: -1 },
+  { label: t('term_ram_preset_128k'), start: 0x20000000, size: 0x20000 },
+  { label: t('term_ram_preset_64k'), start: 0x20000000, size: 0x10000 },
+  { label: t('term_ram_preset_256k'), start: 0x20000000, size: 0x40000 },
+  { label: t('term_ram_preset_512k'), start: 0x20000000, size: 0x80000 },
+  { label: t('term_ram_preset_axi512k'), start: 0x24000000, size: 0x80000 },
+  { label: t('term_ram_preset_custom'), start: -1, size: -1 },
 ];
 const newPortRttRamPreset = ref<number>(0x20000000);
 const newPortRttRamSize = ref<number>(0x20000);
@@ -149,14 +149,14 @@ function handleNewPortPackDeviceChange() {
 async function importPackForNewPortRtt() {
   try {
     const selected: string | null = await safeInvoke('pick_pack_file', {
-      title: '选择芯片 CMSIS-Pack 文件以解析默认 RAM / RTT 地址'
+      title: t('term_pick_pack_title')
     });
     if (selected) {
       isNewPortImportingPack.value = true;
       const res: any = await safeInvoke('svd_import_pack', { packPath: selected });
       if (res && res.devices && res.devices.length > 0) {
         newPortPackDevices.value = res.devices;
-        newPortImportedPackInfo.value = `${res.pack}: 成功解析到 ${res.devices.length} 个芯片型号`;
+        newPortImportedPackInfo.value = t('term_pack_parsed_success', { pack: res.pack, count: res.devices.length });
         const dev = res.devices[0];
         newPortSelectedPackDevice.value = dev.name;
         applyNewPortDeviceRam(dev);
@@ -164,7 +164,7 @@ async function importPackForNewPortRtt() {
       }
     }
   } catch (err: any) {
-    alert(`导入 Pack 解析失败: ${err}`);
+    alert(t('term_alert_pack_parse_err', { err }));
   } finally {
     isNewPortImportingPack.value = false;
   }
@@ -211,7 +211,7 @@ async function toggleTabConnection(tab: TerminalSessionTab) {
       }
       tab.isConnected = true;
     } catch (err: any) {
-      alert(`打开端口 ${tab.portName} 失败: ${err}`);
+      alert(t('term_alert_open_port_err', { port: tab.portName, err }));
     }
   }
 }
@@ -231,7 +231,7 @@ async function handleTabBaudChange(tab: TerminalSessionTab, newBaud: number) {
       });
       tab.isConnected = true;
     } catch (err: any) {
-      alert(`调整波特率至 ${newBaud} 失败: ${err}`);
+      alert(t('term_alert_baud_err', { baud: newBaud, err }));
       tab.isConnected = false;
     }
   }
@@ -326,7 +326,7 @@ async function confirmOpenNewPort() {
       activeTabId.value = tab.id;
       isNewPortModalOpen.value = false;
     } catch (err: any) {
-      alert(`创建网络数据流 ${streamName} 失败: ${err}`);
+      alert(t('term_alert_stream_err', { stream: streamName, err }));
     } finally {
       isConnectingNetwork.value = false;
     }
@@ -390,7 +390,7 @@ async function confirmOpenNewPort() {
     activeTabId.value = tab.id;
     isNewPortModalOpen.value = false;
   } catch (err: any) {
-    alert(`打开端口 ${targetPort} 失败: ${err}`);
+    alert(t('term_alert_open_target_err', { port: targetPort, err }));
   }
 }
 
@@ -535,7 +535,7 @@ onUnmounted(() => {
             <button
               @click="closeTab(tab, $event)"
               class="opacity-0 group-hover:opacity-100 hover:bg-zinc-800 hover:text-rose-400 rounded p-0.5 text-zinc-500 transition-opacity"
-              title="关闭该端口会话"
+              :title="t('term_close_tab_tip')"
             >
               <X class="w-3 h-3" />
             </button>
@@ -576,6 +576,7 @@ onUnmounted(() => {
           class="h-full w-full"
         >
           <SerialTerminalSession
+            :tab-id="tab.id"
             :port-name="tab.portName"
             :baud-rate="tab.baudRate"
             :is-connected="tab.isConnected"
@@ -690,7 +691,7 @@ onUnmounted(() => {
                 <input
                   v-model="networkHost"
                   type="text"
-                  placeholder="127.0.0.1 或 0.0.0.0"
+                  :placeholder="t('term_host_placeholder')"
                   class="w-full bg-zinc-950 border border-zinc-800 focus:border-sky-500 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none font-mono"
                 />
               </div>
@@ -786,7 +787,7 @@ onUnmounted(() => {
             </div>
 
             <div v-if="newPortImportedPackInfo" class="text-[11px] text-emerald-400 font-mono bg-emerald-950/60 border border-emerald-800/60 rounded px-2.5 py-1.5">
-              ✓ Pack 解析: {{ newPortImportedPackInfo }}
+              ✓ {{ t('term_pack_parsed_label') }}: {{ newPortImportedPackInfo }}
             </div>
 
             <!-- Model Selection dropdown if Pack imported -->

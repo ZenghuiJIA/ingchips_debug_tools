@@ -34,6 +34,7 @@ import { t } from '../utils/i18n';
 import type { CommandGroup, CommandItem, TriggerRule, PortInfo } from '../types';
 
 const props = defineProps<{
+  tabId?: string;
   portName: string;
   baudRate: number;
   isConnected: boolean;
@@ -73,9 +74,9 @@ async function toggleDtr() {
   try {
     await safeInvoke('set_dtr', { level: next, portName: props.portName });
     dtrState.value = next;
-    appendLog(`[硬件引脚] DTR(RST) -> ${next ? '1 (拉低复位)' : '0 (释放)'}`, 'info');
+    appendLog(t('term_log_pin_dtr', { val: next ? t('term_log_dtr_low') : t('term_log_dtr_high') }), 'info');
   } catch (err) {
-    appendLog(`设置 DTR 失败: ${err}`, 'error');
+    appendLog(t('term_log_set_dtr_fail', { err: String(err) }), 'error');
   }
 }
 
@@ -85,25 +86,28 @@ async function toggleRts() {
   try {
     await safeInvoke('set_rts', { level: next, portName: props.portName });
     rtsState.value = next;
-    appendLog(`[硬件引脚] RTS(BOOT) -> ${next ? '1 (进入BOOT模式)' : '0 (正常模式)'}`, 'info');
+    appendLog(t('term_log_pin_rts', { val: next ? t('term_log_rts_boot') : t('term_log_rts_norm') }), 'info');
   } catch (err) {
-    appendLog(`设置 RTS 失败: ${err}`, 'error');
+    appendLog(t('term_log_set_rts_fail', { err: String(err) }), 'error');
   }
 }
 
 async function triggerReset(seqType: string) {
   if (!props.isConnected) return;
   if (!props.isDaplink) {
-    alert('当前串口设备不是 DAPLink 探针，仅 DAPLink 具备 DTR/RTS 硬件引脚控制能力。');
+    alert(t('term_not_daplink_tip'));
     return;
   }
   isResetting.value = true;
   try {
     await safeInvoke('execute_reset_sequence', { seqType, portName: props.portName });
-    appendLog(`[硬件复位] 已向 ${props.portName} 发送 ${seqType === 'bootloader_reset' ? '进入 BOOT 引导复位' : '普通系统复位'} 序列`, 'info');
+    appendLog(t('term_log_reset_sent', { 
+      port: props.portName, 
+      seq: seqType === 'bootloader_reset' ? t('term_seq_boot') : t('term_seq_normal') 
+    }), 'info');
     await refreshPinStates();
   } catch (err) {
-    appendLog(`硬件复位执行失败: ${err}`, 'error');
+    appendLog(t('term_log_reset_fail', { err: String(err) }), 'error');
   } finally {
     isResetting.value = false;
   }
@@ -177,9 +181,9 @@ async function executeTriggerResponse(rule: TriggerRule) {
       });
       txBytesCount.value += sentCount;
       emit('update-stats', { rx: rxBytesCount.value, tx: txBytesCount.value });
-      appendLog(`⚡ [触发器: ${rule.name}] 命中规则，自动应答 -> ${encoded.textDisplay}`, 'tx');
+      appendLog(t('term_log_trigger_hit', { name: rule.name, text: encoded.textDisplay }), 'tx');
     } catch (err) {
-      appendLog(`⚡ [触发器: ${rule.name}] 自动应答发送失败: ${err}`, 'error');
+      appendLog(t('term_log_trigger_fail', { name: rule.name, err: String(err) }), 'error');
     }
   }, rule.delayMs);
 }
@@ -360,7 +364,7 @@ async function handleSendMessage(customText?: string) {
   if (inputMode.value === 'hex' && customText === undefined) {
     const cleanHex = textToSend.replace(/\s+/g, '');
     if (!/^[0-9a-fA-F]*$/.test(cleanHex)) {
-      appendLog('HEX 格式无效，必须为十六进制字符', 'error');
+      appendLog(t('term_log_invalid_hex'), 'error');
       return;
     }
     for (let i = 0; i < cleanHex.length; i += 2) {
@@ -391,7 +395,7 @@ async function handleSendMessage(customText?: string) {
     // If checksum was appended, log formatted hex
     if (checksumAlgo.value !== 'none') {
       const displayHex = bytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-      appendLog(`${textToSend} [追加校验: ${displayHex}]`, 'tx');
+      appendLog(`${textToSend} ${t('term_log_checksum_appended', { hex: displayHex })}`, 'tx');
     } else {
       appendLog(textToSend, 'tx');
     }
@@ -399,7 +403,7 @@ async function handleSendMessage(customText?: string) {
       inputMessage.value = '';
     }
   } catch (err: any) {
-    appendLog(`发送失败: ${err}`, 'error');
+    appendLog(t('term_log_send_fail', { err: String(err) }), 'error');
   }
 }
 
@@ -467,7 +471,7 @@ onMounted(async () => {
 
       unlistenDisconnect = await listen<{ port: string; reason: string }>('serial-disconnected', (event) => {
         if (event.payload.port && event.payload.port === props.portName) {
-          appendLog(`⚠️ [系统提示] 串口 ${props.portName} 硬件连接已断开（设备可能已被拔出），请插回设备后点击【打开】重新连接`, 'error');
+          appendLog(t('term_log_disconnected', { port: props.portName }), 'error');
           if (props.isConnected) {
             emit('toggle-connection');
           }
@@ -477,14 +481,14 @@ onMounted(async () => {
       unlistenFlashActive = await listen<{ port: string; original_baud?: number; message: string }>('serial-flash-active', (event) => {
         if (event.payload.port && event.payload.port === props.portName) {
           isFlashingActive.value = true;
-          appendLog(`⚡ [固件烧录接管] ${event.payload.message}`, 'info');
+          appendLog(t('term_log_flash_active', { message: event.payload.message }), 'info');
         }
       });
 
       unlistenFlashDone = await listen<{ port: string; original_baud?: number; message: string }>('serial-flash-done', (event) => {
         if (event.payload.port && event.payload.port === props.portName) {
           isFlashingActive.value = false;
-          appendLog(`✅ [控制权归还] ${event.payload.message}`, 'info');
+          appendLog(t('term_log_flash_done', { message: event.payload.message }), 'info');
           if (event.payload.original_baud && event.payload.original_baud !== props.baudRate) {
             emit('change-baud', event.payload.original_baud);
           }
@@ -539,7 +543,7 @@ onUnmounted(() => {
             @change="(e: any) => emit('change-port', e.target.value)"
             :disabled="isConnected"
             class="bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-200 py-0.5 px-1.5 rounded outline-none font-mono cursor-pointer disabled:opacity-75 disabled:cursor-not-allowed hover:border-zinc-700"
-            title="选择切换端口 (断开状态下可直接换COM口)"
+            :title="t('term_switch_port_tip')"
           >
             <option v-for="p in availablePorts" :key="p.port_name" :value="p.port_name">
               {{ p.port_name }} {{ p.is_daplink ? '[DAPLink]' : '' }}
@@ -553,7 +557,7 @@ onUnmounted(() => {
             :value="baudRate"
             @change="(e: any) => emit('change-baud', Number(e.target.value))"
             class="bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-300 py-0.5 px-1.5 rounded outline-none font-mono cursor-pointer hover:border-zinc-700"
-            :title="isConnected ? '在线调整波特率 (自动重连以新波特率生效)' : '设置该会话波特率'"
+            :title="isConnected ? t('term_baud_adjust_tip') : t('term_baud_set_tip')"
           >
             <option v-for="b in baudRates" :key="b" :value="b">
               {{ b }}
@@ -570,7 +574,7 @@ onUnmounted(() => {
               : isConnected 
                 ? 'bg-rose-950/80 text-rose-300 border-rose-800 hover:bg-rose-900' 
                 : 'bg-emerald-950/90 text-emerald-300 border-emerald-700 hover:bg-emerald-900'"
-            :title="isFlashingActive ? '正在执行芯片固件烧录，串口已临时挂起' : (isConnected ? '关闭当前端口连接 (保留历史日志与会话标签)' : '打开/重新连接当前端口')"
+            :title="isFlashingActive ? t('term_flash_running_tip') : (isConnected ? t('term_close_port_tip') : t('term_open_port_tip'))"
           >
             <Power class="w-3 h-3" />
             <span>{{ isFlashingActive ? t('term_flashing') : (isConnected ? t('term_close') : t('term_open')) }}</span>
@@ -583,7 +587,7 @@ onUnmounted(() => {
           <button
             @click="toggleDtr"
             :disabled="!isConnected"
-            title="DTR 控制 (RESET引脚: 1=拉低复位, 0=释放)"
+            :title="t('term_pin_dtr_title')"
             class="flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] font-mono transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             :class="dtrState ? 'bg-rose-950 text-rose-300 border border-rose-800 font-bold' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'"
           >
@@ -595,7 +599,7 @@ onUnmounted(() => {
           <button
             @click="toggleRts"
             :disabled="!isConnected"
-            title="RTS 控制 (BOOT引脚: 1=BOOT模式, 0=正常运行)"
+            :title="t('term_pin_rts_title')"
             class="flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] font-mono transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             :class="rtsState ? 'bg-amber-950 text-amber-300 border border-amber-800 font-bold' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'"
           >
@@ -609,7 +613,7 @@ onUnmounted(() => {
               @click="triggerReset('normal_reset')"
               :disabled="!isConnected || isResetting"
               class="flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-              title="普通复位: RTS 0 (正常态) -> DTR 产生 100ms 复位脉冲"
+              :title="t('term_reset_normal_tip')"
             >
               <RotateCcw class="w-2.5 h-2.5" :class="{ 'animate-spin': isResetting }" />
               <span>{{ t('term_reset') }}</span>
@@ -618,7 +622,7 @@ onUnmounted(() => {
               @click="triggerReset('bootloader_reset')"
               :disabled="!isConnected || isResetting"
               class="flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] bg-amber-950/60 hover:bg-amber-900 text-amber-300 border border-amber-800/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-              title="进入 BOOT 引导复位: RTS 1 -> 延时 500ms 建立电平 -> DTR 产生 100ms 复位脉冲"
+              :title="t('term_reset_boot_tip')"
             >
               <Zap class="w-2.5 h-2.5 text-amber-400" />
               <span>{{ t('term_boot') }}</span>
@@ -632,7 +636,7 @@ onUnmounted(() => {
             @click="sessionMode = 'log'"
             class="px-2 py-0.5 rounded text-[11px] transition-colors"
             :class="sessionMode === 'log' ? 'bg-zinc-800 text-emerald-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
-            title="日志模式: 适合抓包、时间戳记录与调试日志流"
+            :title="t('term_log_mode_tip')"
           >
             {{ t('term_log_stream') }}
           </button>
@@ -640,7 +644,7 @@ onUnmounted(() => {
             @click="sessionMode = 'vt100'"
             class="px-2 py-0.5 rounded text-[11px] transition-colors flex items-center gap-1"
             :class="sessionMode === 'vt100' ? 'bg-zinc-800 text-cyan-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
-            title="VT100 终端: 原生 Linux 控制台、Shell 交互、Tab补全与 ANSI 颜色"
+            :title="t('term_vt100_mode_tip')"
           >
             <Terminal class="w-3 h-3" />
             <span>{{ t('term_vt100') }}</span>
@@ -691,7 +695,7 @@ onUnmounted(() => {
           @click="isDashboardOpen = !isDashboardOpen"
           class="px-2 py-0.5 rounded text-[11px] transition-colors border flex items-center gap-1 ml-1"
           :class="isDashboardOpen ? 'bg-emerald-950 text-emerald-300 border-emerald-700/80 font-bold' : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
-          title="切换自定义交互操控台 (滑动条/开关下发控制)"
+          :title="t('term_dashboard_tip')"
         >
           <Sliders class="w-3.5 h-3.5 text-emerald-400" />
           <span>{{ t('term_dashboard') }}</span>
@@ -702,7 +706,7 @@ onUnmounted(() => {
           @click="isModbusDrawerOpen = !isModbusDrawerOpen"
           class="px-2 py-0.5 rounded text-[11px] transition-colors border flex items-center gap-1 ml-0.5"
           :class="isModbusDrawerOpen ? 'bg-amber-950 text-amber-300 border-amber-700/80 font-bold' : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
-          title="切换 Modbus RTU 读写与寄存器可视化抽屉"
+          :title="t('term_modbus_tip')"
         >
           <Layers class="w-3.5 h-3.5 text-amber-400" />
           <span>{{ t('term_modbus') }}</span>
@@ -713,7 +717,7 @@ onUnmounted(() => {
           @click="isCommandPanelOpen = !isCommandPanelOpen"
           class="px-2 py-0.5 rounded text-[11px] transition-colors border flex items-center gap-1 ml-0.5"
           :class="isCommandPanelOpen ? 'bg-emerald-950 text-emerald-300 border-emerald-700/80 font-bold' : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
-          title="切换右侧命令组管理面板"
+          :title="t('term_cmd_group_tip')"
         >
           <Layers class="w-3.5 h-3.5 text-emerald-400" />
           <span>{{ t('term_cmd_group') }} {{ activeGroup ? `(${activeGroup.commands.length})` : '' }}</span>
@@ -724,7 +728,7 @@ onUnmounted(() => {
           @click="isTriggerPanelOpen = !isTriggerPanelOpen"
           class="px-2 py-0.5 rounded text-[11px] transition-colors border flex items-center gap-1"
           :class="isTriggerPanelOpen ? 'bg-amber-950 text-amber-300 border-amber-700/80 font-bold' : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
-          title="切换智能应答触发器面板"
+          :title="t('term_trigger_tip')"
         >
           <Zap class="w-3.5 h-3.5 text-amber-400" />
           <span>{{ t('term_auto_reply') }}</span>
@@ -734,7 +738,7 @@ onUnmounted(() => {
         <button
           @click="emit('switch-tab', 'plotter')"
           class="px-2 py-0.5 rounded text-[11px] bg-zinc-800 hover:bg-zinc-700 text-cyan-300 border border-cyan-800/60 transition-colors flex items-center gap-1 ml-1 cursor-pointer"
-          title="切换到实时波形示波器"
+          :title="t('term_waveform_tip')"
         >
           <Activity class="w-3.5 h-3.5 text-cyan-400" />
           <span>{{ t('term_waveform') }}</span>
@@ -744,7 +748,7 @@ onUnmounted(() => {
         <button
           @click="isIngFlasherOpen = true"
           class="px-2 py-0.5 rounded text-[11px] bg-indigo-950/80 hover:bg-indigo-900 text-indigo-300 border border-indigo-700/80 transition-colors flex items-center gap-1 ml-1 cursor-pointer font-medium"
-          title="打开 ING916 / ING918 串口芯片高速烧录器 (支持 INI / HEX / BIN 烧录与路径记忆)"
+          :title="t('term_ing_flasher_tip')"
         >
           <Cpu class="w-3.5 h-3.5 text-indigo-400" />
           <span>{{ t('term_ing_flasher') }}</span>
@@ -754,7 +758,7 @@ onUnmounted(() => {
         <button
           @click="clearLogs"
           class="px-2 py-0.5 rounded text-[11px] bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/80 hover:text-rose-300 transition-colors flex items-center gap-1 ml-1 cursor-pointer"
-          title="清空串口接收与发送日志缓存 (清屏)"
+          :title="t('term_clear_screen_tip')"
         >
           <Trash2 class="w-3 h-3 text-rose-400" />
           <span>{{ t('term_clear') }}</span>
@@ -926,7 +930,7 @@ onUnmounted(() => {
     <!-- Quick Commands Bar -->
     <div class="bg-zinc-900/70 border-t border-zinc-800 px-3 py-1 flex items-center gap-1.5 overflow-x-auto select-none">
       <span class="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold shrink-0">
-        {{ activeGroup ? activeGroup.name : '快捷指令' }}:
+        {{ activeGroup ? activeGroup.name : t('term_quick_cmds') }}:
       </span>
 
       <!-- Commands in active group -->
@@ -936,7 +940,7 @@ onUnmounted(() => {
           :key="cmd.id"
           @click="handleSendSingleGroupCommand(cmd)"
           :disabled="!isConnected"
-          :title="`[单击单发] ${cmd.label} | ${cmd.payload} (${cmd.format}, ${cmd.lineEnding})`"
+          :title="`[${t('cmd_single_send')}] ${cmd.label} | ${cmd.payload} (${cmd.format}, ${cmd.lineEnding})`"
           class="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[10.5px] border border-zinc-700/60 transition-colors disabled:opacity-40 flex items-center gap-1 shrink-0 group/btn"
         >
           <span class="font-medium group-hover/btn:text-white">{{ cmd.label }}</span>
@@ -996,7 +1000,7 @@ onUnmounted(() => {
         <option value="crlf">+CRLF (\r\n)</option>
         <option value="lf">+LF (\n)</option>
         <option value="cr">+CR (\r)</option>
-        <option value="none">无换行</option>
+        <option value="none">{{ t('term_line_ending_none') }}</option>
       </select>
 
       <!-- Automatic Checksum Append Selector -->
@@ -1004,7 +1008,7 @@ onUnmounted(() => {
         v-model="checksumAlgo"
         class="bg-zinc-950 border border-zinc-800 text-[11px] py-1.5 px-2 rounded outline-none font-mono transition-colors"
         :class="checksumAlgo !== 'none' ? 'text-amber-400 border-amber-700/80 font-bold bg-amber-950/30' : 'text-zinc-400'"
-        title="发送时在数据末尾自动追加校验码 (Rust 原生高性能查表法加速)"
+        :title="t('term_checksum_selector_tip')"
       >
         <option value="none">{{ t('term_chk_none') }}</option>
         <option value="modbus_crc16">{{ t('term_chk_modbus') }}</option>
@@ -1036,6 +1040,7 @@ onUnmounted(() => {
 
     <!-- INGChips Serial Flasher Modal -->
     <IngSerialFlasher
+      :tab-id="tabId"
       :port-name="portName"
       :is-open="isIngFlasherOpen"
       @close="isIngFlasherOpen = false"
@@ -1059,7 +1064,7 @@ onUnmounted(() => {
             class="w-full text-left px-3 py-1.5 hover:bg-zinc-800 hover:text-rose-400 flex items-center gap-2 cursor-pointer transition-colors"
           >
             <Trash2 class="w-3.5 h-3.5 text-rose-400" />
-            <span>清屏 (清除所有数据)</span>
+            <span>{{ t('term_menu_clear_all') }}</span>
           </button>
         </div>
         <div class="py-0.5">
@@ -1068,14 +1073,14 @@ onUnmounted(() => {
             class="w-full text-left px-3 py-1.5 hover:bg-zinc-800 hover:text-zinc-100 flex items-center gap-2 cursor-pointer transition-colors"
           >
             <Copy class="w-3.5 h-3.5 text-emerald-400" />
-            <span>复制全部日志</span>
+            <span>{{ t('term_menu_copy_all') }}</span>
           </button>
           <button
             @click="exportLogs(); closeContextMenu()"
             class="w-full text-left px-3 py-1.5 hover:bg-zinc-800 hover:text-zinc-100 flex items-center gap-2 cursor-pointer transition-colors"
           >
             <Download class="w-3.5 h-3.5 text-sky-400" />
-            <span>导出日志文件</span>
+            <span>{{ t('term_menu_export_file') }}</span>
           </button>
         </div>
       </div>

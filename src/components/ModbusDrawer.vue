@@ -11,6 +11,7 @@ import {
 } from '@lucide/vue';
 import { safeInvoke } from '../utils/ipc';
 import { buildModbusRequest, parseModbusResponse, type ModbusResponseResult } from '../utils/modbus';
+import { t } from '../utils/i18n';
 
 const props = defineProps<{
   portName: string;
@@ -38,13 +39,13 @@ const parsedResult = ref<ModbusResponseResult | null>(null);
 const displayFormat = ref<'uint16' | 'int16' | 'hex' | 'float32'>('uint16');
 
 const funcCodeOptions = [
-  { value: 1, label: '01: 读线圈 (Read Coils)' },
-  { value: 2, label: '02: 读离散输入 (Read Discrete Inputs)' },
-  { value: 3, label: '03: 读保持寄存器 (Read Holding Regs)' },
-  { value: 4, label: '04: 读输入寄存器 (Read Input Regs)' },
-  { value: 5, label: '05: 写单个线圈 (Write Single Coil)' },
-  { value: 6, label: '06: 写单个寄存器 (Write Single Reg)' },
-  { value: 16, label: '10: 写多个寄存器 (Write Multiple Regs)' },
+  { value: 1, label: t('mb_fn_01') },
+  { value: 2, label: t('mb_fn_02') },
+  { value: 3, label: t('mb_fn_03') },
+  { value: 4, label: t('mb_fn_04') },
+  { value: 5, label: t('mb_fn_05') },
+  { value: 6, label: t('mb_fn_06') },
+  { value: 16, label: t('mb_fn_10') },
 ];
 
 function parseNumericInput(val: string): number {
@@ -60,7 +61,7 @@ const computedCountOrVal = computed(() => parseNumericInput(countOrValInput.valu
 
 async function sendModbusCommand() {
   if (!props.isConnected) {
-    emit('log', '串口未连接，无法发送 Modbus 请求', 'error');
+    emit('log', t('mb_err_no_conn'), 'error');
     return;
   }
 
@@ -96,7 +97,7 @@ async function sendModbusCommand() {
       emit('log', `[Modbus RTU TX] -> ${hexStr}`, 'tx');
     }
   } catch (err: any) {
-    emit('log', `Modbus 发送失败: ${err}`, 'error');
+    emit('log', t('mb_err_send_failed', { err }), 'error');
   }
 }
 
@@ -110,9 +111,9 @@ async function feedIncomingBytes(bytes: Uint8Array) {
     if (res && res.slave_id === slaveId.value) {
       parsedResult.value = res;
       if (res.is_exception) {
-        emit('log', `[Modbus 异常响应] 从机 ${res.slave_id} 报错: ${res.exception_desc}`, 'error');
+        emit('log', t('mb_err_exception_resp', { slave: res.slave_id, desc: res.exception_desc || '' }), 'error');
       } else {
-        emit('log', `[Modbus ${res.mode.toUpperCase()} RX] 从机 ${res.slave_id} 响应成功 (${res.registers.length} 个寄存器)`, 'rx');
+        emit('log', t('mb_rx_success', { mode: res.mode.toUpperCase(), slave: res.slave_id, count: res.registers.length }), 'rx');
       }
     }
   } catch (err) {
@@ -173,7 +174,7 @@ defineExpose({
     <div class="px-3 py-2 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/90">
       <div class="flex items-center gap-1.5 font-semibold text-amber-300">
         <Layers class="w-4 h-4 text-amber-400" />
-        <span>Modbus 主站控制台</span>
+        <span>{{ t("mb_console_title") }}</span>
       </div>
       <div class="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded p-0.5 text-[10px]">
         <button
@@ -204,7 +205,7 @@ defineExpose({
       <!-- Row 1: Slave ID & Function Code -->
       <div class="grid grid-cols-2 gap-2">
         <div>
-          <label class="block text-[10px] text-zinc-400 mb-0.5">从机地址 (Slave ID):</label>
+          <label class="block text-[10px] text-zinc-400 mb-0.5">{{ t("mb_slave_id_label") }}</label>
           <input
             v-model.number="slaveId"
             type="number"
@@ -214,7 +215,7 @@ defineExpose({
           />
         </div>
         <div>
-          <label class="block text-[10px] text-zinc-400 mb-0.5">功能码 (Function):</label>
+          <label class="block text-[10px] text-zinc-400 mb-0.5">{{ t("mb_func_code_label") }}</label>
           <select
             v-model="funcCode"
             class="w-full bg-zinc-900 border border-zinc-700/80 rounded px-1.5 py-1 text-zinc-200 focus:border-amber-500 outline-none text-[11px]"
@@ -229,22 +230,22 @@ defineExpose({
       <!-- Row 2: Start Address & Count/Value -->
       <div class="grid grid-cols-2 gap-2">
         <div>
-          <label class="block text-[10px] text-zinc-400 mb-0.5">起始地址 (Hex/Dec):</label>
+          <label class="block text-[10px] text-zinc-400 mb-0.5">{{ t("mb_start_addr_label") }}</label>
           <input
             v-model="startAddrInput"
             type="text"
-            placeholder="如 0x0000 或 0"
+            :placeholder="t('mb_start_addr_placeholder')"
             class="w-full bg-zinc-900 border border-zinc-700/80 rounded px-2 py-1 text-zinc-100 focus:border-amber-500 outline-none"
           />
         </div>
         <div>
           <label class="block text-[10px] text-zinc-400 mb-0.5">
-            {{ funcCode === 5 || funcCode === 6 ? '写入数值 (Dec/Hex):' : '读取数量 (Count):' }}
+            {{ funcCode === 5 || funcCode === 6 ? t('mb_val_or_count_write') : t('mb_val_or_count_read') }}
           </label>
           <input
             v-model="countOrValInput"
             type="text"
-            placeholder="如 10 或 0x1234"
+            :placeholder="t('mb_val_or_count_placeholder')"
             class="w-full bg-zinc-900 border border-zinc-700/80 rounded px-2 py-1 text-zinc-100 focus:border-amber-500 outline-none"
           />
         </div>
@@ -252,11 +253,11 @@ defineExpose({
 
       <!-- Row 3: Extra values for 0x10 multiple registers -->
       <div v-if="funcCode === 16">
-        <label class="block text-[10px] text-zinc-400 mb-0.5">写入数据列表 (以空格或逗号分隔):</label>
+        <label class="block text-[10px] text-zinc-400 mb-0.5">{{ t("mb_write_list_label") }}</label>
         <input
           v-model="extraValuesInput"
           type="text"
-          placeholder="如: 0x1122 0x3344 1234"
+          :placeholder="t('mb_write_list_placeholder')"
           class="w-full bg-zinc-900 border border-zinc-700/80 rounded px-2 py-1 text-zinc-100 focus:border-amber-500 outline-none"
         />
       </div>
@@ -269,7 +270,7 @@ defineExpose({
           class="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded font-medium transition-colors disabled:opacity-40"
         >
           <Send class="w-3.5 h-3.5" />
-          <span>单次发送 (带CRC)</span>
+          <span>{{ t('modbus_send') }}</span>
         </button>
 
         <button
@@ -279,13 +280,13 @@ defineExpose({
           :class="isPolling ? 'bg-rose-950 text-rose-300 border-rose-800' : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
         >
           <component :is="isPolling ? Square : Play" class="w-3.5 h-3.5" :class="{ 'fill-rose-400 text-rose-400': isPolling }" />
-          <span>{{ isPolling ? '停止轮询' : '自动轮询' }}</span>
+          <span>{{ isPolling ? 'Stop' : t('modbus_auto_poll') }}</span>
         </button>
       </div>
 
       <!-- Polling interval setting -->
       <div v-if="isPolling" class="flex items-center justify-between text-[11px] text-zinc-400 px-1">
-        <span>轮询周期:</span>
+        <span>{{ t("mb_poll_cycle") }}</span>
         <div class="flex items-center gap-1">
           <input
             v-model.number="pollIntervalMs"
@@ -302,17 +303,17 @@ defineExpose({
     <!-- Response Display Section -->
     <div class="flex-1 flex flex-col overflow-hidden p-3 min-h-0">
       <div class="flex items-center justify-between mb-2">
-        <span class="text-[11px] font-semibold text-zinc-300">响应寄存器解析:</span>
+        <span class="text-[11px] font-semibold text-zinc-300">{{ t("mb_resp_parse_label") }}</span>
         
         <!-- Format selector -->
         <select
           v-model="displayFormat"
           class="bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-300 rounded px-1.5 py-0.5 outline-none"
         >
-          <option value="uint16">UInt16 (无符号)</option>
-          <option value="int16">Int16 (有符号)</option>
-          <option value="hex">HEX 原生</option>
-          <option value="float32">Float32 (两字组合)</option>
+          <option value="uint16">{{ t("mb_fmt_uint16") }}</option>
+          <option value="int16">{{ t("mb_fmt_int16") }}</option>
+          <option value="hex">{{ t("mb_fmt_hex") }}</option>
+          <option value="float32">{{ t("mb_fmt_float32") }}</option>
         </select>
       </div>
 
@@ -323,7 +324,7 @@ defineExpose({
       >
         <AlertTriangle class="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
         <div>
-          <div class="font-bold">从机返回异常应答</div>
+          <div class="font-bold">{{ t("mb_exception_banner") }}</div>
           <div class="text-[10px] text-rose-200 mt-0.5">{{ parsedResult.exception_desc }}</div>
         </div>
       </div>
@@ -336,9 +337,9 @@ defineExpose({
         <table class="w-full text-[11px] text-left">
           <thead class="bg-zinc-900 text-zinc-400 sticky top-0 border-b border-zinc-800">
             <tr>
-              <th class="p-1.5 pl-2 font-normal">地址</th>
+              <th class="p-1.5 pl-2 font-normal">{{ t("mb_th_addr") }}</th>
               <th class="p-1.5 font-normal">HEX</th>
-              <th class="p-1.5 font-normal">数值</th>
+              <th class="p-1.5 font-normal">{{ t("mb_th_val") }}</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-zinc-900">
@@ -384,8 +385,8 @@ defineExpose({
         class="flex-1 flex flex-col items-center justify-center text-zinc-600 border border-dashed border-zinc-800 rounded p-4 text-center"
       >
         <Binary class="w-8 h-8 mb-2 opacity-30" />
-        <p>暂无 Modbus 响应数据</p>
-        <p class="text-[10px] text-zinc-700 mt-1">点击“单次发送”或启动轮询以获取数据</p>
+        <p>{{ t("mb_empty_tip") }}</p>
+        <p class="text-[10px] text-zinc-700 mt-1">{{ t("mb_empty_subtip") }}</p>
       </div>
     </div>
   </div>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import { t } from '../utils/i18n';
 import type { ChatMessage } from '../types';
 import {
   Send,
@@ -272,7 +273,7 @@ onMounted(() => {
         :class="msg.role === 'user' ? 'ml-auto items-end' : 'mr-auto items-start'"
       >
         <div class="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono">
-          <span>{{ msg.role === 'user' ? '用户' : 'AI Copilot' }}</span>
+          <span>{{ msg.role === 'user' ? t('ai_role_user') : t('ai_role_assistant') }}</span>
           <span>•</span>
           <span>{{ msg.timestamp }}</span>
         </div>
@@ -292,32 +293,32 @@ onMounted(() => {
                 v-if="msg.tool_call.status === 'running'"
                 class="text-amber-400 flex items-center gap-1"
               >
-                <RefreshCw class="w-3 h-3 animate-spin" /> 执行中
+                <RefreshCw class="w-3 h-3 animate-spin" /> {{ t("ai_status_running") }}
               </span>
               <span
                 v-else-if="msg.tool_call.status === 'success'"
                 class="text-emerald-400 flex items-center gap-1"
               >
-                <CheckCircle2 class="w-3 h-3" /> 执行成功
+                <CheckCircle2 class="w-3 h-3" /> {{ t("ai_status_success") }}
               </span>
               <span v-else class="text-rose-400 flex items-center gap-1">
-                <AlertCircle class="w-3 h-3" /> 失败
+                <AlertCircle class="w-3 h-3" /> {{ t("ai_status_failed") }}
               </span>
             </div>
           </div>
 
           <div class="text-zinc-400 text-[11px]">
-            <div>入参: <code class="text-zinc-300 select-text">{{ JSON.stringify(msg.tool_call.arguments) }}</code></div>
+            <div>{{ t("ai_field_args") }} <code class="text-zinc-300 select-text">{{ JSON.stringify(msg.tool_call.arguments) }}</code></div>
             <div v-if="msg.tool_call.result" class="mt-1">
               <div class="flex items-center justify-between">
-                <span>返回数据:</span>
+                <span>{{ t("ai_field_returned") }}</span>
                 <button
                   @click="copyMessage(msg.id + '_tool', JSON.stringify(msg.tool_call.result, null, 2))"
                   class="flex items-center gap-1 text-[10px] text-zinc-400 hover:text-zinc-200 px-1.5 py-0.5 rounded hover:bg-zinc-800 transition-colors"
-                  title="复制工具返回结果"
+                  :title="t('ai_tip_copy_tool')"
                 >
                   <component :is="copiedId === msg.id + '_tool' ? Check : Copy" class="w-3 h-3 text-emerald-400" />
-                  <span>{{ copiedId === msg.id + '_tool' ? '已复制' : '复制结果' }}</span>
+                  <span>{{ copiedId === msg.id + '_tool' ? t('ai_btn_copied_tool') : t('ai_btn_copy_tool') }}</span>
                 </button>
               </div>
               <pre class="bg-zinc-950 p-2 rounded mt-1 max-h-36 overflow-y-auto text-[10px] text-zinc-300 select-text">{{ JSON.stringify(msg.tool_call.result, null, 2) }}</pre>
@@ -340,7 +341,7 @@ onMounted(() => {
             @click="copyMessage(msg.id, msg.content)"
             class="absolute top-1 right-1 opacity-0 group-hover/msg:opacity-100 p-1 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition-all shadow-sm"
             :class="{ '!opacity-100': copiedId === msg.id }"
-            title="复制消息内容"
+            :title="t('ai_tip_copy_msg')"
           >
             <component :is="copiedId === msg.id ? Check : Copy" class="w-3 h-3 text-emerald-400" />
           </button>
@@ -355,7 +356,7 @@ onMounted(() => {
         class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
       >
         <AlertCircle class="w-3.5 h-3.5 text-rose-400" />
-        <span>诊断 HardFault 故障</span>
+        <span>{{ t("ai_action_hardfault") }}</span>
       </button>
 
       <button
@@ -363,7 +364,7 @@ onMounted(() => {
         class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
       >
         <RotateCcw class="w-3.5 h-3.5 text-sky-400" />
-        <span>复位单片机</span>
+        <span>{{ t("ai_action_reset") }}</span>
       </button>
 
       <button
@@ -371,7 +372,7 @@ onMounted(() => {
         class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
       >
         <Zap class="w-3.5 h-3.5 text-amber-400" />
-        <span>进入 Bootloader</span>
+        <span>{{ t("ai_action_boot") }}</span>
       </button>
 
       <button
@@ -379,7 +380,7 @@ onMounted(() => {
         class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
       >
         <Cpu class="w-3.5 h-3.5 text-emerald-400" />
-        <span>扫描调试探针</span>
+        <span>{{ t("ai_action_probes") }}</span>
       </button>
 
       <button
@@ -387,7 +388,7 @@ onMounted(() => {
         class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
       >
         <Binary class="w-3.5 h-3.5 text-emerald-400" />
-        <span>读取 RAM (0x20000000)</span>
+        <span>{{ t("ai_action_read_ram") }}</span>
       </button>
 
       <button
@@ -395,7 +396,7 @@ onMounted(() => {
         class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
       >
         <Binary class="w-3.5 h-3.5 text-indigo-400" />
-        <span>写入 RAM (0x20000000)</span>
+        <span>{{ t("ai_action_write_ram") }}</span>
       </button>
     </div>
 
@@ -405,7 +406,7 @@ onMounted(() => {
         v-model="userInput"
         @keydown.enter="handleSendMessage()"
         type="text"
-        placeholder="向 AI 描述您的硬件调试需求，或输入指令直接调用 MCP Tools..."
+        :placeholder="t('ai_placeholder_input')"
         class="flex-1 bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-lg px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-500 outline-none transition-colors"
         :disabled="isThinking"
       />
@@ -415,7 +416,7 @@ onMounted(() => {
         class="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
       >
         <Send class="w-3.5 h-3.5" />
-        <span>发送</span>
+        <span>{{ t("ai_btn_send") }}</span>
       </button>
     </div>
   </div>

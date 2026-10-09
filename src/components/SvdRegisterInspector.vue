@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import { t } from '../utils/i18n';
 import type { SvdDevice, SvdPeripheral, SvdRegister, SvdField, ProbeInfo } from '../types';
 import {
   RefreshCw,
@@ -113,10 +114,10 @@ async function loadDevices() {
         selectedDeviceName.value = defaultDev.name;
       }
     } else {
-      setStatus('未在 pack 库中发现芯片 SVD 定义文件', 'error');
+      setStatus(t('svd_err_no_svd'), 'error');
     }
   } catch (err: any) {
-    setStatus(`加载 SVD 芯片列表失败: ${err}`, 'error');
+    setStatus(t('svd_err_load_chips', { err }), 'error');
   } finally {
     isLoadingDevices.value = false;
   }
@@ -126,30 +127,30 @@ async function loadDevices() {
 async function handleImportPack() {
   try {
     const selectedPath = await safeInvoke<string | null>('pick_pack_file', {
-      title: '选择 CMSIS-Pack 芯片描述包 (*.pack)'
+      title: t('svd_pick_pack_title')
     });
     if (!selectedPath) return;
 
     isImportingPack.value = true;
-    setStatus(`正在解析并导入 Pack: ${selectedPath}...`, 'info');
+    setStatus(t('svd_log_importing_pack', { path: selectedPath }), 'info');
 
     const result: any = await safeInvoke('svd_import_pack', {
       packPath: selectedPath
     });
 
     if (result && result.devices && result.devices.length > 0) {
-      setStatus(`成功导入 ${result.pack}，新增 ${result.devices.length} 款芯片型号！`, 'success');
+      setStatus(t('svd_log_import_success', { pack: result.pack, count: result.devices.length }), 'success');
       const firstDev = result.devices[0].name;
       if (firstDev) {
         selectedDeviceName.value = firstDev;
       }
       await loadDevices();
     } else {
-      setStatus(`Pack 导入完成，已刷新设备列表`, 'info');
+      setStatus(t('svd_log_pack_refreshed'), 'info');
       await loadDevices();
     }
   } catch (err: any) {
-    setStatus(`导入 Pack 文件失败: ${err}`, 'error');
+    setStatus(t('svd_err_import_pack', { err }), 'error');
   } finally {
     isImportingPack.value = false;
   }
@@ -170,7 +171,7 @@ async function loadPeripherals(deviceName: string) {
       selectPeripheral(periphs[0]);
     }
   } catch (err: any) {
-    setStatus(`加载外设列表失败: ${err}`, 'error');
+    setStatus(t('svd_err_load_periphs', { err }), 'error');
   } finally {
     isLoadingPeripherals.value = false;
   }
@@ -194,7 +195,7 @@ async function selectPeripheral(p: SvdPeripheral) {
       is_writing: false
     }));
   } catch (err: any) {
-    setStatus(`加载 ${p.name} 寄存器定义失败: ${err}`, 'error');
+    setStatus(t('svd_err_load_regs', { periph: p.name, err }), 'error');
   } finally {
     isLoadingRegisters.value = false;
   }
@@ -235,9 +236,9 @@ async function readRegister(reg: SvdRegister) {
 
     updateFieldsFromRegValue(reg);
 
-    setStatus(`已读取 ${selectedPeripheral.value?.name}->${reg.name} = ${reg.current_value}`, 'success');
+    setStatus(t('svd_log_read_reg_success', { periph: selectedPeripheral.value?.name || '', reg: reg.name, val: reg.current_value || '' }), 'success');
   } catch (err: any) {
-    setStatus(`读取 ${reg.name} 失败: ${err}`, 'error');
+    setStatus(t('svd_err_read_reg', { reg: reg.name, err: String(err) }), 'error');
   } finally {
     reg.is_reading = false;
   }
@@ -247,7 +248,7 @@ async function readRegister(reg: SvdRegister) {
 async function readAllRegisters() {
   if (!selectedPeripheral.value) return;
   isBatchReading.value = true;
-  setStatus(`正在批量读取 ${selectedPeripheral.value.name} 外设所有寄存器...`, 'info');
+  setStatus(t('svd_log_batch_reading', { periph: selectedPeripheral.value.name }), 'info');
 
   try {
     const addrs = registers.value.map(r => r.address);
@@ -270,12 +271,12 @@ async function readAllRegisters() {
           count++;
         }
       });
-      setStatus(`成功批量读取 ${selectedPeripheral.value.name} 的 ${count} 个寄存器`, 'success');
+      setStatus(t('svd_log_batch_read_success', { periph: selectedPeripheral.value.name, count }), 'success');
     } else {
-      setStatus(`批量读取完成`, 'success');
+      setStatus(t('svd_log_batch_read_done'), 'success');
     }
   } catch (err: any) {
-    setStatus(`批量读取失败: ${err}`, 'error');
+    setStatus(t('svd_err_batch_read', { err }), 'error');
   } finally {
     isBatchReading.value = false;
   }
@@ -300,7 +301,7 @@ async function confirmWriteRegister() {
     } else {
       val = parseInt(raw, 10);
     }
-    if (isNaN(val)) throw new Error('无效的数值格式 (支持 0x12AB 或 十进制)');
+    if (isNaN(val)) throw new Error(t('svd_err_invalid_val_fmt'));
   } catch (e: any) {
     setStatus(e.message, 'error');
     isSubmittingReg.value = false;
@@ -323,10 +324,10 @@ async function confirmWriteRegister() {
     reg.last_updated = new Date().toLocaleTimeString();
     updateFieldsFromRegValue(reg);
 
-    setStatus(`已成功写入 ${reg.name} = ${reg.current_value}`, 'success');
+    setStatus(t('svd_log_write_reg_success', { reg: reg.name, val: reg.current_value || '' }), 'success');
     editingRegister.value = null;
   } catch (err: any) {
-    setStatus(`写入寄存器失败: ${err}`, 'error');
+    setStatus(t('svd_err_write_reg', { err }), 'error');
   } finally {
     isSubmittingReg.value = false;
   }
@@ -359,7 +360,7 @@ async function submitWriteField(reg: SvdRegister, field: SvdField, directVal?: n
       } else {
         val = parseInt(raw, 10);
       }
-      if (isNaN(val)) throw new Error('无效数值格式');
+      if (isNaN(val)) throw new Error(t('svd_err_invalid_val'));
     } catch (e: any) {
       setStatus(e.message, 'error');
       return;
@@ -385,10 +386,10 @@ async function submitWriteField(reg: SvdRegister, field: SvdField, directVal?: n
     reg.last_updated = new Date().toLocaleTimeString();
     updateFieldsFromRegValue(reg);
 
-    setStatus(`已更新位域 ${reg.name}->${field.name} = 0x${val.toString(16).toUpperCase()} (全寄存器: ${reg.current_value})`, 'success');
+    setStatus(t('svd_log_write_field_success', { reg: reg.name, field: field.name, val: val.toString(16).toUpperCase(), fullVal: reg.current_value || '' }), 'success');
     editingField.value = null;
   } catch (err: any) {
-    setStatus(`写入位域失败: ${err}`, 'error');
+    setStatus(t('svd_err_write_field', { err }), 'error');
   } finally {
     isSubmittingField.value = false;
   }
@@ -431,7 +432,7 @@ onMounted(() => {
         </div>
         <div>
           <div class="text-xs text-slate-400 font-medium flex items-center gap-1.5">
-            <span>SVD 设备型号 (CMSIS-Pack 原生支持)</span>
+            <span>{{ t("svd_chip_model_title") }}</span>
             <span v-if="currentDevice" class="px-1.5 py-0.2 text-[10px] bg-slate-800 text-cyan-400 rounded border border-slate-700">
               {{ currentDevice.core }} | Flash: {{ (currentDevice.flash_size / 1024).toFixed(0) }}KB
             </span>
@@ -451,10 +452,10 @@ onMounted(() => {
               @click="handleImportPack"
               :disabled="isImportingPack"
               class="flex items-center gap-1.5 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-indigo-300 hover:text-indigo-200 border border-slate-700 hover:border-indigo-500/50 rounded-md text-xs font-medium transition shadow-sm disabled:opacity-50"
-              title="导入外部 CMSIS-Pack (*.pack) 芯片描述包以分析不同芯片"
+              :title="t('svd_btn_import_pack_tip')"
             >
               <FolderPlus class="w-3.5 h-3.5" :class="{ 'animate-spin': isImportingPack }" />
-              <span>{{ isImportingPack ? '正在导入...' : '导入 Pack 描述包' }}</span>
+              <span>{{ isImportingPack ? t('svd_btn_importing') : t('svd_btn_import_pack') }}</span>
             </button>
           </div>
         </div>
@@ -464,19 +465,19 @@ onMounted(() => {
       <div class="flex items-center gap-3">
         <div class="flex items-center gap-2 bg-slate-800/80 px-2.5 py-1 rounded-md border border-slate-700/80 text-xs">
           <Zap class="w-3.5 h-3.5 text-amber-400" />
-          <span class="text-slate-400">SWD 探针:</span>
+          <span class="text-slate-400">{{ t("svd_swd_probe_label") }}</span>
           <select
             v-model="selectedProbeId"
             class="bg-transparent text-slate-200 text-xs outline-none cursor-pointer max-w-[160px] truncate"
           >
-            <option v-if="probes.length === 0" value="">无可用调试器探针</option>
+            <option v-if="probes.length === 0" value="">{{ t("svd_no_probes") }}</option>
             <option v-for="p in probes" :key="p.unique_id" :value="p.unique_id">
               {{ p.description || p.probe_type }} ({{ p.unique_id.slice(-6) }})
             </option>
           </select>
           <button
             @click="loadProbes"
-            title="重新扫描探针"
+            :title="t('svd_btn_rescan_probes_tip')"
             class="text-slate-400 hover:text-white transition p-0.5 rounded"
           >
             <RefreshCw class="w-3 h-3" />
@@ -490,7 +491,7 @@ onMounted(() => {
           class="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white rounded-md text-xs font-semibold shadow-md hover:shadow-cyan-500/20 disabled:opacity-50 transition"
         >
           <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': isBatchReading }" />
-          <span>{{ isBatchReading ? '正在全量读取...' : '一键读取全部寄存器' }}</span>
+          <span>{{ isBatchReading ? t('svd_btn_batch_reading') : t('svd_btn_batch_read') }}</span>
         </button>
       </div>
     </header>
@@ -523,12 +524,12 @@ onMounted(() => {
             <input
               v-model="peripheralFilter"
               type="text"
-              placeholder="搜索外设 (UART, GPIO...)"
+              :placeholder="t('svd_filter_periph_placeholder')"
               class="w-full bg-slate-800/80 border border-slate-700/80 rounded-md pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
             />
           </div>
           <div class="flex justify-between items-center mt-2 px-1 text-[11px] text-slate-400">
-            <span>外设列表</span>
+            <span>{{ t("svd_periph_list_title") }}</span>
             <span class="bg-slate-800 px-1.5 py-0.5 rounded text-slate-300 font-mono">
               {{ filteredPeripherals.length }} / {{ peripherals.length }}
             </span>
@@ -542,14 +543,14 @@ onMounted(() => {
             class="p-6 text-center text-xs text-slate-400 flex flex-col items-center gap-2"
           >
             <RefreshCw class="w-5 h-5 animate-spin text-indigo-400" />
-            <span>加载 SVD 外设字典中...</span>
+            <span>{{ t("svd_loading_dict") }}</span>
           </div>
 
           <div
             v-else-if="filteredPeripherals.length === 0"
             class="p-6 text-center text-xs text-slate-500"
           >
-            未匹配到外设模块
+            {{ t("svd_no_periph_matched") }}
           </div>
 
           <button
@@ -574,7 +575,7 @@ onMounted(() => {
               </span>
             </div>
             <div class="text-[11px] text-slate-400 truncate" :title="p.description">
-              {{ p.description || p.group_name || '外设控制模块' }}
+              {{ p.description || p.group_name || t('svd_default_periph_desc') }}
             </div>
           </button>
         </div>
@@ -588,13 +589,13 @@ onMounted(() => {
             <div class="flex items-center gap-2">
               <h2 class="text-base font-bold text-white font-mono tracking-wide">{{ selectedPeripheral.name }}</h2>
               <span class="text-xs px-2 py-0.5 bg-indigo-950/80 text-indigo-300 rounded border border-indigo-800/80 font-mono">
-                基地址: {{ selectedPeripheral.base_address }}
+                {{ t("svd_base_addr_label", { addr: selectedPeripheral.base_address }) }}
               </span>
               <span v-if="selectedPeripheral.group_name" class="text-xs px-2 py-0.5 bg-slate-800 text-slate-300 rounded border border-slate-700">
                 {{ selectedPeripheral.group_name }}
               </span>
             </div>
-            <p class="text-xs text-slate-400 mt-0.5">{{ selectedPeripheral.description || '无详细功能描述' }}</p>
+            <p class="text-xs text-slate-400 mt-0.5">{{ selectedPeripheral.description || t('svd_no_detailed_desc') }}</p>
           </div>
 
           <!-- Register Search Filter -->
@@ -604,12 +605,12 @@ onMounted(() => {
               <input
                 v-model="registerFilter"
                 type="text"
-                placeholder="过滤当前寄存器..."
+                :placeholder="t('svd_filter_reg_placeholder')"
                 class="w-full bg-slate-800/80 border border-slate-700 rounded-md pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
               />
             </div>
             <div class="text-xs text-slate-400 font-mono">
-              {{ filteredRegisters.length }} 个寄存器
+              {{ t("svd_reg_count_badge", { count: filteredRegisters.length }) }}
             </div>
           </div>
         </div>
@@ -621,21 +622,21 @@ onMounted(() => {
             class="h-64 flex flex-col items-center justify-center gap-3 text-slate-400 text-xs"
           >
             <RefreshCw class="w-6 h-6 animate-spin text-indigo-500" />
-            <span>正在解析 {{ selectedPeripheral?.name }} 的 SVD 寄存器字典...</span>
+            <span>{{ t("svd_parsing_reg_dict", { name: selectedPeripheral?.name || '' }) }}</span>
           </div>
 
           <div
             v-else-if="!selectedPeripheral"
             class="h-64 flex flex-col items-center justify-center text-slate-500 text-xs"
           >
-            请从左侧选择外设模块
+            {{ t("svd_guide_select_periph") }}
           </div>
 
           <div
             v-else-if="filteredRegisters.length === 0"
             class="h-64 flex flex-col items-center justify-center text-slate-500 text-xs"
           >
-            无匹配寄存器
+            {{ t("svd_no_reg_matched") }}
           </div>
 
           <!-- Registers Card / List -->
@@ -650,7 +651,7 @@ onMounted(() => {
                 <button
                   @click="toggleExpandRegister(reg)"
                   class="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition"
-                  :title="reg.is_expanded ? '折叠位域详情' : '展开位域详情'"
+                  :title="reg.is_expanded ? t('svd_tip_collapse_field') : t('svd_tip_expand_field')"
                 >
                   <ChevronDown v-if="reg.is_expanded" class="w-4 h-4 text-indigo-400" />
                   <ChevronRight v-else class="w-4 h-4" />
@@ -670,7 +671,7 @@ onMounted(() => {
                     </span>
                   </div>
                   <div class="text-[11px] text-slate-400 truncate max-w-md mt-0.5" :title="reg.description">
-                    {{ reg.description || '无描述' }}
+                    {{ reg.description || t('svd_no_desc') }}
                   </div>
                 </div>
               </div>
@@ -679,20 +680,20 @@ onMounted(() => {
               <div class="flex items-center gap-3">
                 <!-- Physical Address -->
                 <div class="hidden md:flex flex-col items-end text-right">
-                  <span class="text-[10px] text-slate-500 uppercase tracking-wider font-mono">物理地址</span>
+                  <span class="text-[10px] text-slate-500 uppercase tracking-wider font-mono">{{ t("svd_th_phys_addr") }}</span>
                   <span class="text-xs font-mono text-slate-300">{{ reg.address }}</span>
                 </div>
 
                 <!-- Reset Value -->
                 <div class="hidden lg:flex flex-col items-end text-right">
-                  <span class="text-[10px] text-slate-500 uppercase tracking-wider font-mono">复位值</span>
+                  <span class="text-[10px] text-slate-500 uppercase tracking-wider font-mono">{{ t("svd_th_reset_val") }}</span>
                   <span class="text-xs font-mono text-slate-400">{{ reg.reset_value }}</span>
                 </div>
 
                 <!-- Live Value Display -->
                 <div class="flex flex-col items-end">
                   <span class="text-[10px] text-slate-500 uppercase tracking-wider font-mono flex items-center gap-1">
-                    <span>当前硬件值</span>
+                    <span>{{ t("svd_th_current_val") }}</span>
                     <span v-if="reg.last_updated" class="text-[9px] text-emerald-400">({{ reg.last_updated }})</span>
                   </span>
                   <div class="flex items-center gap-1">
@@ -700,7 +701,7 @@ onMounted(() => {
                       class="text-xs font-mono px-2 py-0.5 rounded border font-semibold"
                       :class="reg.current_value ? 'bg-indigo-950/80 text-cyan-300 border-indigo-700/80' : 'bg-slate-800 text-slate-500 border-slate-700'"
                     >
-                      {{ reg.current_value || '尚未读取' }}
+                      {{ reg.current_value || t('svd_not_read_yet') }}
                     </span>
                   </div>
                 </div>
@@ -711,20 +712,20 @@ onMounted(() => {
                     @click="readRegister(reg)"
                     :disabled="reg.is_reading"
                     class="p-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-cyan-300 rounded border border-slate-700 text-xs flex items-center gap-1 transition"
-                    title="从单片机硬件通过 SWD 读取寄存器"
+                    :title="t('svd_tip_read_reg')"
                   >
                     <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': reg.is_reading }" />
-                    <span class="hidden sm:inline">读取</span>
+                    <span class="hidden sm:inline">{{ t("svd_btn_read") }}</span>
                   </button>
 
                   <button
                     v-if="!reg.access.toLowerCase().includes('read-only')"
                     @click="openWriteRegisterModal(reg)"
                     class="p-1.5 bg-slate-800 hover:bg-slate-700 text-amber-400 hover:text-amber-300 rounded border border-slate-700 text-xs flex items-center gap-1 transition"
-                    title="向单片机寄存器写入新值"
+                    :title="t('svd_tip_write_reg')"
                   >
                     <Edit3 class="w-3.5 h-3.5" />
-                    <span class="hidden sm:inline">写入</span>
+                    <span class="hidden sm:inline">{{ t("svd_btn_write") }}</span>
                   </button>
                 </div>
               </div>
@@ -738,7 +739,7 @@ onMounted(() => {
               <div class="flex items-center justify-between mb-2">
                 <div class="flex items-center gap-2 text-xs font-semibold text-slate-300">
                   <Sliders class="w-3.5 h-3.5 text-indigo-400" />
-                  <span>寄存器位域分解 (Bitfields - 32-bit):</span>
+                  <span>{{ t("svd_bitfield_decomp_title") }}</span>
                 </div>
                 <div v-if="reg.current_binary" class="text-[11px] font-mono text-cyan-400/90 tracking-wider">
                   BIN: {{ reg.current_binary }}
@@ -750,12 +751,12 @@ onMounted(() => {
                 <table class="w-full text-left text-xs border-collapse">
                   <thead>
                     <tr class="bg-slate-900/90 text-slate-400 font-mono text-[11px] border-b border-slate-800">
-                      <th class="py-1.5 px-2.5 w-20">位区间</th>
-                      <th class="py-1.5 px-2.5 w-36">位域名称</th>
-                      <th class="py-1.5 px-2.5 w-20">属性</th>
-                      <th class="py-1.5 px-2.5 w-32">当前位值</th>
-                      <th class="py-1.5 px-2.5">功能描述</th>
-                      <th class="py-1.5 px-2.5 w-32 text-right">操作</th>
+                      <th class="py-1.5 px-2.5 w-20">{{ t("svd_th_bit_range") }}</th>
+                      <th class="py-1.5 px-2.5 w-36">{{ t("svd_th_field_name") }}</th>
+                      <th class="py-1.5 px-2.5 w-20">{{ t("svd_th_attr") }}</th>
+                      <th class="py-1.5 px-2.5 w-32">{{ t("svd_th_current_bit_val") }}</th>
+                      <th class="py-1.5 px-2.5">{{ t("svd_th_fn_desc") }}</th>
+                      <th class="py-1.5 px-2.5 w-32 text-right">{{ t("svd_th_action") }}</th>
                     </tr>
                   </thead>
                   <tbody class="divide-y divide-slate-800/60 font-mono">
@@ -783,10 +784,10 @@ onMounted(() => {
                           <span class="text-cyan-400 font-semibold">{{ field.hex_value }}</span>
                           <span class="text-[10px] text-slate-500">({{ field.value }})</span>
                         </div>
-                        <span v-else class="text-slate-600 text-[11px]">未采样</span>
+                        <span v-else class="text-slate-600 text-[11px]">{{ t("svd_not_sampled") }}</span>
                       </td>
                       <td class="py-1.5 px-2.5 text-slate-400 font-sans text-[11px]" :title="field.description">
-                        {{ field.description || '保留/无说明' }}
+                        {{ field.description || t('svd_reserved_no_desc') }}
                       </td>
                       <td class="py-1.5 px-2.5 text-right font-sans">
                         <div class="flex items-center justify-end gap-1.5">
@@ -796,9 +797,9 @@ onMounted(() => {
                             @click="toggleBitField(reg, field)"
                             class="px-2 py-0.5 rounded text-[11px] font-mono font-semibold transition"
                             :class="field.value === 1 ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'"
-                            :title="`快速切换位状态 (当前为 ${field.value ?? 0})`"
+                            :title="t('svd_tip_toggle_bit', { val: field.value ?? 0, default: `快速切换位状态 (当前为 ${field.value ?? 0})` })"
                           >
-                            {{ field.value === 1 ? '1 [开]' : '0 [关]' }}
+                            {{ field.value === 1 ? t('svd_bit_on') : t('svd_bit_off') }}
                           </button>
 
                           <!-- Write Field Dialog Button -->
@@ -806,9 +807,9 @@ onMounted(() => {
                             v-if="!field.access.toLowerCase().includes('read-only')"
                             @click="openWriteFieldModal(reg, field)"
                             class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-indigo-300 rounded border border-slate-700 text-[11px] transition"
-                            title="修改位域数值并写入"
+                            :title="t('svd_tip_modify_field')"
                           >
-                            修改
+                            {{ t("svd_btn_modify") }}
                           </button>
                         </div>
                       </td>
@@ -817,7 +818,7 @@ onMounted(() => {
                 </table>
               </div>
               <div v-else class="text-xs text-slate-500 italic py-2">
-                该寄存器 SVD 中未定义具体位域分解。
+                {{ t("svd_no_bitfields_defined") }}
               </div>
             </div>
           </div>
@@ -834,7 +835,7 @@ onMounted(() => {
         <div class="flex items-center justify-between border-b border-slate-800 pb-3">
           <div class="flex items-center gap-2">
             <Edit3 class="w-5 h-5 text-indigo-400" />
-            <h3 class="font-bold text-white text-sm">写入寄存器: {{ editingRegister.name }}</h3>
+            <h3 class="font-bold text-white text-sm">{{ t("svd_dialog_write_reg_title", { name: editingRegister.name }) }}</h3>
           </div>
           <button @click="editingRegister = null" class="text-slate-400 hover:text-white">&times;</button>
         </div>
@@ -842,29 +843,29 @@ onMounted(() => {
         <div class="space-y-3 text-xs">
           <div class="bg-slate-950 p-2.5 rounded border border-slate-800 text-slate-300 space-y-1 font-mono">
             <div class="flex justify-between">
-              <span class="text-slate-500">所属外设:</span>
+              <span class="text-slate-500">{{ t("svd_field_periph") }}</span>
               <span class="text-slate-200">{{ selectedPeripheral?.name }}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">物理地址:</span>
+              <span class="text-slate-500">{{ t("svd_field_phys_addr") }}</span>
               <span class="text-slate-200">{{ editingRegister.address }}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">当前读取值:</span>
-              <span class="text-cyan-400">{{ editingRegister.current_value || '未知' }}</span>
+              <span class="text-slate-500">{{ t("svd_field_current_val") }}</span>
+              <span class="text-cyan-400">{{ editingRegister.current_value || t('svd_field_unknown') }}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">复位默认值:</span>
+              <span class="text-slate-500">{{ t("svd_field_reset_default") }}</span>
               <span class="text-slate-400">{{ editingRegister.reset_value }}</span>
             </div>
           </div>
 
           <div>
-            <label class="block text-slate-400 mb-1 font-medium">要写入的十六进制或十进制数值:</label>
+            <label class="block text-slate-400 mb-1 font-medium">{{ t("svd_field_hex_dec_label") }}</label>
             <input
               v-model="editRegValueHex"
               type="text"
-              placeholder="例如: 0x00000001 或 0x12"
+              :placeholder="t('svd_field_val_placeholder')"
               class="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-indigo-500"
               @keyup.enter="confirmWriteRegister"
             />
@@ -876,7 +877,7 @@ onMounted(() => {
             @click="editingRegister = null"
             class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition"
           >
-            取消
+            {{ t("svd_btn_cancel") }}
           </button>
           <button
             @click="confirmWriteRegister"
@@ -884,7 +885,7 @@ onMounted(() => {
             class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded text-xs transition flex items-center gap-1.5 disabled:opacity-50"
           >
             <RefreshCw v-if="isSubmittingReg" class="w-3.5 h-3.5 animate-spin" />
-            <span>确认写入 SWD</span>
+            <span>{{ t("svd_btn_confirm_write_swd") }}</span>
           </button>
         </div>
       </div>
@@ -899,7 +900,7 @@ onMounted(() => {
         <div class="flex items-center justify-between border-b border-slate-800 pb-3">
           <div class="flex items-center gap-2">
             <Sliders class="w-5 h-5 text-indigo-400" />
-            <h3 class="font-bold text-white text-sm">修改位域: {{ editingField.field.name }}</h3>
+            <h3 class="font-bold text-white text-sm">{{ t("svd_dialog_modify_field_title", { name: editingField.field.name }) }}</h3>
           </div>
           <button @click="editingField = null" class="text-slate-400 hover:text-white">&times;</button>
         </div>
@@ -907,30 +908,30 @@ onMounted(() => {
         <div class="space-y-3 text-xs">
           <div class="bg-slate-950 p-2.5 rounded border border-slate-800 text-slate-300 space-y-1 font-mono">
             <div class="flex justify-between">
-              <span class="text-slate-500">所属寄存器:</span>
+              <span class="text-slate-500">{{ t("svd_field_reg_owner") }}</span>
               <span class="text-slate-200">{{ editingField.reg.name }} ({{ editingField.reg.offset }})</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">位域区间:</span>
-              <span class="text-indigo-300">{{ editingField.field.bit_range }} ({{ editingField.field.bit_width }} 位)</span>
+              <span class="text-slate-500">{{ t("svd_field_bit_range_label") }}</span>
+              <span class="text-indigo-300">{{ t("svd_field_bit_width_badge", { range: editingField.field.bit_range, width: editingField.field.bit_width }) }}</span>
             </div>
             <div class="flex justify-between">
-              <span class="text-slate-500">当前位值:</span>
+              <span class="text-slate-500">{{ t("svd_field_current_bit_val_label") }}</span>
               <span class="text-cyan-400">{{ editingField.field.hex_value || '0x0' }} ({{ editingField.field.value ?? 0 }})</span>
             </div>
           </div>
 
           <div>
-            <label class="block text-slate-400 mb-1 font-medium">输入新位值 (0x 或 十进制):</label>
+            <label class="block text-slate-400 mb-1 font-medium">{{ t("svd_input_new_bit_val") }}</label>
             <input
               v-model="editFieldValue"
               type="text"
-              placeholder="例如: 0x1 或 3"
+              :placeholder="t('svd_input_bit_val_placeholder')"
               class="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-indigo-500"
               @keyup.enter="submitWriteField(editingField.reg, editingField.field)"
             />
             <p class="text-[11px] text-slate-500 mt-1">
-              注意: 修改位域会自动保持寄存器中其它无关位不变 (执行 Read-Modify-Write 操作)。
+              {{ t("svd_modify_field_warning") }}
             </p>
           </div>
         </div>
@@ -940,7 +941,7 @@ onMounted(() => {
             @click="editingField = null"
             class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition"
           >
-            取消
+            {{ t("svd_btn_cancel") }}
           </button>
           <button
             @click="submitWriteField(editingField.reg, editingField.field)"
@@ -948,7 +949,7 @@ onMounted(() => {
             class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded text-xs transition flex items-center gap-1.5 disabled:opacity-50"
           >
             <RefreshCw v-if="isSubmittingField" class="w-3.5 h-3.5 animate-spin" />
-            <span>写入位域</span>
+            <span>{{ t("svd_btn_write_field") }}</span>
           </button>
         </div>
       </div>

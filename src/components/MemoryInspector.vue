@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import { t } from '../utils/i18n';
 import {
   Database,
   RefreshCw,
@@ -76,10 +77,10 @@ const parsedBaseAddress = computed<number>(() => {
 
 // Quick address shortcuts
 const QUICK_TARGETS = [
-  { label: 'SRAM 起始', addr: '0x20000000' },
-  { label: 'Flash 起始', addr: '0x08000000' },
-  { label: '向量表/ROM', addr: '0x00000000' },
-  { label: '外设基址 (APB/AHB)', addr: '0x40000000' },
+  { label: t('mem_preset_sram'), addr: '0x20000000' },
+  { label: t('mem_preset_flash'), addr: '0x08000000' },
+  { label: t('mem_preset_rom'), addr: '0x00000000' },
+  { label: t('mem_preset_periph'), addr: '0x40000000' },
 ];
 
 function setQuickAddress(addr: string) {
@@ -130,7 +131,7 @@ async function handleReadMemory() {
     }, 1500);
 
   } catch (err: any) {
-    errorMessage.value = `读取内存失败: ${err}`;
+    errorMessage.value = t('mem_err_read', { err });
   } finally {
     isLoading.value = false;
   }
@@ -218,7 +219,7 @@ async function commitEditChunk() {
 
   const expectedLength = size * 2;
   if (rawHex.length !== expectedLength || !/^[0-9a-fA-F]+$/.test(rawHex)) {
-    alert(`请输入有效的 ${expectedLength} 位十六进制字符 (如 ${size === 1 ? 'FF' : size === 2 ? 'FFFF' : size === 4 ? '12345678' : '0123456789ABCDEF'})`);
+    alert(t('mem_alert_invalid_hex', { len: expectedLength }));
     return;
   }
 
@@ -241,7 +242,7 @@ async function commitEditChunk() {
     editingStartIndex.value = null;
     editingValue.value = '';
   } catch (err: any) {
-    alert(`写入内存失败: ${err}`);
+    alert(t('mem_err_write', { err }));
   } finally {
     isWritingByte.value = false;
   }
@@ -253,7 +254,7 @@ const selectedAddressHex = computed<string>(() => {
   const start = parsedBaseAddress.value + selectedStartIndex.value;
   if (selectedByteCount.value > 1) {
     const end = start + selectedByteCount.value - 1;
-    return `0x${start.toString(16).padStart(8, '0').toUpperCase()} ~ 0x${end.toString(16).padStart(8, '0').toUpperCase()} (${selectedByteCount.value} 字节)`;
+    return t('mem_span_summary', { start: '0x' + start.toString(16).padStart(8, '0').toUpperCase(), end: '0x' + end.toString(16).padStart(8, '0').toUpperCase(), count: selectedByteCount.value });
   }
   return `0x${start.toString(16).padStart(8, '0').toUpperCase()}`;
 });
@@ -398,11 +399,11 @@ function copyFormattedHex() {
 // --- Dump Memory to File ---
 async function handleExecuteDump() {
   if (!dumpFilePath.value.trim()) {
-    alert('请输入导出的目标文件绝对物理路径');
+    alert(t('mem_alert_need_dump_path'));
     return;
   }
   isDumping.value = true;
-  dumpStatus.value = '正在分块读取目标芯片内存并写入文件...';
+  dumpStatus.value = t('mem_status_dumping');
 
   try {
     const totalBytes = Number(dumpSizeKb.value) * 1024;
@@ -413,9 +414,9 @@ async function handleExecuteDump() {
       probeId: null,
       targetOverride: null,
     });
-    dumpStatus.value = `✔ 转储完成！成功导出 ${res.count} 字节到: ${res.file_path}`;
+    dumpStatus.value = t('mem_status_dump_ok', { count: res.count, path: res.file_path });
   } catch (err: any) {
-    dumpStatus.value = `❌ 转储失败: ${err}`;
+    dumpStatus.value = t('mem_status_dump_fail', { err });
   } finally {
     isDumping.value = false;
   }
@@ -424,11 +425,11 @@ async function handleExecuteDump() {
 // --- Load File to Memory ---
 async function handleExecuteLoad() {
   if (!loadFilePath.value.trim()) {
-    alert('请输入要加载的本地 .bin 文件的绝对物理路径');
+    alert(t('mem_alert_need_load_path'));
     return;
   }
   isUploading.value = true;
-  loadStatus.value = '正在将本地二进制文件写入目标 RAM...';
+  loadStatus.value = t('mem_status_loading');
 
   try {
     const res: any = await safeInvoke('pyocd_load_file_to_memory', {
@@ -437,10 +438,10 @@ async function handleExecuteLoad() {
       probeId: null,
       targetOverride: null,
     });
-    loadStatus.value = `✔ 载入完成！成功写入 ${res.count} 字节至 ${res.address}`;
+    loadStatus.value = t('mem_status_load_ok', { count: res.count, addr: res.address });
     handleReadMemory();
   } catch (err: any) {
-    loadStatus.value = `❌ 载入失败: ${err}`;
+    loadStatus.value = t('mem_status_load_fail', { err });
   } finally {
     isUploading.value = false;
   }
@@ -482,14 +483,14 @@ function isChunkChanged(startIdx: number, size: number): boolean {
       <div class="flex flex-wrap items-center gap-2">
         <div class="flex items-center gap-1.5 text-zinc-200 font-semibold mr-1">
           <Database class="w-4 h-4 text-emerald-400" />
-          <span>内存查看与修改</span>
+          <span>{{ t("mem_title") }}</span>
         </div>
 
         <div class="h-4 w-px bg-zinc-800 hidden sm:block"></div>
 
         <!-- Address input -->
         <div class="flex items-center gap-1">
-          <span class="text-zinc-400 text-[11px]">基址:</span>
+          <span class="text-zinc-400 text-[11px]">{{ t("mem_base_addr_label") }}</span>
           <input
             v-model="addressInput"
             @keyup.enter="handleReadMemory"
@@ -501,7 +502,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
 
         <!-- Length selector -->
         <div class="flex items-center gap-1">
-          <span class="text-zinc-400 text-[11px]">长度:</span>
+          <span class="text-zinc-400 text-[11px]">{{ t("mem_len_label") }}</span>
           <select
             v-model="byteCount"
             class="bg-zinc-950 border border-zinc-700 rounded px-1.5 py-1 text-zinc-200 text-xs focus:outline-none"
@@ -523,7 +524,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
           class="flex items-center gap-1.5 px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-medium transition-colors disabled:opacity-50 shadow-sm"
         >
           <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': isLoading }" />
-          <span>读取</span>
+          <span>{{ t("mem_btn_read") }}</span>
         </button>
 
         <!-- View Format Mode Toggle (8-bit / 16-bit / 32-bit / 64-bit) -->
@@ -532,7 +533,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
             @click="viewFormat = '8bit'"
             class="px-2 py-0.5 rounded text-[11px] font-mono transition-colors"
             :class="viewFormat === '8bit' ? 'bg-emerald-600 text-white font-bold' : 'text-zinc-400 hover:text-zinc-200'"
-            title="单字节展示 (8-bit uint8)"
+            :title="t('mem_view_8bit')"
           >
             8 bit
           </button>
@@ -540,7 +541,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
             @click="viewFormat = '16bit'"
             class="px-2 py-0.5 rounded text-[11px] font-mono transition-colors"
             :class="viewFormat === '16bit' ? 'bg-emerald-600 text-white font-bold' : 'text-zinc-400 hover:text-zinc-200'"
-            title="双字节小端展示 (16-bit uint16 LE)"
+            :title="t('mem_view_16bit')"
           >
             16 bit
           </button>
@@ -548,7 +549,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
             @click="viewFormat = '32bit'"
             class="px-2 py-0.5 rounded text-[11px] font-mono transition-colors"
             :class="viewFormat === '32bit' ? 'bg-emerald-600 text-white font-bold' : 'text-zinc-400 hover:text-zinc-200'"
-            title="四字节小端展示 (32-bit uint32 LE)"
+            :title="t('mem_view_32bit')"
           >
             32 bit
           </button>
@@ -556,7 +557,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
             @click="viewFormat = '64bit'"
             class="px-2 py-0.5 rounded text-[11px] font-mono transition-colors"
             :class="viewFormat === '64bit' ? 'bg-emerald-600 text-white font-bold' : 'text-zinc-400 hover:text-zinc-200'"
-            title="八字节小端展示 (64-bit uint64 LE)"
+            :title="t('mem_view_64bit')"
           >
             64 bit
           </button>
@@ -571,7 +572,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
             : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
         >
           <component :is="autoRefresh ? Pause : Play" class="w-3.5 h-3.5" />
-          <span>{{ autoRefresh ? '自动刷新中' : '自动刷新' }}</span>
+          <span>{{ autoRefresh ? t('mem_auto_refresh_on') : t('mem_auto_refresh_off') }}</span>
         </button>
       </div>
 
@@ -593,30 +594,30 @@ function isChunkChanged(startIdx: number, size: number): boolean {
         <button
           @click="copyFormattedHex"
           class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 rounded text-xs flex items-center gap-1 transition-colors"
-          title="复制当前内存格式化十六进制视图到剪贴板"
+          :title="t('mem_btn_copy_hex_tip')"
         >
           <component :is="copySuccess ? Check : Copy" class="w-3.5 h-3.5" :class="{ 'text-emerald-400': copySuccess }" />
-          <span>{{ copySuccess ? '已复制' : '复制Hex' }}</span>
+          <span>{{ copySuccess ? t('mem_btn_copied_hex') : t('mem_btn_copy_hex') }}</span>
         </button>
 
         <!-- Dump to Bin File -->
         <button
           @click="isDumpModalOpen = true"
           class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-cyan-300 border border-cyan-800/80 rounded text-xs flex items-center gap-1.5 transition-colors"
-          title="将芯片 Flash/RAM 任意大段内存导出保存为本地 .bin 文件"
+          :title="t('mem_btn_dump_tip')"
         >
           <Download class="w-3.5 h-3.5 text-cyan-400" />
-          <span>Dump到Bin</span>
+          <span>{{ t("mem_btn_dump_bin") }}</span>
         </button>
 
         <!-- Load Bin to RAM -->
         <button
           @click="isLoadModalOpen = true"
           class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-purple-300 border border-purple-800/80 rounded text-xs flex items-center gap-1.5 transition-colors"
-          title="将本地 .bin 文件直接加载写入到单片机 RAM 内存"
+          :title="t('mem_btn_load_tip')"
         >
           <Upload class="w-3.5 h-3.5 text-purple-400" />
-          <span>加载Bin到RAM</span>
+          <span>{{ t("mem_btn_load_bin") }}</span>
         </button>
       </div>
     </div>
@@ -636,7 +637,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
       <div class="flex-1 flex flex-col overflow-hidden border-r border-zinc-800">
         <!-- Hex Table Header -->
         <div class="bg-zinc-900/90 border-b border-zinc-800 px-4 py-1.5 text-[11px] text-zinc-400 font-mono flex items-center select-none shrink-0">
-          <span class="w-24 text-zinc-500">偏移地址</span>
+          <span class="w-24 text-zinc-500">{{ t("mem_th_offset") }}</span>
           <div class="flex-1 flex items-center gap-2">
             <!-- 8-bit Header -->
             <template v-if="viewFormat === '8bit'">
@@ -673,15 +674,15 @@ function isChunkChanged(startIdx: number, size: number): boolean {
               </div>
             </template>
           </div>
-          <span class="w-40 text-left text-zinc-500 pl-4 border-l border-zinc-800">ASCII 文本</span>
+          <span class="w-40 text-left text-zinc-500 pl-4 border-l border-zinc-800">{{ t("mem_th_ascii") }}</span>
         </div>
 
         <!-- Hex Rows Scroll Area -->
         <div class="flex-1 overflow-y-auto p-4 space-y-1 font-mono text-xs">
           <div v-if="memoryBytes.length === 0" class="h-full flex flex-col items-center justify-center text-zinc-500 space-y-2 py-16">
             <Database class="w-10 h-10 text-zinc-700 mb-1" />
-            <div class="text-zinc-400 font-bold">暂无内存数据，请连接调试器后点击「读取」</div>
-            <div class="text-zinc-600 text-[11px]">可输入目标物理基址 (如 0x20000000) 与长度后点击上方读取按钮</div>
+            <div class="text-zinc-400 font-bold">{{ t("mem_empty_tip") }}</div>
+            <div class="text-zinc-600 text-[11px]">{{ t("mem_empty_guide") }}</div>
           </div>
 
           <!-- Rows (16 bytes per line) -->
@@ -898,7 +899,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
           <div class="flex items-center justify-between border-b border-zinc-800 pb-2">
             <div class="flex items-center gap-1.5 text-zinc-300 font-semibold">
               <Sparkles class="w-4 h-4 text-emerald-400" />
-              <span>数据解析器 (Inspector)</span>
+              <span>{{ t("mem_inspector_title") }}</span>
             </div>
             <span v-if="selectedStartIndex !== null" class="text-[11px] text-zinc-500 font-mono">
               +0x{{ selectedStartIndex.toString(16).toUpperCase() }}
@@ -908,8 +909,8 @@ function isChunkChanged(startIdx: number, size: number): boolean {
           <!-- Selected Byte Address Banner -->
           <div class="bg-zinc-950 border border-zinc-800 rounded p-2.5 space-y-1">
             <div class="text-[10px] text-zinc-500 uppercase flex items-center justify-between">
-              <span>选中物理地址 (Physical Address)</span>
-              <span class="text-emerald-400 font-bold font-mono">{{ selectedByteCount }} 字节</span>
+              <span>{{ t("mem_sel_phys_addr") }}</span>
+              <span class="text-emerald-400 font-bold font-mono">{{ t("mem_sel_bytes_count", { count: selectedByteCount }) }}</span>
             </div>
             <div class="text-emerald-400 font-bold text-xs truncate">
               {{ selectedAddressHex }}
@@ -920,7 +921,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
           <div class="space-y-1.5">
             <div class="text-[10px] text-zinc-500 flex items-center gap-1">
               <MousePointer class="w-3 h-3" />
-              <span>连续内存多选 (Shift + 点击 或 快捷跨度):</span>
+              <span>{{ t("mem_sel_range_title") }}</span>
             </div>
             <div class="grid grid-cols-4 gap-1">
               <button
@@ -957,11 +958,11 @@ function isChunkChanged(startIdx: number, size: number): boolean {
           <!-- Multi-byte Selected Range Raw Values -->
           <div v-if="inspectorValues" class="bg-zinc-950/80 border border-zinc-800 rounded p-2 text-[11px] space-y-1">
             <div class="flex items-center justify-between text-zinc-500 text-[10px]">
-              <span>选中字节 Hex:</span>
+              <span>{{ t("mem_sel_hex") }}</span>
               <span class="text-zinc-400 font-mono">{{ inspectorValues.hexDumpStr }}</span>
             </div>
             <div class="flex items-center justify-between text-zinc-500 text-[10px]">
-              <span>选中文本 ASCII:</span>
+              <span>{{ t("mem_sel_ascii") }}</span>
               <span class="text-cyan-300 font-bold">"{{ inspectorValues.asciiStr }}"</span>
             </div>
           </div>
@@ -1036,25 +1037,25 @@ function isChunkChanged(startIdx: number, size: number): boolean {
           </div>
 
           <div v-else class="text-zinc-600 text-center py-6 italic text-[11px]">
-            点击左侧任意数据单元以查看解码数据
+            {{ t("mem_inspector_click_tip") }}
           </div>
         </div>
 
         <!-- Hot Edit & Refresh Tips -->
         <div class="border-t border-zinc-800 pt-3 text-[10px] text-zinc-500 space-y-1 shrink-0 mt-4">
-          <div>💡 <strong>提示</strong>: 双击左侧任意数值单元可直接就地修改 (热写入)</div>
-          <div>⌨️ <strong>多选</strong>: 在 8-bit 下按住 Shift 点击可选择连续内存范围</div>
-          <div>🔥 <strong>变动高亮</strong>: 自动刷新时数值发生变动的字节以高亮跳动显示</div>
-          <div v-if="lastReadTime">🕒 上次更新: {{ lastReadTime }}</div>
+          <div v-html="t('mem_tip_inplace_edit')"></div>
+          <div v-html="t('mem_tip_multiselect')"></div>
+          <div v-html="t('mem_tip_diff_highlight')"></div>
+          <div v-if="lastReadTime">{{ t("mem_last_update_time", { time: lastReadTime }) }}</div>
         </div>
       </div>
     </div>
 
     <!-- Bottom Status Bar -->
     <div class="bg-zinc-900 border-t border-zinc-800 px-4 py-1 text-[10px] text-zinc-500 flex items-center justify-between">
-      <span>已加载 {{ memoryBytes.length }} 字节 ({{ addressInput }} ~ 0x{{ (parsedBaseAddress + memoryBytes.length).toString(16).toUpperCase() }}) | 当前展示格式: {{ viewFormat }}</span>
-      <span v-if="autoRefresh" class="text-cyan-400 font-semibold animate-pulse">● 自动刷新运行中 ({{ refreshIntervalMs }}ms)</span>
-      <span v-else class="text-zinc-400">单次刷新模式</span>
+      <span>{{ t("mem_status_loaded_bytes", { count: memoryBytes.length, start: addressInput, end: "0x" + (parsedBaseAddress + memoryBytes.length).toString(16).toUpperCase(), fmt: viewFormat }) }}</span>
+      <span v-if="autoRefresh" class="text-cyan-400 font-semibold animate-pulse">{{ t("mem_status_autorefresh_running", { interval: refreshIntervalMs }) }}</span>
+      <span v-else class="text-zinc-400">{{ t("mem_status_single_refresh") }}</span>
     </div>
 
     <!-- Dump Memory Modal Dialog -->
@@ -1066,7 +1067,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
         <div class="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/60">
           <div class="flex items-center gap-2 text-zinc-100 font-bold text-sm">
             <Download class="w-4 h-4 text-cyan-400" />
-            <span>导出 Flash / RAM 到本地 Bin 文件</span>
+            <span>{{ t("mem_dump_dialog_title") }}</span>
           </div>
           <button @click="isDumpModalOpen = false" class="text-zinc-400 hover:text-white p-1 rounded">
             <X class="w-4 h-4" />
@@ -1075,7 +1076,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
 
         <div class="p-5 space-y-3">
           <div>
-            <label class="block text-[11px] text-zinc-400 mb-1">起始内存物理地址</label>
+            <label class="block text-[11px] text-zinc-400 mb-1">{{ t("mem_dump_field_start") }}</label>
             <input
               v-model="dumpAddress"
               type="text"
@@ -1084,7 +1085,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
           </div>
 
           <div>
-            <label class="block text-[11px] text-zinc-400 mb-1">转储大小 (KB)</label>
+            <label class="block text-[11px] text-zinc-400 mb-1">{{ t("mem_dump_field_size_kb") }}</label>
             <input
               v-model="dumpSizeKb"
               type="number"
@@ -1092,11 +1093,11 @@ function isChunkChanged(startIdx: number, size: number): boolean {
               max="2048"
               class="w-full bg-zinc-950 border border-zinc-700 rounded px-3 py-1.5 text-zinc-200 text-xs font-mono outline-none focus:border-cyan-500"
             />
-            <div class="text-[10px] text-zinc-500 mt-0.5">例如: 64 表示导出 65536 字节</div>
+            <div class="text-[10px] text-zinc-500 mt-0.5">{{ t("mem_dump_size_tip") }}</div>
           </div>
 
           <div>
-            <label class="block text-[11px] text-zinc-400 mb-1">本地保存路径 (.bin)</label>
+            <label class="block text-[11px] text-zinc-400 mb-1">{{ t("mem_dump_field_save_path") }}</label>
             <input
               v-model="dumpFilePath"
               type="text"
@@ -1111,7 +1112,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
 
         <div class="px-5 py-3 border-t border-zinc-800 bg-zinc-950/40 flex justify-end gap-2">
           <button @click="isDumpModalOpen = false" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs">
-            关闭
+            {{ t("mem_btn_close") }}
           </button>
           <button
             @click="handleExecuteDump"
@@ -1119,7 +1120,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
             class="px-4 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"
           >
             <RefreshCw v-if="isDumping" class="w-3.5 h-3.5 animate-spin" />
-            <span>{{ isDumping ? '正在转储...' : '开始转储' }}</span>
+            <span>{{ isDumping ? t('mem_btn_dumping') : t('mem_btn_start_dump') }}</span>
           </button>
         </div>
       </div>
@@ -1134,7 +1135,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
         <div class="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/60">
           <div class="flex items-center gap-2 text-zinc-100 font-bold text-sm">
             <Upload class="w-4 h-4 text-purple-400" />
-            <span>加载本地 Bin 文件至单片机 RAM</span>
+            <span>{{ t("mem_load_dialog_title") }}</span>
           </div>
           <button @click="isLoadModalOpen = false" class="text-zinc-400 hover:text-white p-1 rounded">
             <X class="w-4 h-4" />
@@ -1143,7 +1144,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
 
         <div class="p-5 space-y-3">
           <div>
-            <label class="block text-[11px] text-zinc-400 mb-1">目标 RAM 起始物理地址</label>
+            <label class="block text-[11px] text-zinc-400 mb-1">{{ t("mem_load_field_target_addr") }}</label>
             <input
               v-model="loadAddress"
               type="text"
@@ -1152,11 +1153,11 @@ function isChunkChanged(startIdx: number, size: number): boolean {
           </div>
 
           <div>
-            <label class="block text-[11px] text-zinc-400 mb-1">本地 Bin 文件物理绝对路径</label>
+            <label class="block text-[11px] text-zinc-400 mb-1">{{ t("mem_load_field_path") }}</label>
             <input
               v-model="loadFilePath"
               type="text"
-              placeholder="例如: D:\Projects\firmware_test.bin"
+              :placeholder="t('mem_load_path_placeholder')"
               class="w-full bg-zinc-950 border border-zinc-700 rounded px-3 py-1.5 text-zinc-200 text-xs font-mono outline-none focus:border-purple-500"
             />
           </div>
@@ -1168,7 +1169,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
 
         <div class="px-5 py-3 border-t border-zinc-800 bg-zinc-950/40 flex justify-end gap-2">
           <button @click="isLoadModalOpen = false" class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs">
-            关闭
+            {{ t("mem_btn_close") }}
           </button>
           <button
             @click="handleExecuteLoad"
@@ -1176,7 +1177,7 @@ function isChunkChanged(startIdx: number, size: number): boolean {
             class="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50"
           >
             <RefreshCw v-if="isUploading" class="w-3.5 h-3.5 animate-spin" />
-            <span>{{ isUploading ? '正在写入...' : '开始载入' }}</span>
+            <span>{{ isUploading ? t('mem_btn_loading') : t('mem_btn_start_load') }}</span>
           </button>
         </div>
       </div>

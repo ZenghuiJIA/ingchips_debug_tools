@@ -27,6 +27,7 @@ import {
   Check,
   Sliders
 } from '@lucide/vue';
+import { t } from '../utils/i18n';
 
 defineProps<{
   isConnected: boolean;
@@ -37,14 +38,14 @@ const isProtocolModalOpen = ref<boolean>(false);
 const activeProtocolTab = ref<'firewater' | 'justfloat' | 'custom_json' | 'rawdata'>('custom_json');
 const isCopied = ref<boolean>(false);
 const isRustEngineActive = ref<boolean>(false);
-const activeProtocolName = ref<string>('通用默认解析 (内置)');
+const activeProtocolName = ref<string>(t('plot_active_default'));
 const protocolApplySuccess = ref<string>('');
 const protocolApplyError = ref<string>('');
 
 // Preset JSON protocol configurations
 const presetCustomJsonBinary = JSON.stringify({
   name: "Custom_IMU_Binary",
-  description: "6轴传感器二进制协议 (0xAA 0x55 帧头 + 16字节定长帧)",
+  description: t("plot_proto_6axis_desc"),
   type: "binary",
   endian: "little",
   frame: {
@@ -65,7 +66,7 @@ const presetCustomJsonBinary = JSON.stringify({
 
 const presetCustomJsonFirewater = JSON.stringify({
   name: "FireWater_Text",
-  description: "文本行模式: 逗号分隔浮点/整数或 key:value 键值对",
+  description: t("plot_proto_text_desc"),
   type: "firewater",
   endian: "little",
   channels: []
@@ -73,7 +74,7 @@ const presetCustomJsonFirewater = JSON.stringify({
 
 const presetCustomJsonJustFloat = JSON.stringify({
   name: "JustFloat_Binary",
-  description: "VOFA+ 标准 JustFloat: N个float32 + 固定尾标 00 00 80 7F",
+  description: t("plot_proto_justfloat_desc"),
   type: "justfloat",
   endian: "little",
   channels: [
@@ -93,13 +94,13 @@ async function applyRustProtocolConfig() {
     const parsed = JSON.parse(customProtocolJsonText.value);
     await safeInvoke('set_waveform_protocol', { configJson: customProtocolJsonText.value });
     isRustEngineActive.value = true;
-    activeProtocolName.value = `Rust后端引擎: ${parsed.name || '自定义协议'}`;
-    protocolApplySuccess.value = `已成功下发至 Rust 后端解析器！当前协议: ${parsed.name}`;
+    activeProtocolName.value = t('plot_proto_rust_active', { name: parsed.name || 'Custom' });
+    protocolApplySuccess.value = t('plot_proto_applied_success', { name: parsed.name });
     setTimeout(() => {
       protocolApplySuccess.value = '';
     }, 3000);
   } catch (err: any) {
-    protocolApplyError.value = `协议配置下发失败: ${err}`;
+    protocolApplyError.value = t('plot_proto_apply_failed', { err });
   }
 }
 
@@ -107,13 +108,13 @@ async function resetToDefaultProtocol() {
   try {
     await safeInvoke('clear_waveform_protocol');
     isRustEngineActive.value = false;
-    activeProtocolName.value = '通用默认解析 (内置)';
-    protocolApplySuccess.value = '已恢复内置默认解析 (ASCII/JustFloat 自动识别)';
+    activeProtocolName.value = t('plot_active_default');
+    protocolApplySuccess.value = t('plot_proto_restored_default');
     setTimeout(() => {
       protocolApplySuccess.value = '';
     }, 3000);
   } catch (err: any) {
-    protocolApplyError.value = `恢复默认失败: ${err}`;
+    protocolApplyError.value = t('plot_proto_restore_failed', { err });
   }
 }
 
@@ -162,13 +163,13 @@ const isSampling = ref<boolean>(false);
 const jscopeError = ref<string>('');
 const selectedCoreTarget = ref<string>('cortex_m');
 
-const coreTargetOptions = [
-  { label: '通用 ARM Cortex-M (PyOCD cortex_m/推荐)', value: 'cortex_m' },
+const coreTargetOptions = computed(() => [
+  { label: t('plot_target_cortex_m_rec', { default: '通用 ARM Cortex-M (PyOCD cortex_m/推荐)' }), value: 'cortex_m' },
   { label: 'Cortex-M4 (STM32F4/GD32F4/nRF52)', value: 'cortex_m4' },
   { label: 'Cortex-M3 (STM32F1/GD32F1)', value: 'cortex_m3' },
   { label: 'Cortex-M0 / M0+ (STM32F0/RP2040)', value: 'cortex_m0' },
   { label: 'Cortex-M7 (STM32H7/i.MX RT)', value: 'cortex_m7' },
-];
+]);
 
 // SWD Frequency & Microsecond Sampling Configuration
 const swdClockFreq = ref<number>(10000000); // 10 MHz default
@@ -176,21 +177,21 @@ const samplePeriodUs = ref<number>(20000); // 20 ms default
 const sampleRateWarning = ref<string>('');
 
 const swdFreqOptions = [
-  { label: '50 MHz (极速硬件)', value: 50000000 },
-  { label: '40 MHz (高速)', value: 40000000 },
+  { label: t('plot_swd_preset_fast'), value: 50000000 },
+  { label: t('plot_swd_preset_high'), value: 40000000 },
   { label: '25 MHz', value: 25000000 },
   { label: '20 MHz', value: 20000000 },
-  { label: '10 MHz (推荐标准)', value: 10000000 },
+  { label: t('plot_swd_preset_standard'), value: 10000000 },
   { label: '5 MHz', value: 5000000 },
   { label: '2 MHz', value: 2000000 },
-  { label: '1 MHz (常用稳定)', value: 1000000 },
+  { label: t('plot_swd_preset_stable'), value: 1000000 },
   { label: '500 kHz', value: 500000 },
   { label: '200 kHz', value: 200000 },
-  { label: '100 kHz (长线抗干扰)', value: 100000 },
+  { label: t('plot_swd_preset_anti_noise'), value: 100000 },
 ];
 
 const samplingPeriodPresets = [
-  { label: '1 MHz (1 µs 极速采样)', us: 1, rateHz: 1000000 },
+  { label: t('plot_sample_preset_1m'), us: 1, rateHz: 1000000 },
   { label: '500 kHz (2 µs)', us: 2, rateHz: 500000 },
   { label: '200 kHz (5 µs)', us: 5, rateHz: 200000 },
   { label: '100 kHz (10 µs)', us: 10, rateHz: 100000 },
@@ -203,7 +204,7 @@ const samplingPeriodPresets = [
   { label: '500 Hz (2 ms)', us: 2000, rateHz: 500 },
   { label: '200 Hz (5 ms)', us: 5000, rateHz: 200 },
   { label: '100 Hz (10 ms)', us: 10000, rateHz: 100 },
-  { label: '50 Hz (20 ms 推荐)', us: 20000, rateHz: 50 },
+  { label: t('plot_sample_preset_50hz'), us: 20000, rateHz: 50 },
   { label: '20 Hz (50 ms)', us: 50000, rateHz: 20 },
   { label: '10 Hz (100 ms)', us: 100000, rateHz: 10 },
   { label: '1 Hz (1000 ms)', us: 1000000, rateHz: 1 },
@@ -242,7 +243,7 @@ watch([swdClockFreq, () => axfSymbols.value.filter(s => s.selected).length], () 
     const validPresets = samplingPeriodPresets.filter(p => p.rateHz <= limit.maxRateHz);
     const fallback = validPresets.length > 0 ? validPresets[0] : samplingPeriodPresets[samplingPeriodPresets.length - 1];
     samplePeriodUs.value = fallback.us;
-    sampleRateWarning.value = `低 SWD 频率 (${limit.swdFreqMhz}) 无法支持过高采样率，已根据物理总线带宽自动限制为安全采样率: ${formatFreq(fallback.rateHz)} (周期 ${fallback.us >= 1000 ? (fallback.us / 1000) + 'ms' : fallback.us + 'µs'})`;
+    sampleRateWarning.value = t('plot_sample_rate_warning', { freq: limit.swdFreqMhz, safeRate: formatFreq(fallback.rateHz), period: fallback.us >= 1000 ? (fallback.us / 1000) + 'ms' : fallback.us + 'µs' });
   } else {
     sampleRateWarning.value = '';
   }
@@ -251,7 +252,7 @@ watch([swdClockFreq, () => axfSymbols.value.filter(s => s.selected).length], () 
 async function handlePickAxfFile() {
   try {
     const selected: string | null = await safeInvoke('pick_firmware_file', {
-      title: '选择 ARM 固件可执行文件 (.axf / .elf)'
+      title: t('plot_pick_axf_title')
     });
     if (selected) {
       axfFilePath.value = selected;
@@ -277,7 +278,7 @@ async function handleParseAxf() {
       selected: false
     }));
   } catch (err: any) {
-    jscopeError.value = `解析 AXF 失败: ${err}`;
+    jscopeError.value = t('plot_jscope_axf_parse_err', { err });
   } finally {
     isParsingAxf.value = false;
   }
@@ -300,7 +301,7 @@ async function handleToggleJScopeSampling() {
     // Start
     const selected = axfSymbols.value.filter(s => s.selected);
     if (selected.length === 0) {
-      alert('请至少勾选一个变量进行采样监视');
+      alert(t('plot_alert_select_one_var'));
       return;
     }
     jscopeError.value = '';
@@ -319,7 +320,7 @@ async function handleToggleJScopeSampling() {
       isSampling.value = true;
       isJScopeModalOpen.value = false;
     } catch (err: any) {
-      jscopeError.value = `启动 J-Scope 采样失败: ${err}`;
+      jscopeError.value = t('plot_jscope_start_failed', { err });
     }
   }
 }
@@ -694,14 +695,14 @@ async function triggerDspCalculations() {
 
 function exportCsv() {
   if (channels.value.length === 0) {
-    alert('暂无通道数据可导出');
+    alert(t('plot_alert_no_channel_data'));
     return;
   }
 
   // Find max points
   const maxLen = Math.max(...channels.value.map(c => c.points.length));
   if (maxLen === 0) {
-    alert('暂无采样点数据');
+    alert(t('plot_alert_no_sample_points'));
     return;
   }
 
@@ -972,7 +973,7 @@ function renderCanvas() {
       ctx.fillStyle = '#71717a';
       ctx.font = `${12 * dpr}px monospace`;
       ctx.textAlign = 'center';
-      ctx.fillText('FFT 计算中，需采集至少 16 个点...', padLeft + plotW / 2, padTop + plotH / 2);
+      ctx.fillText(t('plot_fft_computing_wait'), padLeft + plotW / 2, padTop + plotH / 2);
     }
   } else {
     // --- Normal Time-Domain Waveforms with Downsampling Support ---
@@ -1311,20 +1312,20 @@ onUnmounted(() => {
       <div class="flex items-center gap-3">
         <div class="flex items-center gap-1.5 text-zinc-200 font-semibold">
           <Activity class="w-4 h-4 text-cyan-400" />
-          <span>实时波形示波器</span>
+          <span>{{ t("plot_title_realtime") }}</span>
         </div>
 
         <!-- Waveform Source Binding Selector -->
         <div class="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded px-2 py-0.5">
-          <span class="text-[11px] text-zinc-400">数据源:</span>
+          <span class="text-[11px] text-zinc-400">{{ t("plot_source_label") }}</span>
           <select
             v-model="boundWaveformSource"
             @focus="refreshActivePortList"
             @change="handleWaveformSourceChange"
             class="bg-transparent text-cyan-300 text-xs font-semibold outline-none cursor-pointer max-w-[150px]"
-            title="选择要绘制波形的目标串口或RTT通道"
+            :title="t('plot_source_tip')"
           >
-            <option value="" class="bg-zinc-900 text-zinc-400">自动监听全部活跃流</option>
+            <option value="" class="bg-zinc-900 text-zinc-400">{{ t("plot_source_all_streams") }}</option>
             <option
               v-for="p in activePortList"
               :key="p"
@@ -1347,7 +1348,7 @@ onUnmounted(() => {
             : 'bg-emerald-950 text-emerald-300 border-emerald-800 hover:bg-emerald-900'"
         >
           <component :is="isPaused ? Play : Pause" class="w-3.5 h-3.5" />
-          <span>{{ isPaused ? '恢复采集' : '暂停画面' }}</span>
+          <span>{{ isPaused ? t('plotter_resume') : t('plotter_pause') }}</span>
         </button>
 
         <!-- Simulation Signal Generator (Regression Test) -->
@@ -1357,10 +1358,10 @@ onUnmounted(() => {
           :class="isSimulating 
             ? 'bg-cyan-950 text-cyan-300 border-cyan-700 animate-pulse' 
             : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
-          title="启动/停止内置虚拟信号源，验证波形解析与丝滑渲染"
+          :title="t('plot_sim_source_tip')"
         >
           <Dices class="w-3.5 h-3.5 text-cyan-400" />
-          <span>{{ isSimulating ? '仿真测试中 (50Hz)' : '🎲 启动仿真信号' }}</span>
+          <span>{{ isSimulating ? t('plotter_sim_running') : t('plotter_start_sim') }}</span>
         </button>
 
         <!-- J-Scope Variable Sampling Button -->
@@ -1370,50 +1371,50 @@ onUnmounted(() => {
           :class="isSampling
             ? 'bg-purple-950 text-purple-300 border-purple-600 animate-pulse'
             : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'"
-          title="导入 Keil MDK .axf 符号表，周期无侵入读取单片机 RAM 变量绘制波形"
+          :title="t('plot_btn_jscope_tip')"
         >
           <Crosshair class="w-3.5 h-3.5 text-purple-400" />
-          <span>{{ isSampling ? '🎯 采样中...' : '🎯 变量自动捕获' }}</span>
+          <span>{{ isSampling ? t('plotter_sampling') : t('plotter_auto_var') }}</span>
         </button>
 
         <!-- Protocol Engine & C Demo Button -->
         <button
           @click="isProtocolModalOpen = true"
           class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-cyan-300 border border-zinc-700 rounded text-xs flex items-center gap-1 transition-colors"
-          title="查看波形示波器支持的数据协议规范及 C 语言单片机驱动 Demo (兼容 VOFA+ FireWater / JustFloat)"
+          :title="t('plot_btn_proto_spec_tip')"
         >
           <FileCode class="w-3.5 h-3.5 text-cyan-400" />
-          <span>📜 波形协议规范</span>
+          <span>{{ t('plotter_protocols') }}</span>
         </button>
 
         <!-- Clear -->
         <button
           @click="clearPlot"
           class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 rounded text-xs flex items-center gap-1"
-          title="清空当前波形缓存"
+          :title="t('plotter_clear')"
         >
           <Trash2 class="w-3 h-3 text-zinc-400" />
-          <span>清空</span>
+          <span>{{ t('plotter_clear') }}</span>
         </button>
 
         <!-- Export CSV -->
         <button
           @click="exportCsv"
           class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 rounded text-xs flex items-center gap-1"
-          title="导出采集到的通道数据为 CSV"
+          :title="t('plotter_export')"
         >
           <Download class="w-3 h-3 text-zinc-400" />
-          <span>导出CSV</span>
+          <span>{{ t('plotter_export') }}</span>
         </button>
 
         <!-- Reset View / Zoom -->
         <button
           @click="resetView"
           class="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 rounded text-xs flex items-center gap-1 transition-colors"
-          title="双击画布或点击此按钮重置缩放与平移"
+          :title="t('plotter_reset_view')"
         >
           <RotateCcw class="w-3 h-3 text-zinc-400" />
-          <span>复位视图</span>
+          <span>{{ t('plotter_reset_view') }}</span>
         </button>
       </div>
 
@@ -1425,93 +1426,93 @@ onUnmounted(() => {
             @click="plotterDisplayMode = 'time'"
             class="px-2 py-0.5 rounded text-[11px] transition-colors"
             :class="plotterDisplayMode === 'time' ? 'bg-zinc-800 text-cyan-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
-            title="时域波形走势图"
+            :title="t('plot_btn_time_domain_tip')"
           >
-            📈 时域
+            {{ t('plotter_mode_time') }}
           </button>
           <button
             @click="plotterDisplayMode = 'fft'"
             class="px-2 py-0.5 rounded text-[11px] transition-colors"
             :class="plotterDisplayMode === 'fft' ? 'bg-zinc-800 text-amber-400 font-bold' : 'text-zinc-400 hover:text-zinc-200'"
-            title="FFT 频域幅值谱分析 (Rust 原生微秒级加速)"
+            :title="t('plot_btn_fft_domain_tip')"
           >
-            📊 FFT 频谱
+            {{ t('plotter_mode_fft') }}
           </button>
         </div>
 
         <!-- Window Function Selector (when FFT is active) -->
         <div v-if="plotterDisplayMode === 'fft'" class="flex items-center gap-1">
-          <span class="text-amber-400">窗函数:</span>
+          <span class="text-amber-400">{{ t('plotter_window_func') }}</span>
           <select
             v-model="selectedWindowFunction"
             class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200 focus:outline-none"
           >
-            <option value="hanning">汉宁窗 (Hanning/推荐)</option>
-            <option value="hamming">海明窗 (Hamming)</option>
+            <option value="hanning">{{ t("plot_win_hanning") }}</option>
+            <option value="hamming">{{ t("plot_win_hamming") }}</option>
             <option value="blackman_harris">Blackman-Harris (92dB)</option>
-            <option value="flattop">Flat Top (幅值标定)</option>
-            <option value="rectangular">矩形窗 (无窗)</option>
+            <option value="flattop">{{ t("plot_win_flattop") }}</option>
+            <option value="rectangular">{{ t("plot_win_rectangular") }}</option>
           </select>
         </div>
 
         <!-- Points Window Selector -->
         <div v-if="plotterDisplayMode === 'time'" class="flex items-center gap-1">
-          <span>点数:</span>
+          <span>{{ t('plotter_points') }}</span>
           <select
             v-model="maxPoints"
             @change="onMaxPointsChange"
             class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200 focus:outline-none"
           >
-            <option :value="200">200 点</option>
-            <option :value="500">500 点</option>
-            <option :value="1000">1000 点</option>
-            <option :value="2000">2000 点</option>
-            <option :value="5000">5000 点</option>
-            <option :value="10000">10000 点</option>
-            <option :value="20000">20000 点</option>
+            <option :value="200">200</option>
+            <option :value="500">500</option>
+            <option :value="1000">1000</option>
+            <option :value="2000">2000</option>
+            <option :value="5000">5000</option>
+            <option :value="10000">10000</option>
+            <option :value="20000">20000</option>
           </select>
         </div>
 
         <!-- Downsampling Mode Selector -->
         <div v-if="plotterDisplayMode === 'time'" class="flex items-center gap-1">
-          <span class="text-sky-400">降采样:</span>
+          <span class="text-sky-400">{{ t('plotter_downsample') }}</span>
           <select
             v-model="downsampleMode"
             class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-sky-200 focus:outline-none"
-            title="大数据量降采样渲染，保持高刷丝滑"
+            :title="t('plot_downsample_tip')"
           >
-            <option value="smart_minmax">智能Min-Max分桶(极速推荐)</option>
-            <option value="none">全量原始点(无降采样)</option>
-            <option value="2x">2倍降采样 (1/2)</option>
-            <option value="5x">5倍降采样 (1/5)</option>
-            <option value="10x">10倍降采样 (1/10)</option>
+            <option value="smart_minmax">Min-Max (Auto)</option>
+            <option value="none">None (Full 1:1)</option>
+            <option value="2x">2x (1/2)</option>
+            <option value="5x">5x (1/5)</option>
+            <option value="10x">10x (1/10)</option>
           </select>
         </div>
 
         <!-- High-FPS Target Selector -->
         <div class="flex items-center gap-1">
-          <span class="text-emerald-400">刷新率:</span>
+          <span class="text-emerald-400">{{ t('plotter_fps') }}</span>
           <select
             v-model="fpsTarget"
             class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-emerald-300 focus:outline-none font-bold"
-            title="目标渲染帧率，120Hz 极速电竞级丝滑刷新"
+            :title="t('plot_target_fps_tip')"
           >
-            <option value="vsync">VSync 屏幕原生</option>
-            <option value="120hz">⚡ 120 FPS 极速高刷</option>
-            <option value="60hz">60 FPS 均衡</option>
-            <option value="30hz">30 FPS 低功耗</option>
+            <option value="vsync">VSync</option>
+            <option value="120hz">⚡ 120 FPS</option>
+            <option value="60hz">60 FPS</option>
+            <option value="30hz">30 FPS</option>
           </select>
         </div>
 
         <!-- Y Axis Mode -->
         <div v-if="plotterDisplayMode === 'time'" class="flex items-center gap-1">
-          <span>Y轴:</span>
+          <span>{{ t('plotter_yaxis') }}</span>
           <select
             v-model="yAxisMode"
             class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200 focus:outline-none"
           >
-            <option value="auto">自适应缩放</option>
-            <option value="fixed">固定 ±50</option>
+            <option value="auto">Auto</option>
+            <option value="fixed">±50</option>
           </select>
         </div>
 
@@ -1519,18 +1520,18 @@ onUnmounted(() => {
 
         <!-- Metrics -->
         <div class="flex items-center gap-2 font-mono">
-          <span>帧率: <strong class="text-emerald-400 font-bold">{{ fps }}</strong> FPS</span>
-          <span>样本: <strong class="text-zinc-300">{{ receivedSamplesCount }}</strong></span>
+          <span>{{ t('plotter_fps_label') }} <strong class="text-emerald-400 font-bold">{{ fps }}</strong></span>
+          <span>{{ t('plotter_samples_label') }} <strong class="text-zinc-300">{{ receivedSamplesCount }}</strong></span>
         </div>
       </div>
     </div>
 
     <!-- Active Channels Bar / Legend -->
     <div class="bg-zinc-900/60 border-b border-zinc-800 px-4 py-1.5 flex items-center gap-3 overflow-x-auto shrink-0">
-      <span class="text-zinc-500 text-[11px] shrink-0">通道 ({{ channels.length }}/8):</span>
+      <span class="text-zinc-500 text-[11px] shrink-0">{{ t('plotter_channels_label') }} ({{ channels.length }}/8):</span>
 
       <div v-if="channels.length === 0" class="text-zinc-600 italic text-[11px]">
-        等待串口数据流 (支持 CSV: <code>12.3, 45.6</code> 或 键值对: <code>roll:12.3, pitch:45.6</code>) 或点击上方仿真信号
+        {{ t('plotter_waiting_stream') }}
       </div>
 
       <div
@@ -1543,7 +1544,7 @@ onUnmounted(() => {
         <button
           @click="ch.visible = !ch.visible"
           class="hover:opacity-80 transition-opacity"
-          :title="ch.visible ? '点击隐藏通道' : '点击显示通道'"
+          :title="ch.visible ? t('plot_channel_toggle_hide') : t('plot_channel_toggle_show')"
         >
           <component :is="ch.visible ? Eye : EyeOff" class="w-3 h-3" :style="{ color: ch.color }" />
         </button>
@@ -1577,12 +1578,12 @@ onUnmounted(() => {
         v-if="!autoFollow"
         class="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-950/90 border border-cyan-700 text-cyan-300 text-xs shadow-xl backdrop-blur"
       >
-        <span>🔍 自由浏览模式 (已暂停自动跟随)</span>
+        <span>{{ t('plotter_free_browse') }}</span>
         <button
           @click.stop="resumeAutoFollow"
           class="px-2 py-0.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-full text-[10px] font-semibold transition-colors shadow-sm"
         >
-          恢复跟随最新
+          {{ t('plotter_resume_follow') }}
         </button>
       </div>
 
@@ -1596,7 +1597,7 @@ onUnmounted(() => {
         }"
       >
         <div class="text-zinc-400 font-mono text-[10px] border-b border-zinc-800 pb-0.5 mb-1">
-          光标位置数据
+          {{ t('plotter_cursor_data') }}
         </div>
         <div
           v-for="item in hoveredData.values"
@@ -1612,7 +1613,7 @@ onUnmounted(() => {
     <!-- Real-time Oscilloscope Measurement Bar (Powered by Rust Native DSP) -->
     <div class="bg-zinc-950 border-t border-zinc-800 px-4 py-1.5 flex items-center justify-between gap-4 text-xs font-mono shrink-0 select-text overflow-x-auto">
       <div class="flex items-center gap-1.5 shrink-0">
-        <span class="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">标尺测量:</span>
+        <span class="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">{{ t('plotter_ruler_measure') }}</span>
         <select
           v-model="selectedMeasureChannelId"
           class="bg-zinc-900 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200 text-[11px] outline-none"
@@ -1631,14 +1632,14 @@ onUnmounted(() => {
 
         <!-- Frequency & Period -->
         <div>
-          <span class="text-zinc-500">频率:</span>
+          <span class="text-zinc-500">{{ t('plotter_freq') }}</span>
           <strong class="text-amber-400 ml-1">
             {{ liveMeasurements.frequency !== null ? (liveMeasurements.frequency >= 1000 ? `${(liveMeasurements.frequency / 1000).toFixed(2)} kHz` : `${liveMeasurements.frequency.toFixed(1)} Hz`) : '--' }}
           </strong>
         </div>
 
         <div>
-          <span class="text-zinc-500">周期:</span>
+          <span class="text-zinc-500">{{ t('plotter_period') }}</span>
           <strong class="text-amber-300 ml-1">
             {{ liveMeasurements.period_sec !== null ? (liveMeasurements.period_sec < 0.001 ? `${(liveMeasurements.period_sec * 1000000).toFixed(1)} µs` : `${(liveMeasurements.period_sec * 1000).toFixed(2)} ms`) : '--' }}
           </strong>
@@ -1646,7 +1647,7 @@ onUnmounted(() => {
 
         <!-- Duty Cycle -->
         <div>
-          <span class="text-zinc-500">占空比:</span>
+          <span class="text-zinc-500">{{ t('plotter_duty') }}</span>
           <strong class="text-purple-400 ml-1">
             {{ liveMeasurements.duty_cycle_percent !== null ? `${liveMeasurements.duty_cycle_percent.toFixed(1)}%` : '--' }}
           </strong>
@@ -1654,7 +1655,7 @@ onUnmounted(() => {
 
         <!-- THD Distortion -->
         <div>
-          <span class="text-zinc-500">THD失真:</span>
+          <span class="text-zinc-500">{{ t('plotter_thd') }}</span>
           <strong class="text-rose-400 ml-1">
             {{ liveFftResult?.thd_percent !== null && liveFftResult?.thd_percent !== undefined ? `${liveFftResult.thd_percent.toFixed(2)}%` : '--' }}
           </strong>
@@ -1664,10 +1665,10 @@ onUnmounted(() => {
 
     <!-- Bottom Instructions Footer -->
     <div class="bg-zinc-900 border-t border-zinc-800 px-4 py-1 text-[10px] text-zinc-500 flex items-center justify-between">
-      <span>💡 交互: <code>滚轮缩放时间轴</code> | <code>Shift+滚轮缩放Y轴</code> | <code>左键拖拽平移</code> | <code>双击复位</code></span>
-      <span v-if="!isConnected && !isSampling" class="text-amber-500">⚠ 串口未连接，可点击 [🎯 变量自动捕获] 直连单片机 RAM 采样</span>
-      <span v-else-if="isSampling" class="text-purple-400 font-semibold animate-pulse">● SWD 高速变量监视中...</span>
-      <span v-else class="text-emerald-400">● 串口已就绪，正在监听数据流</span>
+      <span>{{ t('plotter_footer_interaction') }}</span>
+      <span v-if="!isConnected && !isSampling" class="text-amber-500">{{ t('plotter_footer_not_conn') }}</span>
+      <span v-else-if="isSampling" class="text-purple-400 font-semibold animate-pulse">{{ t('plotter_footer_sampling') }}</span>
+      <span v-else class="text-emerald-400">{{ t('plotter_footer_ready') }}</span>
     </div>
 
     <!-- J-Scope Variable Sampling Modal Dialog -->
@@ -1680,7 +1681,7 @@ onUnmounted(() => {
         <div class="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/60">
           <div class="flex items-center gap-2 text-zinc-100 font-bold text-sm">
             <Crosshair class="w-4 h-4 text-purple-400" />
-            <span>变量自动捕获设置 (SWD 硬件实时变量监视)</span>
+            <span>{{ t('plot_jscope_dialog_title', { default: '变量自动捕获设置 (SWD 硬件实时变量监视)' }) }}</span>
           </div>
           <button
             @click="isJScopeModalOpen = false"
@@ -1695,8 +1696,8 @@ onUnmounted(() => {
           <!-- Target Core / Architecture Selection -->
           <div class="space-y-1.5">
             <label class="block text-[11px] text-zinc-400 font-medium flex items-center justify-between">
-              <span>目标单片机内核架构 (自动兼容 Generic Cortex-M 调度):</span>
-              <span class="text-purple-400 text-[10px]">自动处理 M4/M3/M0 目标类型</span>
+              <span>{{ t('plot_jscope_target_core_label', { default: '目标单片机内核架构 (自动兼容 Generic Cortex-M 调度):' }) }}</span>
+              <span class="text-purple-400 text-[10px]">{{ t("plot_auto_target_mcu") }}</span>
             </label>
             <select
               v-model="selectedCoreTarget"
@@ -1711,24 +1712,24 @@ onUnmounted(() => {
           <!-- File selection -->
           <div class="space-y-1.5">
             <label class="block text-[11px] text-zinc-400 font-medium">
-              Keil MDK 固件可执行文件物理路径 (.axf / .elf)
+              {{ t("plot_axf_path_label") }}
             </label>
             <div class="flex items-center gap-2">
               <div class="relative flex-1 flex items-center">
                 <input
                   v-model="axfFilePath"
                   type="text"
-                  placeholder="点击右侧浏览选择文件，或粘贴绝对路径 (.axf / .elf)"
+                  :placeholder="t('plot_axf_path_placeholder')"
                   class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 pr-24 text-zinc-200 text-xs outline-none focus:border-purple-500 font-mono"
                 />
                 <button
                   @click="handlePickAxfFile"
                   type="button"
                   class="absolute right-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-purple-400 rounded text-xs flex items-center gap-1 transition-colors border border-zinc-700/80"
-                  title="打开系统文件选择对话框"
+                  :title="t('plot_btn_browse_dialog')"
                 >
                   <FolderOpen class="w-3.5 h-3.5" />
-                  <span>浏览选择</span>
+                  <span>{{ t("plot_btn_browse") }}</span>
                 </button>
               </div>
               <button
@@ -1737,11 +1738,11 @@ onUnmounted(() => {
                 class="flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded text-xs font-medium transition-colors disabled:opacity-40 shrink-0"
               >
                 <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': isParsingAxf }" />
-                <span>解析符号表</span>
+                <span>{{ t("plot_btn_parse_symbols") }}</span>
               </button>
             </div>
             <div class="text-[10px] text-zinc-500">
-              通过解析 DWARF 符号表自动定位 SRAM 中的全局和静态变量地址与数据类型，零侵入无须单片机串口打印。
+              {{ t("plot_dwarf_intro") }}
             </div>
           </div>
 
@@ -1754,19 +1755,19 @@ onUnmounted(() => {
           <div v-if="axfSymbols.length > 0" class="space-y-2">
             <div class="flex items-center justify-between pt-2 border-t border-zinc-800">
               <div class="flex items-center gap-2">
-                <span class="font-semibold text-zinc-300">找到的 RAM 变量 ({{ axfSymbols.length }} 个):</span>
+                <span class="font-semibold text-zinc-300">{{ t("plot_symbols_found", { count: axfSymbols.length }) }}</span>
                 <button
                   @click="selectAllSymbols(true)"
                   class="text-[11px] text-purple-400 hover:text-purple-300"
                 >
-                  全选
+                  {{ t('plot_btn_select_all') }}
                 </button>
                 <span class="text-zinc-600">|</span>
                 <button
                   @click="selectAllSymbols(false)"
                   class="text-[11px] text-zinc-400 hover:text-zinc-300"
                 >
-                  全不选
+                  {{ t('plot_btn_deselect_all') }}
                 </button>
               </div>
 
@@ -1776,7 +1777,7 @@ onUnmounted(() => {
                 <input
                   v-model="searchKeyword"
                   @keyup.enter="handleParseAxf"
-                  placeholder="过滤变量名..."
+                  :placeholder="t('plot_filter_vars_placeholder')"
                   class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-[11px] text-zinc-200 outline-none focus:border-purple-500 w-32"
                 />
               </div>
@@ -1787,11 +1788,11 @@ onUnmounted(() => {
               <table class="w-full text-left text-xs font-mono">
                 <thead class="bg-zinc-900/80 text-zinc-400 text-[10px] border-b border-zinc-800">
                   <tr>
-                    <th class="p-2 w-8">选</th>
-                    <th class="p-2">变量名称</th>
-                    <th class="p-2">SRAM物理地址</th>
-                    <th class="p-2">大小</th>
-                    <th class="p-2">解析类型</th>
+                    <th class="p-2 w-8">{{ t("plot_th_select") }}</th>
+                    <th class="p-2">{{ t("plot_th_var_name") }}</th>
+                    <th class="p-2">{{ t("plot_th_sram_addr") }}</th>
+                    <th class="p-2">{{ t("plot_th_size") }}</th>
+                    <th class="p-2">{{ t("plot_th_parse_type") }}</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-zinc-800/60">
@@ -1811,7 +1812,7 @@ onUnmounted(() => {
                     </td>
                     <td class="p-2 font-bold text-zinc-200">{{ sym.name }}</td>
                     <td class="p-2 text-emerald-400">{{ sym.address }}</td>
-                    <td class="p-2 text-zinc-400">{{ sym.size }} 字节</td>
+                    <td class="p-2 text-zinc-400">{{ t("plot_bytes_unit", { size: sym.size }) }}</td>
                     <td class="p-2">
                       <select
                         v-model="sym.type"
@@ -1843,7 +1844,7 @@ onUnmounted(() => {
               <div class="flex items-center gap-2">
                 <label class="text-[11px] text-zinc-400 font-medium flex items-center gap-1 shrink-0">
                   <Zap class="w-3.5 h-3.5 text-amber-400" />
-                  <span>SWD 时钟频率:</span>
+                  <span>{{ t("plot_swd_clock_freq") }}</span>
                 </label>
                 <select
                   v-model.number="swdClockFreq"
@@ -1859,7 +1860,7 @@ onUnmounted(() => {
               <div class="flex items-center gap-2">
                 <label class="text-[11px] text-zinc-400 font-medium flex items-center gap-1 shrink-0">
                   <Gauge class="w-3.5 h-3.5 text-cyan-400" />
-                  <span>采样周期/速率:</span>
+                  <span>{{ t("plot_sample_rate_label") }}</span>
                 </label>
                 <select
                   v-model.number="samplePeriodUs"
@@ -1872,7 +1873,7 @@ onUnmounted(() => {
                     :disabled="p.rateHz > maxHardwareSampleRate.maxRateHz"
                   >
                     {{ p.label }}
-                    {{ p.rateHz > maxHardwareSampleRate.maxRateHz ? ' (🚫 超过 SWD 物理带宽)' : '' }}
+                    {{ p.rateHz > maxHardwareSampleRate.maxRateHz ? t('plot_exceed_swd_bandwidth') : '' }}
                   </option>
                 </select>
               </div>
@@ -1883,16 +1884,16 @@ onUnmounted(() => {
               <div class="flex items-center justify-between text-zinc-300">
                 <span class="flex items-center gap-1.5 text-purple-300 font-medium">
                   <Gauge class="w-3.5 h-3.5 text-purple-400" />
-                  <span>SWD 硬件在环通信带宽反推:</span>
+                  <span>{{ t("plot_bandwidth_calc_title") }}</span>
                 </span>
                 <span class="font-mono text-zinc-400 text-[10px]">
-                  已选 <strong class="text-purple-400">{{ maxHardwareSampleRate.selectedCount }}</strong> 变量 | 单轮耗时: <strong class="text-zinc-200">{{ maxHardwareSampleRate.totalScanUs }} µs</strong>
+                  {{ t("plot_bandwidth_stat_vars", { count: maxHardwareSampleRate.selectedCount, us: maxHardwareSampleRate.totalScanUs }) }}
                 </span>
               </div>
               <div class="text-[10px] text-zinc-400 font-mono">
-                当前 SWD 时钟 (<strong class="text-zinc-300">{{ maxHardwareSampleRate.swdFreqMhz }}</strong>) 下，
-                理论物理最高采样率: <strong class="text-emerald-400 font-bold">{{ formatFreq(maxHardwareSampleRate.maxRateHz) }}</strong>
-                (最小物理周期: <strong class="text-cyan-400">{{ maxHardwareSampleRate.minPeriodUs }} µs</strong>)
+                {{ t("plot_bandwidth_stat_current_clk", { freq: maxHardwareSampleRate.swdFreqMhz }) }}
+                {{ t("plot_bandwidth_stat_max_rate", { rate: formatFreq(maxHardwareSampleRate.maxRateHz) }) }}
+                {{ t("plot_bandwidth_stat_min_period", { us: maxHardwareSampleRate.minPeriodUs }) }}
               </div>
               <div v-if="sampleRateWarning" class="pt-1.5 text-[11px] text-amber-400 flex items-center gap-1.5 border-t border-zinc-800/80">
                 <AlertTriangle class="w-3.5 h-3.5 text-amber-400 shrink-0" />
@@ -1908,7 +1909,7 @@ onUnmounted(() => {
             @click="isJScopeModalOpen = false"
             class="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
           >
-            取消
+            {{ t("plot_btn_cancel") }}
           </button>
 
           <button
@@ -1919,7 +1920,7 @@ onUnmounted(() => {
               : 'bg-purple-600 hover:bg-purple-500 text-white'"
           >
             <Crosshair class="w-3.5 h-3.5" />
-            <span>{{ isSampling ? '停止当前采样' : '开始变量自动捕获监视' }}</span>
+            <span>{{ isSampling ? t('plot_btn_stop_sampling') : t('plot_btn_start_sampling') }}</span>
           </button>
         </div>
       </div>
@@ -1935,7 +1936,7 @@ onUnmounted(() => {
         <div class="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/60">
           <div class="flex items-center gap-2 text-zinc-100 font-bold text-sm">
             <FileCode class="w-4 h-4 text-cyan-400" />
-            <span>示波器波形通信协议规范 & 单片机 C 驱动 Demo (兼容 VOFA+)</span>
+            <span>{{ t("plot_proto_dialog_title") }}</span>
           </div>
           <button
             @click="isProtocolModalOpen = false"
@@ -1953,7 +1954,7 @@ onUnmounted(() => {
             :class="activeProtocolTab === 'custom_json' ? 'border-purple-500 text-purple-300 font-bold' : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
             <Sliders class="w-3.5 h-3.5" />
-            <span>⚙️ Rust 协议引擎 (JSON 自定义)</span>
+            <span>{{ t("plot_proto_tab_rust") }}</span>
           </button>
           <button
             @click="activeProtocolTab = 'firewater'"
@@ -1967,14 +1968,14 @@ onUnmounted(() => {
             class="px-4 py-2.5 border-b-2 transition-colors flex items-center gap-1.5"
             :class="activeProtocolTab === 'justfloat' ? 'border-emerald-500 text-emerald-300 font-bold' : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
-            <span>⚡ JustFloat (二进制)</span>
+            <span>{{ t("plot_proto_tab_justfloat") }}</span>
           </button>
           <button
             @click="activeProtocolTab = 'rawdata'"
             class="px-4 py-2.5 border-b-2 transition-colors flex items-center gap-1.5"
             :class="activeProtocolTab === 'rawdata' ? 'border-amber-500 text-amber-300 font-bold' : 'border-transparent text-zinc-400 hover:text-zinc-200'"
           >
-            <span>📄 RawData (纯透传流)</span>
+            <span>{{ t("plot_proto_tab_rawdata") }}</span>
           </button>
         </div>
 
@@ -1986,39 +1987,37 @@ onUnmounted(() => {
               <div class="font-bold flex items-center justify-between text-purple-300">
                 <span class="flex items-center gap-1.5">
                   <Sliders class="w-4 h-4 text-purple-400" />
-                  <span>Rust 后端协议引擎声明式配置 (JSON):</span>
+                  <span>{{ t("plot_rust_engine_cfg_title") }}</span>
                 </span>
                 <span class="text-[10px] px-2 py-0.5 rounded font-mono" :class="isRustEngineActive ? 'bg-emerald-950 border border-emerald-800 text-emerald-300' : 'bg-zinc-800 text-zinc-400'">
-                  {{ isRustEngineActive ? '● 后端引擎已激活' : '○ 未启用 (当前为前端默认解析)' }}
+                  {{ isRustEngineActive ? t('plot_rust_engine_status_active') : t('plot_rust_engine_status_inactive') }}
                 </span>
               </div>
-              <div class="text-[11px] text-zinc-300">
-                定义帧头 (<code>header</code>)、帧尾 (<code>tail</code>)、固定包长 (<code>fixed_length</code>)、校验和及各通道类型与偏移量。
-                配置将直接下发至 <strong>Rust 后端后台线程</strong> 极速硬件级流式解析，彻底消除前端 JS 运算压力！
+              <div class="text-[11px] text-zinc-300" v-html="t('plot_rust_engine_intro')">
               </div>
             </div>
 
             <!-- Quick Template Presets -->
             <div class="flex items-center justify-between gap-2 pt-1 text-[11px]">
-              <span class="text-zinc-400 shrink-0 font-medium">加载官方协议模版:</span>
+              <span class="text-zinc-400 shrink-0 font-medium">{{ t("plot_load_official_template") }}</span>
               <div class="flex items-center gap-1.5 flex-wrap">
                 <button
                   @click="customProtocolJsonText = presetCustomJsonBinary"
                   class="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-purple-300 border border-zinc-700 transition-colors"
                 >
-                  🚀 0xAA55 六轴传感器 (二进制)
+                  {{ t("plot_template_6axis") }}
                 </button>
                 <button
                   @click="customProtocolJsonText = presetCustomJsonJustFloat"
                   class="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-emerald-300 border border-zinc-700 transition-colors"
                 >
-                  ⚡ JustFloat 二进制浮点
+                  {{ t("plot_template_justfloat") }}
                 </button>
                 <button
                   @click="customProtocolJsonText = presetCustomJsonFirewater"
                   class="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-cyan-300 border border-zinc-700 transition-colors"
                 >
-                  🔥 FireWater 文本 CSV
+                  {{ t("plot_template_firewater") }}
                 </button>
               </div>
             </div>
@@ -2026,14 +2025,14 @@ onUnmounted(() => {
             <!-- JSON Editor Area -->
             <div class="space-y-1.5">
               <div class="flex items-center justify-between text-zinc-400">
-                <span>协议引擎 JSON 定义:</span>
-                <span class="text-[10px] text-zinc-500">支持 float32/int16/uint16/int32/uint8/scale/bias</span>
+                <span>{{ t("plot_proto_json_label") }}</span>
+                <span class="text-[10px] text-zinc-500">{{ t("plot_proto_types_tip") }}</span>
               </div>
               <textarea
                 v-model="customProtocolJsonText"
                 rows="12"
                 class="w-full bg-zinc-950 border border-zinc-800 rounded p-3 text-purple-200 text-xs font-mono outline-none focus:border-purple-500 leading-relaxed resize-y"
-                placeholder="在此编写或粘贴 JSON 协议定义..."
+                :placeholder="t('plot_proto_json_placeholder')"
               ></textarea>
             </div>
 
@@ -2051,14 +2050,14 @@ onUnmounted(() => {
                 @click="resetToDefaultProtocol"
                 class="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-xs transition-colors"
               >
-                恢复内置默认解析
+                {{ t("plot_btn_restore_default_proto") }}
               </button>
               <button
                 @click="applyRustProtocolConfig"
                 class="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
               >
                 <Sliders class="w-3.5 h-3.5" />
-                <span>下发配置至 Rust 后端解析器</span>
+                <span>{{ t("plot_btn_apply_proto_rust") }}</span>
               </button>
             </div>
           </div>
@@ -2067,22 +2066,22 @@ onUnmounted(() => {
           <div v-if="activeProtocolTab === 'firewater'" class="space-y-3">
             <div class="p-3 bg-cyan-950/30 border border-cyan-800/60 rounded text-cyan-200 space-y-1">
               <div class="font-bold flex items-center gap-1 text-cyan-300">
-                <span>🔥 FireWater 协议说明:</span>
+                <span>{{ t("plot_firewater_spec_title") }}</span>
               </div>
-              <div>格式 1: <code>&lt;任意前缀&gt;:ch0,ch1,ch2...\\n</code> 或 <code>ch0,ch1,ch2...\\n</code></div>
-              <div>格式 2 (键值对): <code>roll:12.3, pitch:45.6, yaw:-7.8\\n</code></div>
-              <div class="text-[11px] text-cyan-400/80">⚠️ 重点：波形解析器以 <code>\\n</code> 换行作为一帧数据的结束标志。</div>
+              <div v-html="t('plot_firewater_fmt1')"></div>
+              <div v-html="t('plot_firewater_fmt2')"></div>
+              <div class="text-[11px] text-cyan-400/80" v-html="t('plot_firewater_tip')"></div>
             </div>
 
             <div class="space-y-1.5">
               <div class="flex items-center justify-between text-zinc-400">
-                <span>STM32 / GD32 / 通用 C 驱动代码示例:</span>
+                <span>{{ t("plot_c_driver_example_title") }}</span>
                 <button
                   @click="copyDemoCode(cDemoFireWater)"
                   class="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors"
                 >
                   <component :is="isCopied ? Check : Copy" class="w-3 h-3 text-emerald-400" />
-                  <span>{{ isCopied ? '已复制' : '复制代码' }}</span>
+                  <span>{{ isCopied ? t('plot_btn_copied') : t('plot_btn_copy_code') }}</span>
                 </button>
               </div>
               <pre class="p-3 bg-zinc-950 rounded border border-zinc-800 text-emerald-300 overflow-x-auto text-[11px] leading-relaxed">{{ cDemoFireWater }}</pre>
@@ -2093,21 +2092,21 @@ onUnmounted(() => {
           <div v-if="activeProtocolTab === 'justfloat'" class="space-y-3">
             <div class="p-3 bg-emerald-950/30 border border-emerald-800/60 rounded text-emerald-200 space-y-1">
               <div class="font-bold flex items-center gap-1 text-emerald-300">
-                <span>⚡ JustFloat 极速二进制协议规范:</span>
+                <span>{{ t("plot_justfloat_spec_title") }}</span>
               </div>
-              <div>数据结构：小端 <code>float32[N]</code> 数组 + 4 字节固定帧尾 <code>{ 0x00, 0x00, 0x80, 0x7F }</code> (IEEE-754 +Inf)。</div>
-              <div class="text-[11px] text-emerald-400/80">🚀 极速优势：无需 <code>printf</code> 浮点字符串格式化，MCU 可直接通过 DMA 或 RTT 发送，最高可达 1000Hz+。</div>
+              <div v-html="t('plot_justfloat_desc1')"></div>
+              <div class="text-[11px] text-emerald-400/80" v-html="t('plot_justfloat_desc2')"></div>
             </div>
 
             <div class="space-y-1.5">
               <div class="flex items-center justify-between text-zinc-400">
-                <span>C 语言实现结构体与发送函数:</span>
+                <span>{{ t("plot_c_struct_and_send") }}</span>
                 <button
                   @click="copyDemoCode(cDemoJustFloat)"
                   class="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors"
                 >
                   <component :is="isCopied ? Check : Copy" class="w-3 h-3 text-emerald-400" />
-                  <span>{{ isCopied ? '已复制' : '复制代码' }}</span>
+                  <span>{{ isCopied ? t('plot_btn_copied') : t('plot_btn_copy_code') }}</span>
                 </button>
               </div>
               <pre class="p-3 bg-zinc-950 rounded border border-zinc-800 text-emerald-300 overflow-x-auto text-[11px] leading-relaxed">{{ cDemoJustFloat }}</pre>
@@ -2117,8 +2116,8 @@ onUnmounted(() => {
           <!-- RawData Spec & Demo -->
           <div v-if="activeProtocolTab === 'rawdata'" class="space-y-3">
             <div class="p-3 bg-amber-950/30 border border-amber-800/60 rounded text-amber-200 space-y-1">
-              <div class="font-bold text-amber-300">📄 RawData 纯字节流透传:</div>
-              <div>不做波形数学采样解析，适用于串口终端打印与纯 HEX 字节流调试需求。</div>
+              <div class="font-bold text-amber-300">{{ t("plot_rawdata_title") }}</div>
+              <div>{{ t("plot_rawdata_desc") }}</div>
             </div>
             <pre class="p-3 bg-zinc-950 rounded border border-zinc-800 text-zinc-300 overflow-x-auto text-[11px] leading-relaxed">{{ cDemoRawData }}</pre>
           </div>
@@ -2130,7 +2129,7 @@ onUnmounted(() => {
             @click="isProtocolModalOpen = false"
             class="px-4 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs transition-colors"
           >
-            关闭
+            {{ t("plot_btn_close") }}
           </button>
         </div>
       </div>

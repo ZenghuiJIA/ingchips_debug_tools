@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { Trash2, Copy, Check } from '@lucide/vue';
 import { safeInvoke } from '../utils/ipc';
+import { t } from '../utils/i18n';
 
 const props = defineProps<{
   portName: string;
@@ -65,7 +66,7 @@ function initTerminal() {
   // Hook terminal keyboard data sending to serial
   term.onData(async (data: string) => {
     if (!props.isConnected) {
-      term?.write('\r\n\x1b[33m[AI-HIL] 串口未连接，无法发送输入\x1b[0m\r\n');
+      term?.write(`\r\n\x1b[33m${t('term_xterm_not_connected')}\x1b[0m\r\n`);
       return;
     }
     try {
@@ -76,7 +77,7 @@ function initTerminal() {
       });
       emit('bytes-sent', sentCount);
     } catch (err) {
-      term?.write(`\r\n\x1b[31m[错误] 发送失败: ${err}\x1b[0m\r\n`);
+      term?.write(`\r\n\x1b[31m[Error] ${t('term_log_send_fail', { err: String(err) })}\x1b[0m\r\n`);
     }
   });
 
@@ -100,8 +101,8 @@ function initTerminal() {
 function printWelcomeBanner() {
   if (!term) return;
   term.writeln('\x1b[1;36m┌────────────────────────────────────────────────────────────┐\x1b[0m');
-  term.writeln(`\x1b[1;36m│\x1b[0m  \x1b[1;32mAI-HIL Debugger - VT100 / ANSI 交互终端模式\x1b[0m               \x1b[1;36m│\x1b[0m`);
-  term.writeln(`\x1b[1;36m│\x1b[0m  端口: \x1b[33m${props.portName}\x1b[0m | 支持 Linux 控制台、Shell、Tab 补全 & 颜色 \x1b[1;36m│\x1b[0m`);
+  term.writeln(`\x1b[1;36m│\x1b[0m  \x1b[1;32m${t('term_xterm_banner_title')}\x1b[0m`);
+  term.writeln(`\x1b[1;36m│\x1b[0m  ${t('term_xterm_banner_desc', { port: props.portName })}`);
   term.writeln('\x1b[1;36m└────────────────────────────────────────────────────────────┘\x1b[0m');
 }
 
@@ -148,9 +149,9 @@ onUnmounted(() => {
 watch(() => props.isConnected, (connected) => {
   if (term) {
     if (connected) {
-      term.writeln(`\r\n\x1b[32m>>> 端口 [${props.portName}] 已连接，进入交互终端 <<<\x1b[0m\r\n`);
+      term.writeln(`\r\n\x1b[32m>>> ${t('term_xterm_connected', { port: props.portName })} <<<\x1b[0m\r\n`);
     } else {
-      term.writeln(`\r\n\x1b[31m>>> 端口 [${props.portName}] 已断开 <<<\x1b[0m\r\n`);
+      term.writeln(`\r\n\x1b[31m>>> ${t('term_xterm_disconnected', { port: props.portName })} <<<\x1b[0m\r\n`);
     }
   }
 });
@@ -164,14 +165,14 @@ watch(() => props.isConnected, (connected) => {
       <div class="h-3 w-px bg-zinc-800 mx-1"></div>
       <button
         @click="copySelection"
-        title="复制终端选中文字"
+        :title="isCopied ? t('term_xterm_copied') : t('term_xterm_copy_selection')"
         class="p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded transition-colors"
       >
         <component :is="isCopied ? Check : Copy" class="w-3.5 h-3.5" :class="{ 'text-emerald-400': isCopied }" />
       </button>
       <button
         @click="clearTerminal"
-        title="清空终端画布"
+        :title="t('term_xterm_clear')"
         class="p-1 text-zinc-400 hover:text-rose-400 hover:bg-zinc-800 rounded transition-colors"
       >
         <Trash2 class="w-3.5 h-3.5" />

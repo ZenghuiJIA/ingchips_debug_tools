@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
+import { t } from '../utils/i18n';
 import { safeInvoke } from '../utils/ipc';
 import {
   Layers,
@@ -86,7 +87,7 @@ const overlapWarnings = computed(() => {
       }
 
       if (Math.max(aStart, bStart) <= Math.min(aEnd, bEnd)) {
-        warnings.push(`[${a.fileName}] 与 [${b.fileName}] 存在物理地址重叠区间 (0x${Math.max(aStart, bStart).toString(16).toUpperCase()} ~ 0x${Math.min(aEnd, bEnd).toString(16).toUpperCase()})`);
+        warnings.push(t('merge_warn_overlap', { a: a.fileName, b: b.fileName, start: '0x' + Math.max(aStart, bStart).toString(16).toUpperCase(), end: '0x' + Math.min(aEnd, bEnd).toString(16).toUpperCase() }));
       }
     }
   }
@@ -107,7 +108,7 @@ async function addFiles() {
   errorMsg.value = '';
   try {
     const paths: string[] = await safeInvoke('pick_multiple_firmware_files', {
-      title: activeMode.value === 'hex' ? '选择多个 Intel HEX 固件文件 (*.hex)' : '选择多个原始 BIN 固件文件 (*.bin)',
+      title: activeMode.value === 'hex' ? t('merge_pick_hex_title') : t('merge_pick_bin_title'),
       filterType: activeMode.value
     });
 
@@ -118,7 +119,7 @@ async function addFiles() {
       await inspectAndAddFile(p);
     }
   } catch (err: any) {
-    errorMsg.value = `添加文件异常: ${err}`;
+    errorMsg.value = t('merge_err_add_file', { err });
   } finally {
     isPickingFiles.value = false;
   }
@@ -151,7 +152,7 @@ async function inspectAndAddFile(path: string) {
       segments: info.segments || []
     });
   } catch (err: any) {
-    errorMsg.value = `解析文件 [${path}] 失败: ${err}`;
+    errorMsg.value = t('merge_err_parse_file', { file: path, err });
   }
 }
 
@@ -186,7 +187,7 @@ async function selectOutputPath() {
     const ext = outputFormat.value === 'bin' ? 'bin' : 'hex';
     const defaultName = `merged_${activeMode.value}_firmware.${ext}`;
     const selected: string | null = await safeInvoke('pick_save_firmware_file', {
-      title: '指定合并后输出文件的保存路径',
+      title: t('merge_pick_output_title'),
       defaultName,
       fileType: ext
     });
@@ -194,19 +195,19 @@ async function selectOutputPath() {
       outputPath.value = selected;
     }
   } catch (err: any) {
-    errorMsg.value = `选择保存路径失败: ${err}`;
+    errorMsg.value = t('merge_err_pick_save', { err });
   }
 }
 
 async function executeMerge() {
   if (fileList.value.length === 0) {
-    errorMsg.value = '请至少添加一个固件文件进行合并';
+    errorMsg.value = t('merge_err_need_one_file');
     return;
   }
   if (!outputPath.value) {
     await selectOutputPath();
     if (!outputPath.value) {
-      errorMsg.value = '请指定合并文件的输出保存路径';
+      errorMsg.value = t('merge_err_need_output_path');
       return;
     }
   }
@@ -249,7 +250,7 @@ async function executeMerge() {
       successResult.value = res;
     }
   } catch (err: any) {
-    errorMsg.value = `合并固件执行失败: ${err}`;
+    errorMsg.value = t('merge_err_exec_failed', { err });
   } finally {
     isMerging.value = false;
   }
@@ -279,13 +280,13 @@ function flashMergedFirmware() {
         </div>
         <div>
           <h2 class="text-sm font-bold text-zinc-100 flex items-center gap-2">
-            <span>HEX / BIN 固件多段地址合并器</span>
+            <span>{{ t("merge_title") }}</span>
             <span class="px-2 py-0.5 text-[10px] font-mono rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800">
-              IntelHex 引擎
+              {{ t("merge_engine_badge") }}
             </span>
           </h2>
           <p class="text-[11px] text-zinc-400 mt-0.5">
-            支持将多个独立 HEX 文件、或指定起始基地址的多个 BIN 文件缝合为一个单一固件，自带重叠冲突检测与空隙 Padding
+            {{ t("merge_subtitle") }}
           </p>
         </div>
       </div>
@@ -298,7 +299,7 @@ function flashMergedFirmware() {
           :class="activeMode === 'hex' ? 'bg-emerald-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'"
         >
           <FileCode class="w-3.5 h-3.5" />
-          <span>多个 HEX 合并 (.hex)</span>
+          <span>{{ t("merge_tab_hex") }}</span>
         </button>
         <button
           @click="switchMode('bin')"
@@ -306,7 +307,7 @@ function flashMergedFirmware() {
           :class="activeMode === 'bin' ? 'bg-cyan-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'"
         >
           <Layers class="w-3.5 h-3.5" />
-          <span>多个 BIN 合并 (.bin)</span>
+          <span>{{ t("merge_tab_bin") }}</span>
         </button>
       </div>
     </div>
@@ -315,12 +316,12 @@ function flashMergedFirmware() {
     <div v-if="overlapWarnings.length > 0" class="bg-amber-950/40 border border-amber-800/80 rounded-lg p-3 text-amber-300 flex items-start gap-2.5">
       <AlertTriangle class="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
       <div class="space-y-1">
-        <div class="font-semibold text-xs text-amber-200">检测到固件区间地址可能存在重叠冲突：</div>
+        <div class="font-semibold text-xs text-amber-200">{{ t("merge_overlap_alert") }}</div>
         <ul class="list-disc list-inside text-[11px] text-amber-300/90 space-y-0.5 font-mono">
           <li v-for="(warn, i) in overlapWarnings" :key="i">{{ warn }}</li>
         </ul>
         <div class="text-[10px] text-amber-400/80 mt-1">
-          提示：若此重叠非预期，请调整下方的地址偏移配置，或在右侧参数将冲突策略设置为“报错中断”。
+          {{ t("merge_overlap_tip") }}
         </div>
       </div>
     </div>
@@ -340,7 +341,7 @@ function flashMergedFirmware() {
           <div class="flex items-center justify-between border-b border-zinc-800 pb-2.5">
             <div class="flex items-center gap-2 font-semibold text-zinc-200">
               <Layers class="w-4 h-4 text-emerald-400" />
-              <span>待合并固件文件序列 (共 {{ fileList.length }} 个)</span>
+              <span>{{ t("merge_file_list_title", { count: fileList.length }) }}</span>
             </div>
             <div class="flex items-center gap-2">
               <button
@@ -349,13 +350,13 @@ function flashMergedFirmware() {
                 class="flex items-center gap-1.5 px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-medium transition-colors"
               >
                 <Plus class="w-3.5 h-3.5" />
-                <span>添加固件文件</span>
+                <span>{{ t("merge_btn_add_file") }}</span>
               </button>
               <button
                 v-if="fileList.length > 0"
                 @click="clearAllFiles"
                 class="px-2.5 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors"
-                title="清空当前列表"
+                :title="t('merge_btn_clear_list')"
               >
                 <Trash2 class="w-3.5 h-3.5" />
               </button>
@@ -369,9 +370,9 @@ function flashMergedFirmware() {
             class="border-2 border-dashed border-zinc-800 hover:border-zinc-700 rounded-lg p-8 flex flex-col items-center justify-center gap-2.5 cursor-pointer text-zinc-500 hover:text-zinc-400 transition-all"
           >
             <FolderOpen class="w-8 h-8 stroke-1 text-zinc-600" />
-            <div class="font-medium text-xs">点击添加或选择要合并的 {{ activeMode.toUpperCase() }} 固件文件</div>
+            <div class="font-medium text-xs">{{ t("merge_empty_add_guide", { mode: activeMode.toUpperCase() }) }}</div>
             <div class="text-[11px] text-zinc-600">
-              {{ activeMode === 'hex' ? '支持如 Bootloader.hex + App.hex + Config.hex 拼接' : '支持为每个 BIN 指定物理装载起始地址 (如 0x02000000)' }}
+              {{ activeMode === 'hex' ? t('merge_empty_guide_hex') : t('merge_empty_guide_bin') }}
             </div>
           </div>
 
@@ -409,7 +410,7 @@ function flashMergedFirmware() {
                     @click="moveUp(idx)"
                     :disabled="idx === 0"
                     class="p-1 rounded hover:bg-zinc-800 text-zinc-400 disabled:opacity-30 disabled:hover:bg-transparent"
-                    title="上移"
+                    :title="t('merge_btn_move_up')"
                   >
                     <ArrowUp class="w-3.5 h-3.5" />
                   </button>
@@ -417,14 +418,14 @@ function flashMergedFirmware() {
                     @click="moveDown(idx)"
                     :disabled="idx === fileList.length - 1"
                     class="p-1 rounded hover:bg-zinc-800 text-zinc-400 disabled:opacity-30 disabled:hover:bg-transparent"
-                    title="下移"
+                    :title="t('merge_btn_move_down')"
                   >
                     <ArrowDown class="w-3.5 h-3.5" />
                   </button>
                   <button
                     @click="removeFile(idx)"
                     class="p-1 rounded hover:bg-rose-950/50 hover:text-rose-400 text-zinc-500 ml-1"
-                    title="移除"
+                    :title="t('merge_btn_remove')"
                   >
                     <Trash2 class="w-3.5 h-3.5" />
                   </button>
@@ -435,7 +436,7 @@ function flashMergedFirmware() {
               <div class="bg-zinc-900/60 rounded p-2 flex flex-wrap items-center justify-between gap-3 text-[11px]">
                 <div class="flex items-center gap-2">
                   <span class="text-zinc-400 font-medium">
-                    {{ activeMode === 'bin' ? '装载物理起始地址 (Offset):' : '重定位偏移 (可选):' }}
+                    {{ activeMode === 'bin' ? t('merge_label_bin_offset') : t('merge_label_hex_offset') }}
                   </span>
                   <input
                     v-model="item.offset"
@@ -447,12 +448,12 @@ function flashMergedFirmware() {
 
                 <div class="flex items-center gap-3 font-mono text-zinc-400">
                   <span v-if="activeMode === 'hex'">
-                    原始区间: <strong class="text-emerald-400">{{ item.minAddr }}</strong> ~ <strong class="text-emerald-400">{{ item.maxAddr }}</strong>
+                    {{ t("merge_span_orig") }} <strong class="text-emerald-400">{{ item.minAddr }}</strong> ~ <strong class="text-emerald-400">{{ item.maxAddr }}</strong>
                   </span>
                   <span v-else>
-                    跨度: <strong class="text-cyan-400">{{ item.offset }}</strong> ~ <strong class="text-cyan-400">0x{{ ((parseInt(item.offset, 16) || 0) + item.fileSize - 1).toString(16).toUpperCase().padStart(8, '0') }}</strong>
+                    {{ t("merge_span_span") }} <strong class="text-cyan-400">{{ item.offset }}</strong> ~ <strong class="text-cyan-400">0x{{ ((parseInt(item.offset, 16) || 0) + item.fileSize - 1).toString(16).toUpperCase().padStart(8, '0') }}</strong>
                   </span>
-                  <span>分段数: {{ item.segments.length }}</span>
+                  <span>{{ t("merge_span_segments", { count: item.segments.length }) }}</span>
                 </div>
               </div>
             </div>
@@ -466,12 +467,12 @@ function flashMergedFirmware() {
         <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-3.5 space-y-3.5">
           <div class="flex items-center gap-2 font-semibold text-zinc-200 border-b border-zinc-800 pb-2">
             <Sliders class="w-4 h-4 text-emerald-400" />
-            <span>合并输出设置</span>
+            <span>{{ t("merge_cfg_title") }}</span>
           </div>
 
           <!-- Target Output Format -->
           <div>
-            <label class="block text-zinc-400 mb-1 text-[11px] font-medium">合并后保存目标格式</label>
+            <label class="block text-zinc-400 mb-1 text-[11px] font-medium">{{ t("merge_cfg_format_label") }}</label>
             <div class="grid grid-cols-2 gap-2">
               <button
                 @click="outputFormat = 'hex'"
@@ -492,22 +493,22 @@ function flashMergedFirmware() {
 
           <!-- Overlap Strategy -->
           <div>
-            <label class="block text-zinc-400 mb-1 text-[11px] font-medium">地址区间重叠冲突策略 (Overlap)</label>
+            <label class="block text-zinc-400 mb-1 text-[11px] font-medium">{{ t("merge_cfg_overlap_label") }}</label>
             <select
               v-model="overlapStrategy"
               class="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-zinc-200 outline-none focus:border-emerald-500 font-sans"
             >
-              <option value="error">严格报错中断 (推荐，防止固件意外相互覆盖)</option>
-              <option value="replace">后来居上 (新文件覆盖冲突区域)</option>
-              <option value="ignore">先入为主 (保留先添加文件的重叠数据)</option>
+              <option value="error">{{ t("merge_overlap_opt_error") }}</option>
+              <option value="replace">{{ t("merge_overlap_opt_replace") }}</option>
+              <option value="ignore">{{ t("merge_overlap_opt_ignore") }}</option>
             </select>
           </div>
 
           <!-- Padding byte for BIN export -->
           <div>
             <label class="block text-zinc-400 mb-1 text-[11px] font-medium">
-              空隙填充字节 (Padding Byte)
-              <span class="text-zinc-500 font-normal">通常为 Flash 擦除默认值 0xFF</span>
+              {{ t("merge_cfg_pad_label") }}
+              <span class="text-zinc-500 font-normal">{{ t("merge_cfg_pad_tip") }}</span>
             </label>
             <input
               v-model="padByteHex"
@@ -519,18 +520,18 @@ function flashMergedFirmware() {
 
           <!-- Output File Path -->
           <div>
-            <label class="block text-zinc-400 mb-1 text-[11px] font-medium">合并后保存路径</label>
+            <label class="block text-zinc-400 mb-1 text-[11px] font-medium">{{ t("merge_cfg_output_path_label") }}</label>
             <div class="flex gap-2">
               <input
                 v-model="outputPath"
                 type="text"
-                placeholder="点击右侧按钮选择保存位置"
+                :placeholder="t('merge_cfg_output_placeholder')"
                 class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-zinc-200 font-mono outline-none focus:border-emerald-500 text-[11px] truncate"
               />
               <button
                 @click="selectOutputPath"
                 class="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded shrink-0 transition-colors"
-                title="浏览选择保存文件"
+                :title="t('merge_btn_browse_output')"
               >
                 <FolderOpen class="w-3.5 h-3.5" />
               </button>
@@ -546,7 +547,7 @@ function flashMergedFirmware() {
             >
               <RefreshCw v-if="isMerging" class="w-4 h-4 animate-spin" />
               <Merge v-else class="w-4 h-4" />
-              <span>{{ isMerging ? '正在缝合处理固件数据...' : `立即执行合并 (${fileList.length} 个固件)` }}</span>
+              <span>{{ isMerging ? t('merge_btn_merging') : t('merge_btn_do_merge', { count: fileList.length }) }}</span>
             </button>
           </div>
         </div>
@@ -556,13 +557,13 @@ function flashMergedFirmware() {
           <div class="flex items-center justify-between text-emerald-400 font-semibold border-b border-zinc-800 pb-2">
             <div class="flex items-center gap-1.5">
               <CheckCircle2 class="w-4 h-4" />
-              <span>合并成功！</span>
+              <span>{{ t("merge_success_banner") }}</span>
             </div>
             <div class="flex items-center gap-1.5">
               <button
                 @click="copyResultSummary"
                 class="p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors"
-                title="复制摘要"
+                :title="t('merge_btn_copy_summary')"
               >
                 <Check v-if="isCopied" class="w-3.5 h-3.5 text-emerald-400" />
                 <Copy v-else class="w-3.5 h-3.5" />
@@ -572,23 +573,23 @@ function flashMergedFirmware() {
 
           <div class="space-y-1.5 text-[11px] font-mono">
             <div class="flex justify-between text-zinc-400">
-              <span>最终格式:</span>
+              <span>{{ t("merge_res_final_format") }}</span>
               <strong class="text-zinc-200 uppercase">{{ successResult.output_format }}</strong>
             </div>
             <div class="flex justify-between text-zinc-400">
-              <span>文件总大小:</span>
+              <span>{{ t("merge_res_total_size") }}</span>
               <strong class="text-zinc-200">{{ formatBytes(successResult.file_size) }}</strong>
             </div>
             <div class="flex justify-between text-zinc-400">
-              <span>有效数据跨度:</span>
+              <span>{{ t("merge_res_valid_span") }}</span>
               <span class="text-emerald-400">{{ successResult.min_addr }} ~ {{ successResult.max_addr }}</span>
             </div>
             <div class="flex justify-between text-zinc-400">
-              <span>分段数量:</span>
-              <span class="text-zinc-200">{{ successResult.segments?.length || 1 }} 块物理段</span>
+              <span>{{ t("merge_res_seg_count") }}</span>
+              <span class="text-zinc-200">{{ t("merge_res_seg_units", { count: successResult.segments?.length || 1 }) }}</span>
             </div>
             <div class="pt-1 text-[10px] text-zinc-500 break-all">
-              保存至: {{ successResult.output_path }}
+              {{ t("merge_res_saved_to", { path: successResult.output_path }) }}
             </div>
           </div>
 
@@ -599,7 +600,7 @@ function flashMergedFirmware() {
               class="w-full py-1.5 rounded bg-emerald-900/60 hover:bg-emerald-800/80 text-emerald-300 border border-emerald-700/60 font-medium flex items-center justify-center gap-1.5 transition-colors"
             >
               <Zap class="w-3.5 h-3.5 text-emerald-400" />
-              <span>载入此固件至 SWD 烧录器</span>
+              <span>{{ t("merge_btn_load_to_flasher") }}</span>
             </button>
           </div>
         </div>

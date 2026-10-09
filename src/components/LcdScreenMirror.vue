@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onUnmounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import { t } from '../utils/i18n';
 import {
   Monitor,
   Camera,
@@ -43,10 +44,10 @@ async function captureScreen() {
       capturedCount.value++;
       lastCaptureTime.value = new Date().toLocaleTimeString();
     } else {
-      errorMsg.value = res?.message || '读取显存失败或目标未处于连接就绪状态';
+      errorMsg.value = res?.message || t('lcd_err_read');
     }
   } catch (err: any) {
-    errorMsg.value = `截图发生异常: ${err}`;
+    errorMsg.value = t('lcd_err_capture', { err });
   } finally {
     isCapturing.value = false;
   }
@@ -95,13 +96,13 @@ onUnmounted(() => {
     <div class="bg-zinc-900 border-b border-zinc-800 px-4 py-2 flex items-center justify-between gap-3 shrink-0 flex-wrap">
       <div class="flex items-center gap-2 font-bold text-sm text-cyan-400">
         <Monitor class="w-4 h-4 text-cyan-400" />
-        <span>屏幕显存实时镜像与截屏 (LCD Screen Mirror)</span>
+        <span>{{ t("lcd_title") }}</span>
       </div>
 
       <!-- Parameters Config -->
       <div class="flex items-center gap-2">
         <div class="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1">
-          <span class="text-[10px] text-zinc-400">显存基址:</span>
+          <span class="text-[10px] text-zinc-400">{{ t("lcd_base_addr_label") }}</span>
           <input
             v-model="fbAddress"
             type="text"
@@ -111,7 +112,7 @@ onUnmounted(() => {
         </div>
 
         <div class="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1">
-          <span class="text-[10px] text-zinc-400">分辨率:</span>
+          <span class="text-[10px] text-zinc-400">{{ t("lcd_res_label") }}</span>
           <input
             v-model.number="fbWidth"
             type="number"
@@ -126,7 +127,7 @@ onUnmounted(() => {
         </div>
 
         <div class="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1">
-          <span class="text-[10px] text-zinc-400">格式:</span>
+          <span class="text-[10px] text-zinc-400">{{ t("lcd_fmt_label") }}</span>
           <select
             v-model="pixelFormat"
             class="bg-transparent text-zinc-200 outline-none cursor-pointer"
@@ -134,7 +135,7 @@ onUnmounted(() => {
             <option value="rgb565" class="bg-zinc-900">RGB565 (16bit)</option>
             <option value="rgb888" class="bg-zinc-900">RGB888 (24bit)</option>
             <option value="argb8888" class="bg-zinc-900">ARGB8888 (32bit)</option>
-            <option value="mono" class="bg-zinc-900">单色位图 (1bit)</option>
+            <option value="mono" class="bg-zinc-900">{{ t("lcd_fmt_mono") }}</option>
           </select>
         </div>
 
@@ -145,7 +146,7 @@ onUnmounted(() => {
           class="flex items-center gap-1.5 px-3 py-1 bg-cyan-600 hover:bg-cyan-500 text-white rounded font-semibold transition-colors disabled:opacity-40"
         >
           <Camera class="w-3.5 h-3.5" :class="{ 'animate-spin': isCapturing }" />
-          <span>抓取单帧</span>
+          <span>{{ t("lcd_btn_single") }}</span>
         </button>
 
         <!-- Continuous Auto Refresh -->
@@ -157,7 +158,7 @@ onUnmounted(() => {
             : 'bg-zinc-800 text-zinc-200 border-zinc-700 hover:bg-zinc-700'"
         >
           <component :is="isAutoRefreshing ? Square : Play" class="w-3.5 h-3.5" />
-          <span>{{ isAutoRefreshing ? '停止实时镜像' : '开启连续镜像' }}</span>
+          <span>{{ isAutoRefreshing ? t('lcd_btn_auto_stop') : t('lcd_btn_auto_start') }}</span>
         </button>
 
         <!-- Save PNG -->
@@ -165,10 +166,10 @@ onUnmounted(() => {
           v-if="currentImageData"
           @click="downloadImage"
           class="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 rounded transition-colors"
-          title="导出当前显存图像为 PNG"
+          :title="t('lcd_tip_save_png')"
         >
           <Download class="w-3.5 h-3.5 text-zinc-400" />
-          <span>保存图片</span>
+          <span>{{ t("lcd_btn_save_png") }}</span>
         </button>
       </div>
     </div>
@@ -200,18 +201,18 @@ onUnmounted(() => {
 
         <!-- Meta info -->
         <div class="text-[11px] text-zinc-500 font-mono flex items-center gap-4">
-          <span>抓取帧数: <strong class="text-cyan-400">{{ capturedCount }}</strong></span>
-          <span>更新时间: <strong class="text-zinc-300">{{ lastCaptureTime }}</strong></span>
-          <span>显存地址: <strong class="text-emerald-400">{{ fbAddress }}</strong></span>
+          <span>{{ t("lcd_stat_captured") }} <strong class="text-cyan-400">{{ capturedCount }}</strong></span>
+          <span>{{ t("lcd_stat_update_time") }} <strong class="text-zinc-300">{{ lastCaptureTime }}</strong></span>
+          <span>{{ t("lcd_stat_fb_addr") }} <strong class="text-emerald-400">{{ fbAddress }}</strong></span>
         </div>
       </div>
 
       <!-- Empty Guide Placeholder -->
       <div v-else class="text-center space-y-3 max-w-md text-zinc-500">
         <Monitor class="w-12 h-12 mx-auto text-zinc-700 animate-pulse" />
-        <div class="text-sm font-semibold text-zinc-300">尚未捕获显存画面</div>
+        <div class="text-sm font-semibold text-zinc-300">{{ t("lcd_empty_title") }}</div>
         <div class="text-[11px] text-zinc-500 leading-relaxed">
-          通过 SWD 调试探针直接从目标单片机内存读取 FrameBuffer 显存像素数据并无损还原为画面，适用于 RTOS GUI (LVGL / TouchGFX / emWin / 裸机点阵) 在线远程监控与调试。
+          {{ t("lcd_empty_body") }}
         </div>
       </div>
     </div>
