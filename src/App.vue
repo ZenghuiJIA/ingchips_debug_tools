@@ -14,6 +14,8 @@ import RTOSTracer from './components/RTOSTracer.vue';
 import LcdScreenMirror from './components/LcdScreenMirror.vue';
 import FirmwareMerger from './components/FirmwareMerger.vue';
 import HilTestSequencer from './components/HilTestSequencer.vue';
+import BleRfHciConsole from './components/BleRfHciConsole.vue';
+import McuProfiler from './components/McuProfiler.vue';
 import AiCopilot from './components/AiCopilot.vue';
 import CollapsibleToolbar from './components/CollapsibleToolbar.vue';
 import GlobalSettingsModal from './components/GlobalSettingsModal.vue';
@@ -31,11 +33,13 @@ import {
   Cpu,
   Monitor,
   Merge,
-  Workflow
+  Workflow,
+  Radio,
+  Gauge
 } from '@lucide/vue';
 
 const activeSessionsCount = ref<number>(0);
-const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'merger' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'sequencer' | 'ai'>('terminal');
+const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'merger' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'sequencer' | 'ble_rf' | 'profiler' | 'ai'>('terminal');
 const sharedFirmwarePath = ref<string>('');
 const runningInBrowser = ref<boolean>(!isTauri());
 const isSettingsOpen = ref<boolean>(false);
@@ -209,6 +213,28 @@ onUnmounted(() => {
           </button>
 
           <button
+            @click="currentTab = 'ble_rf'"
+            class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
+            :class="currentTab === 'ble_rf' 
+              ? 'border-blue-500 text-blue-400 bg-zinc-800/40' 
+              : 'border-transparent text-zinc-400 hover:text-zinc-200'"
+          >
+            <Radio class="w-3.5 h-3.5 text-blue-400" />
+            <span>{{ t('tab_ble_rf') }}</span>
+          </button>
+
+          <button
+            @click="currentTab = 'profiler'"
+            class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
+            :class="currentTab === 'profiler' 
+              ? 'border-amber-500 text-amber-400 bg-zinc-800/40' 
+              : 'border-transparent text-zinc-400 hover:text-zinc-200'"
+          >
+            <Gauge class="w-3.5 h-3.5 text-amber-400" />
+            <span>{{ t('tab_profiler') }}</span>
+          </button>
+
+          <button
             @click="currentTab = 'ai'"
             class="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all"
             :class="currentTab === 'ai' 
@@ -242,6 +268,8 @@ onUnmounted(() => {
               currentTab === 'hardfault' ? HardFaultInspector :
               currentTab === 'memory' ? MemoryInspector :
               currentTab === 'sequencer' ? HilTestSequencer :
+              currentTab === 'ble_rf' ? BleRfHciConsole :
+              currentTab === 'profiler' ? McuProfiler :
               AiCopilot
             "
             :is-connected="activeSessionsCount > 0"

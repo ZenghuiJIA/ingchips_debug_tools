@@ -173,6 +173,8 @@ pub fn run() {
             commands::ing_parse_ini,
             commands::ing_start_flash,
             commands::ing_cancel_flash,
+            commands::read_local_binary_file,
+            commands::save_bytes_to_file,
         ])
         .build(tauri::generate_context!()) {
             Ok(a) => {

@@ -969,5 +969,16 @@ pub fn ing_cancel_flash() -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn read_local_binary_file(file_path: String) -> Result<Vec<u8>, String> {
+    std::fs::read(&file_path).map_err(|e| format!("读取文件失败 ({}): {}", file_path, e))
+}
+
+#[tauri::command]
+pub fn save_bytes_to_file(file_path: String, data: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&file_path, &data).map_err(|e| format!("写入文件失败 ({}): {}", file_path, e))
+}
+
+
 
 

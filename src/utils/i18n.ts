@@ -1171,6 +1171,10 @@ export const messages: Record<LocaleType, Record<string, string>> = {
     seq_report_close: '关闭报告',
     seq_log_title: '流水线实时执行日志',
     seq_clear_logs: '清空日志',
+
+    // BLE RF & MCU Profiler Tabs
+    tab_ble_rf: 'BLE 射频与HCI',
+    tab_profiler: 'DWT 实时性能Profiler',
   },
   en: {
     // Top Brand & Nav
@@ -2329,6 +2333,10 @@ export const messages: Record<LocaleType, Record<string, string>> = {
     seq_report_close: 'Close Report',
     seq_log_title: 'Real-time Execution Logs',
     seq_clear_logs: 'Clear Logs',
+
+    // BLE RF & MCU Profiler Tabs
+    tab_ble_rf: 'BLE RF & HCI',
+    tab_profiler: 'DWT Profiler',
   }
 };
 

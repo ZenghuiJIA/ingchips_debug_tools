@@ -14,12 +14,16 @@ import {
   AlertCircle,
   X,
   Sparkles,
-  MousePointer
+  MousePointer,
+  Layers
 } from '@lucide/vue';
+import MemoryDiffInspector from './MemoryDiffInspector.vue';
 
 defineProps<{
   isConnected: boolean;
 }>();
+
+const isDiffMode = ref<boolean>(false);
 
 // --- View Format Mode ---
 export type ViewFormat = '8bit' | '16bit' | '32bit' | '64bit';
@@ -610,14 +614,15 @@ function isChunkChanged(startIdx: number, size: number): boolean {
           <span>{{ t("mem_btn_dump_bin") }}</span>
         </button>
 
-        <!-- Load Bin to RAM -->
+        <!-- Hex Diff View Toggle -->
         <button
-          @click="isLoadModalOpen = true"
-          class="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-purple-300 border border-purple-800/80 rounded text-xs flex items-center gap-1.5 transition-colors"
-          :title="t('mem_btn_load_tip')"
+          @click="isDiffMode = !isDiffMode"
+          class="px-2.5 py-1 rounded text-xs flex items-center gap-1.5 transition-colors border font-semibold"
+          :class="isDiffMode ? 'bg-amber-600 hover:bg-amber-500 text-zinc-950 border-amber-500' : 'bg-zinc-800 hover:bg-zinc-700 text-amber-300 border-amber-800/80'"
+          title="切换至双栏内存转储差异对比视图"
         >
-          <Upload class="w-3.5 h-3.5 text-purple-400" />
-          <span>{{ t("mem_btn_load_bin") }}</span>
+          <Layers class="w-3.5 h-3.5" />
+          <span>{{ isDiffMode ? '退出 Diff 视图' : '内存差异 Diff' }}</span>
         </button>
       </div>
     </div>
@@ -631,8 +636,15 @@ function isChunkChanged(startIdx: number, size: number): boolean {
       <button @click="errorMessage = ''" class="hover:text-white"><X class="w-3.5 h-3.5" /></button>
     </div>
 
+    <!-- Dual-Pane Hex Diff View Mode -->
+    <MemoryDiffInspector
+      v-if="isDiffMode"
+      :initial-address="addressInput"
+      :is-connected="isConnected"
+    />
+
     <!-- Main Content Split Area: Left Hex Grid, Right Data Inspector -->
-    <div class="flex-1 flex flex-col lg:flex-row overflow-hidden">
+    <div v-else class="flex-1 flex flex-col lg:flex-row overflow-hidden">
       <!-- Hex Editor Grid -->
       <div class="flex-1 flex flex-col overflow-hidden border-r border-zinc-800">
         <!-- Hex Table Header -->
