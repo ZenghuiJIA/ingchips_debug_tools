@@ -10,7 +10,8 @@ import type {
   HilStepResult,
   HilExecutionReport,
   SerialRxPayload,
-  PortInfo
+  PortInfo,
+  ProbeInfo
 } from '../types';
 import {
   Play,
@@ -53,7 +54,8 @@ const actionTemplates: Array<{
       file_path: '',
       baud_rate: 921600,
       target_device: '',
-      single_addr: '0x02002000'
+      single_addr: '0x02002000',
+      probe_id: ''
     }
   },
   {
@@ -65,7 +67,8 @@ const actionTemplates: Array<{
     defaultParams: {
       reset_method: 'pin_dtr_pulse',
       pulse_ms: 100,
-      port_name: ''
+      port_name: '',
+      probe_id: ''
     }
   },
   {
@@ -76,6 +79,7 @@ const actionTemplates: Array<{
     color: 'text-emerald-400 border-emerald-800/40 bg-emerald-950/20',
     defaultParams: {
       port_name: '',
+      baud_rate: 115200,
       send_data: 'AT+PING',
       send_format: 'string',
       send_ending: 'crlf'
@@ -89,6 +93,7 @@ const actionTemplates: Array<{
     color: 'text-cyan-400 border-cyan-800/40 bg-cyan-950/20',
     defaultParams: {
       port_name: '',
+      baud_rate: 115200,
       match_type: 'contains',
       pattern: 'OK',
       timeout_ms: 3000
@@ -101,6 +106,7 @@ const actionTemplates: Array<{
     icon: Cpu,
     color: 'text-indigo-400 border-indigo-800/40 bg-indigo-950/20',
     defaultParams: {
+      probe_id: '',
       memory_addr: '0x20000000',
       read_width: 32,
       operator: '==',
@@ -115,6 +121,7 @@ const actionTemplates: Array<{
     icon: Sliders,
     color: 'text-purple-400 border-purple-800/40 bg-purple-950/20',
     defaultParams: {
+      probe_id: '',
       peripheral: 'UART0',
       register: 'LSR',
       field_name: '',
@@ -145,8 +152,30 @@ const pipeline = ref<HilTestPipeline>({
   steps: []
 });
 
-// Available system serial ports for quick selector
+// Available system serial ports & SWD probes
 const availablePorts = ref<PortInfo[]>([]);
+const availableProbes = ref<ProbeInfo[]>([]);
+const isScanningProbes = ref<boolean>(false);
+const baudPresets = [9600, 115200, 230400, 460800, 921600, 1000000, 1152000, 1500000];
+
+function formatProbeLabel(p: ProbeInfo): string {
+  const typeLabel = p.probe_type === 'jlink' || p.description.toLowerCase().includes('jlink') || p.description.toLowerCase().includes('j-link')
+    ? '🔗 [J-Link]' : (p.probe_type === 'daplink' || p.description.toLowerCase().includes('dap') || p.description.toLowerCase().includes('cmsis')
+    ? '⚡ [CMSIS-DAP]' : '🔌 [Probe]');
+  return `${typeLabel} ${p.product_name || p.description} (SN: ${p.unique_id})`;
+}
+
+async function refreshProbes() {
+  isScanningProbes.value = true;
+  try {
+    const list: ProbeInfo[] = await safeInvoke('pyocd_list_probes');
+    availableProbes.value = list;
+  } catch (e) {
+    console.warn('Failed to load probes in sequencer:', e);
+  } finally {
+    isScanningProbes.value = false;
+  }
+}
 
 // Execution state
 const isRunning = ref<boolean>(false);
@@ -344,7 +373,7 @@ async function executeSingleStep(step: HilTestStep): Promise<HilStepResult> {
           await safeInvoke('pyocd_flash_firmware', {
             filePath: fPath,
             targetOverride: step.params.target_device || null,
-            probeId: null,
+            probeId: step.params.probe_id || null,
             packPath: null,
             frequency: 10000000
           });
@@ -360,7 +389,11 @@ async function executeSingleStep(step: HilTestStep): Promise<HilStepResult> {
         addLog(`[${step.name}] 执行复位: ${method} (端口: ${pName || '默认'})`, 'info');
 
         if (method === 'swd_soft_reset') {
-          await safeInvoke('pyocd_reset_target', { halt: false, probeId: null, targetOverride: null });
+          await safeInvoke('pyocd_reset_target', {
+            halt: false,
+            probeId: step.params.probe_id || null,
+            targetOverride: null
+          });
         } else if (method === 'bootloader_reset') {
           await safeInvoke('execute_reset_sequence', { seqType: 'bootloader_reset', portName: pName || null });
         } else {
@@ -377,6 +410,13 @@ async function executeSingleStep(step: HilTestStep): Promise<HilStepResult> {
 
       case 'serial_send': {
         const pName = step.params.port_name || availablePorts.value[0]?.port_name;
+        const baud = Number(step.params.baud_rate) || 115200;
+        if (pName) {
+          try {
+            await safeInvoke('open_serial_port', { portName: pName, baudRate: baud });
+          } catch (_) {}
+        }
+
         const textToSend = step.params.send_data || '';
         let bytes: number[] = [];
 
@@ -392,7 +432,7 @@ async function executeSingleStep(step: HilTestStep): Promise<HilStepResult> {
           bytes = Array.from(new TextEncoder().encode(payload));
         }
 
-        addLog(`[${step.name}] 串口发送: "${textToSend}" -> 端口 [${pName}]`, 'info');
+        addLog(`[${step.name}] 串口发送: "${textToSend}" -> 端口 [${pName}] @ ${baud}bps`, 'info');
         await safeInvoke('send_serial_data', { data: bytes, portName: pName });
         res.status = 'pass';
         res.message = `串口数据发送成功 (${bytes.length} 字节)`;
@@ -401,6 +441,12 @@ async function executeSingleStep(step: HilTestStep): Promise<HilStepResult> {
 
       case 'serial_wait_match': {
         const pName = step.params.port_name || availablePorts.value[0]?.port_name || '';
+        const baud = Number(step.params.baud_rate) || 115200;
+        if (pName) {
+          try {
+            await safeInvoke('open_serial_port', { portName: pName, baudRate: baud });
+          } catch (_) {}
+        }
         const pattern = step.params.pattern || '';
         const timeout = Number(step.params.timeout_ms) || 3000;
         const matchType = step.params.match_type || 'contains';
@@ -457,7 +503,7 @@ async function executeSingleStep(step: HilTestStep): Promise<HilStepResult> {
         const readRes: any = await safeInvoke('pyocd_read_memory', {
           address: addr,
           count: 4,
-          probeId: null,
+          probeId: step.params.probe_id || null,
           targetOverride: null
         });
 
@@ -499,7 +545,7 @@ async function executeSingleStep(step: HilTestStep): Promise<HilStepResult> {
         // Fallback demo/mock or direct SVD read
         const readVal: any = await safeInvoke('svd_read_register', {
           address: '0x40000000', // Mock/direct fallback
-          probeId: null,
+          probeId: step.params.probe_id || null,
           targetOverride: null
         }).catch(() => ({ value_uint: expected }));
 
@@ -746,6 +792,7 @@ function loadDemoPipeline() {
 
 onMounted(async () => {
   await refreshPorts();
+  await refreshProbes();
   if (pipeline.value.steps.length === 0) {
     loadDemoPipeline();
   }
@@ -1086,6 +1133,45 @@ onUnmounted(() => {
                 <option value="ing_ini">INGChips 专属 INI 烧录器</option>
               </select>
             </div>
+            <!-- SWD Probe Selector for PyOCD flash -->
+            <div v-if="selectedStep.params.flash_type === 'pyocd'">
+              <div class="flex items-center justify-between text-zinc-400 text-[11px] mb-1 font-medium">
+                <span>SWD 硬件调试器</span>
+                <button @click="refreshProbes" class="text-emerald-400 hover:underline text-[10px]">刷新</button>
+              </div>
+              <select
+                v-model="selectedStep.params.probe_id"
+                class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+              >
+                <option value="">默认调试器 (自动识别)</option>
+                <option v-for="pr in availableProbes" :key="pr.unique_id" :value="pr.unique_id">
+                  {{ formatProbeLabel(pr) }}
+                </option>
+              </select>
+            </div>
+            <!-- Serial Port & Baud for ING ini flash -->
+            <div v-if="selectedStep.params.flash_type === 'ing_ini'" class="space-y-2">
+              <div>
+                <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_port_name') }}</label>
+                <select
+                  v-model="selectedStep.params.port_name"
+                  class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+                >
+                  <option v-for="p in availablePorts" :key="p.port_name" :value="p.port_name">{{ p.port_name }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-zinc-400 text-[11px] mb-1 font-medium">烧录波特率</label>
+                <select
+                  v-model.number="selectedStep.params.baud_rate"
+                  class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+                >
+                  <option v-for="b in baudPresets" :key="b" :value="b">
+                    {{ b >= 1000000 ? `${(b / 1000000).toFixed(b % 1000000 === 0 ? 0 : 2)}M` : b }} bps
+                  </option>
+                </select>
+              </div>
+            </div>
             <div>
               <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_target_file') }}</label>
               <div class="flex gap-1.5">
@@ -1117,6 +1203,21 @@ onUnmounted(() => {
                 <option value="bootloader_reset">RTS + DTR 复位并进入 Bootloader</option>
               </select>
             </div>
+            <div v-if="selectedStep.params.reset_method === 'swd_soft_reset'">
+              <div class="flex items-center justify-between text-zinc-400 text-[11px] mb-1 font-medium">
+                <span>SWD 硬件调试器</span>
+                <button @click="refreshProbes" class="text-emerald-400 hover:underline text-[10px]">刷新</button>
+              </div>
+              <select
+                v-model="selectedStep.params.probe_id"
+                class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+              >
+                <option value="">默认调试器 (自动识别)</option>
+                <option v-for="pr in availableProbes" :key="pr.unique_id" :value="pr.unique_id">
+                  {{ formatProbeLabel(pr) }}
+                </option>
+              </select>
+            </div>
             <div>
               <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_pulse_ms') }}</label>
               <input
@@ -1139,6 +1240,31 @@ onUnmounted(() => {
                   {{ p.port_name }}
                 </option>
               </select>
+            </div>
+            <div>
+              <label class="block text-zinc-400 text-[11px] mb-1 font-medium">串口波特率 (Baud)</label>
+              <div class="flex items-center gap-1.5">
+                <select
+                  :value="selectedStep ? (baudPresets.includes(Number(selectedStep.params.baud_rate)) ? selectedStep.params.baud_rate : 'custom') : ''"
+                  @change="(e: any) => {
+                    const v = e.target.value;
+                    if (selectedStep && v !== 'custom') selectedStep.params.baud_rate = Number(v);
+                  }"
+                  class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+                >
+                  <option v-for="b in baudPresets" :key="b" :value="b">
+                    {{ b >= 1000000 ? `${(b / 1000000).toFixed(b % 1000000 === 0 ? 0 : 2)}M` : b }} bps
+                  </option>
+                  <option value="custom">自定义...</option>
+                </select>
+                <input
+                  v-if="!baudPresets.includes(Number(selectedStep.params.baud_rate)) || selectedStep.params.baud_rate === 0"
+                  v-model.number="selectedStep.params.baud_rate"
+                  type="number"
+                  placeholder="Baud"
+                  class="w-24 bg-zinc-950 border border-amber-600/70 rounded px-2 py-1 text-amber-300 text-xs font-mono text-center"
+                />
+              </div>
             </div>
             <div>
               <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_send_format') }}</label>
@@ -1186,6 +1312,31 @@ onUnmounted(() => {
               </select>
             </div>
             <div>
+              <label class="block text-zinc-400 text-[11px] mb-1 font-medium">串口波特率 (Baud)</label>
+              <div class="flex items-center gap-1.5">
+                <select
+                  :value="selectedStep ? (baudPresets.includes(Number(selectedStep.params.baud_rate)) ? selectedStep.params.baud_rate : 'custom') : ''"
+                  @change="(e: any) => {
+                    const v = e.target.value;
+                    if (selectedStep && v !== 'custom') selectedStep.params.baud_rate = Number(v);
+                  }"
+                  class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+                >
+                  <option v-for="b in baudPresets" :key="b" :value="b">
+                    {{ b >= 1000000 ? `${(b / 1000000).toFixed(b % 1000000 === 0 ? 0 : 2)}M` : b }} bps
+                  </option>
+                  <option value="custom">自定义...</option>
+                </select>
+                <input
+                  v-if="!baudPresets.includes(Number(selectedStep.params.baud_rate)) || selectedStep.params.baud_rate === 0"
+                  v-model.number="selectedStep.params.baud_rate"
+                  type="number"
+                  placeholder="Baud"
+                  class="w-24 bg-zinc-950 border border-amber-600/70 rounded px-2 py-1 text-amber-300 text-xs font-mono text-center"
+                />
+              </div>
+            </div>
+            <div>
               <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_match_type') }}</label>
               <select
                 v-model="selectedStep.params.match_type"
@@ -1215,6 +1366,21 @@ onUnmounted(() => {
 
           <!-- swd_read_assert -->
           <template v-if="selectedStep.action === 'swd_read_assert'">
+            <div>
+              <div class="flex items-center justify-between text-zinc-400 text-[11px] mb-1 font-medium">
+                <span>SWD 硬件调试器</span>
+                <button @click="refreshProbes" class="text-emerald-400 hover:underline text-[10px]">刷新</button>
+              </div>
+              <select
+                v-model="selectedStep.params.probe_id"
+                class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+              >
+                <option value="">默认调试器 (自动识别)</option>
+                <option v-for="pr in availableProbes" :key="pr.unique_id" :value="pr.unique_id">
+                  {{ formatProbeLabel(pr) }}
+                </option>
+              </select>
+            </div>
             <div>
               <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_mem_addr') }}</label>
               <input
@@ -1256,6 +1422,51 @@ onUnmounted(() => {
                 v-model="selectedStep.params.expected_value"
                 class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
                 placeholder="0xAA550001"
+              />
+            </div>
+          </template>
+
+          <!-- svd_check_reg -->
+          <template v-if="selectedStep.action === 'svd_check_reg'">
+            <div>
+              <div class="flex items-center justify-between text-zinc-400 text-[11px] mb-1 font-medium">
+                <span>SWD 硬件调试器</span>
+                <button @click="refreshProbes" class="text-emerald-400 hover:underline text-[10px]">刷新</button>
+              </div>
+              <select
+                v-model="selectedStep.params.probe_id"
+                class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+              >
+                <option value="">默认调试器 (自动识别)</option>
+                <option v-for="pr in availableProbes" :key="pr.unique_id" :value="pr.unique_id">
+                  {{ formatProbeLabel(pr) }}
+                </option>
+              </select>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="block text-zinc-400 text-[11px] mb-1 font-medium">外设名称</label>
+                <input
+                  v-model="selectedStep.params.peripheral"
+                  class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+                  placeholder="UART0"
+                />
+              </div>
+              <div>
+                <label class="block text-zinc-400 text-[11px] mb-1 font-medium">寄存器</label>
+                <input
+                  v-model="selectedStep.params.register"
+                  class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+                  placeholder="LSR"
+                />
+              </div>
+            </div>
+            <div>
+              <label class="block text-zinc-400 text-[11px] mb-1 font-medium">预期值 (HEX)</label>
+              <input
+                v-model="selectedStep.params.expected_reg_val"
+                class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
+                placeholder="0x60"
               />
             </div>
           </template>

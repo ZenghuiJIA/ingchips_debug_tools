@@ -468,11 +468,11 @@ onMounted(() => {
           <span class="text-slate-400">{{ t("svd_swd_probe_label") }}</span>
           <select
             v-model="selectedProbeId"
-            class="bg-transparent text-slate-200 text-xs outline-none cursor-pointer max-w-[160px] truncate"
+            class="bg-transparent text-slate-200 text-xs outline-none cursor-pointer max-w-[210px] truncate"
           >
             <option v-if="probes.length === 0" value="">{{ t("svd_no_probes") }}</option>
             <option v-for="p in probes" :key="p.unique_id" :value="p.unique_id">
-              {{ p.description || p.probe_type }} ({{ p.unique_id.slice(-6) }})
+              {{ (p.probe_type === 'jlink' || p.description.toLowerCase().includes('jlink') || p.description.toLowerCase().includes('j-link')) ? '🔗 [J-Link]' : '⚡ [CMSIS-DAP]' }} {{ p.product_name || p.description }} (SN: {{ p.unique_id }})
             </option>
           </select>
           <button

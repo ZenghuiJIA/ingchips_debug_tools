@@ -473,9 +473,9 @@ class PyOCDController:
             }
 
     @staticmethod
-    def read_memory(address: int, count: int, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
+    def read_memory(address: int, count: int, probe_id: Optional[str] = None, target_override: Optional[str] = None, frequency: Optional[int] = None) -> Dict[str, Any]:
         count = min(count, 4096)  # Cap at 4KB
-        session = PyOCDController._create_session(probe_id, target_override)
+        session = PyOCDController._create_session(probe_id, target_override, frequency=frequency)
         with session:
             target = session.board.target
             data = target.read_memory_block8(address, count)
@@ -488,24 +488,24 @@ class PyOCDController:
             }
 
     @staticmethod
-    def write_memory(address: int, value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        session = PyOCDController._create_session(probe_id, target_override)
+    def write_memory(address: int, value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None, frequency: Optional[int] = None) -> Dict[str, Any]:
+        session = PyOCDController._create_session(probe_id, target_override, frequency=frequency)
         with session:
             target = session.board.target
             target.write32(address, value)
             return {"address": f"0x{address:08X}", "value": f"0x{value:08X}", "status": "success"}
 
     @staticmethod
-    def write_memory_byte(address: int, value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        session = PyOCDController._create_session(probe_id, target_override)
+    def write_memory_byte(address: int, value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None, frequency: Optional[int] = None) -> Dict[str, Any]:
+        session = PyOCDController._create_session(probe_id, target_override, frequency=frequency)
         with session:
             target = session.board.target
             target.write8(address, value & 0xFF)
             return {"address": f"0x{address:08X}", "value": f"0x{value & 0xFF:02X}", "status": "success"}
 
     @staticmethod
-    def dump_memory_to_file(address: int, count: int, file_path: str, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        session = PyOCDController._create_session(probe_id, target_override)
+    def dump_memory_to_file(address: int, count: int, file_path: str, probe_id: Optional[str] = None, target_override: Optional[str] = None, frequency: Optional[int] = None) -> Dict[str, Any]:
+        session = PyOCDController._create_session(probe_id, target_override, frequency=frequency)
         with session:
             target = session.board.target
             chunk_size = 4096
@@ -706,13 +706,69 @@ class PyOCDController:
 
     @staticmethod
     def capture_lcd_framebuffer(address: int, width: int, height: int, pixel_format: str = "rgb565",
-                                probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
+                                probe_id: Optional[str] = None, target_override: Optional[str] = None,
+                                frequency: Optional[int] = None) -> Dict[str, Any]:
         """Capture LCD display buffer from MCU RAM and convert to PNG Base64."""
         from lcd_mirror import LcdMirror
-        session = PyOCDController._create_session(probe_id, target_override)
+        session = PyOCDController._create_session(probe_id, target_override, frequency=frequency)
         with session:
             target = session.board.target
             return LcdMirror.capture_framebuffer(target, address, width, height, pixel_format)
+
+    @staticmethod
+    def sample_pc_trace(count: int = 500, trace_caller: bool = False,
+                        probe_id: Optional[str] = None, target_override: Optional[str] = None,
+                        frequency: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Burst-samples CPU program counter (PC) and optionally link register (LR) via SWD.
+        Provides high-speed statistical profiling for hotspot functions and spinlock detection.
+        """
+        session = PyOCDController._create_session(probe_id, target_override, frequency=frequency)
+        samples = []
+        start_t = time.time()
+
+        with session:
+            target = session.board.target
+            # Cortex-M DCRSR/DCRDR access via pyocd target.read_core_register
+            for i in range(max(1, min(count, 5000))):
+                try:
+                    pc = target.read_core_register("pc")
+                    lr = target.read_core_register("lr") if trace_caller else None
+                    samples.append({
+                        "i": i,
+                        "pc": pc,
+                        "lr": lr
+                    })
+                except Exception as e:
+                    logger.debug(f"PC sample error at index {i}: {e}")
+                    break
+
+        duration_sec = time.time() - start_t
+        rate = round(len(samples) / duration_sec, 1) if duration_sec > 0 else 0
+
+        # Check if any sample indicates an exception or HardFault
+        # Cortex-M EXC_RETURN starts with 0xFFFFFFF...
+        # Also check if LR has exception return pattern
+        exception_detected = False
+        exception_desc = ""
+        for s in samples:
+            lr_val = s.get("lr")
+            pc_val = s.get("pc", 0)
+            if lr_val is not None and (lr_val & 0xFFFFFF00) == 0xFFFFFF00:
+                exception_detected = True
+                exception_desc = f"检测到中断/异常发生 (LR: 0x{lr_val:08X}, PC: 0x{pc_val:08X})"
+                break
+
+        return {
+            "status": "success",
+            "samples_count": len(samples),
+            "duration_ms": round(duration_sec * 1000, 1),
+            "samples_per_sec": rate,
+            "trace_caller": trace_caller,
+            "exception_detected": exception_detected,
+            "exception_desc": exception_desc,
+            "samples": samples
+        }
 
 
 class RTTController:
@@ -1598,6 +1654,160 @@ class AxfSymbolParser:
             "file_path": file_path,
             "count": len(symbols),
             "symbols": symbols
+        }
+
+    @staticmethod
+    def parse_functions(file_path: str, filter_keyword: Optional[str] = None, max_results: int = 500) -> Dict[str, Any]:
+        """
+        Parses Keil MDK .axf, GCC .elf, or raw ELF files (even without extension) to extract
+        executable functions (STT_FUNC or code symbols in .text section) for DWT/PC profiling.
+        """
+        try:
+            from elftools.elf.elffile import ELFFile
+            from elftools.elf.sections import SymbolTableSection
+        except ImportError:
+            raise RuntimeError("pyelftools is not installed in Python daemon.")
+
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+
+        functions = []
+        filter_kw = (filter_keyword or "").lower()
+
+        with open(file_path, "rb") as f:
+            # Check ELF magic header 0x7F 'E' 'L' 'F'
+            magic = f.read(4)
+            if magic != b"\x7fELF":
+                raise ValueError(f"文件不是标准的 ELF/AXF 二进制格式 (未包含 \\x7fELF 魔数): {file_path}")
+            f.seek(0)
+            elffile = ELFFile(f)
+
+            symtab = None
+            for section in elffile.iter_sections():
+                if isinstance(section, SymbolTableSection):
+                    symtab = section
+                    break
+
+            if not symtab:
+                return {"file_path": file_path, "functions": [], "count": 0, "message": "ELF 文件中未找到符号表。"}
+
+            for sym in symtab.iter_symbols():
+                name = sym.name
+                if not name or name.startswith("$") or name.startswith("."):
+                    continue
+
+                addr = sym['st_value']
+                size = sym['st_size']
+                sym_type = sym['st_info']['type']
+
+                # Cortex-M Thumb instructions have LSB = 1 in symbol values
+                clean_addr = addr & ~1
+
+                if sym_type in ('STT_FUNC', 'STT_NOTYPE') and size > 0:
+                    if filter_kw and filter_kw not in name.lower():
+                        continue
+
+                    category = "App Code"
+                    lower_n = name.lower()
+                    if "isr" in lower_n or "handler" in lower_n or "irq" in lower_n:
+                        category = "ISR"
+                    elif "ble" in lower_n or "hci" in lower_n or "ll_" in lower_n or "gap" in lower_n or "gatt" in lower_n:
+                        category = "BLE Stack"
+                    elif "os" in lower_n or "task" in lower_n or "xqueue" in lower_n or "vtask" in lower_n or "rt_" in lower_n:
+                        category = "RTOS"
+                    elif "driver" in lower_n or "hal_" in lower_n or "uart" in lower_n or "spi" in lower_n or "i2c" in lower_n or "dma" in lower_n:
+                        category = "Driver/HAL"
+                    elif "aes" in lower_n or "sha" in lower_n or "ecc" in lower_n or "crypto" in lower_n:
+                        category = "Security"
+
+                    functions.append({
+                        "name": name,
+                        "address": f"0x{clean_addr:08X}",
+                        "raw_address": clean_addr,
+                        "size": size,
+                        "category": category
+                    })
+
+                    if len(functions) >= max_results:
+                        break
+
+        functions.sort(key=lambda x: x["raw_address"])
+        return {
+            "file_path": file_path,
+            "count": len(functions),
+            "functions": functions
+        }
+
+    @staticmethod
+    def detect_lcd_framebuffer_symbol(file_path: str) -> Dict[str, Any]:
+        """
+        Scans global symbols in an AXF/ELF file for potential LCD framebuffers
+        (e.g., matching 'lcd_buf', 'disp_buf', 'framebuffer', 'fb_mem', 'lv_disp_buf').
+        """
+        try:
+            from elftools.elf.elffile import ELFFile
+            from elftools.elf.sections import SymbolTableSection
+        except ImportError:
+            raise RuntimeError("pyelftools is not installed in Python daemon.")
+
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+
+        candidates = []
+        target_patterns = ["lcd", "disp", "framebuffer", "fb", "screen", "canvas", "oled"]
+
+        with open(file_path, "rb") as f:
+            magic = f.read(4)
+            if magic != b"\x7fELF":
+                raise ValueError(f"文件不是标准的 ELF/AXF 二进制格式: {file_path}")
+            f.seek(0)
+            elffile = ELFFile(f)
+
+            symtab = None
+            for section in elffile.iter_sections():
+                if isinstance(section, SymbolTableSection):
+                    symtab = section
+                    break
+
+            if symtab:
+                for sym in symtab.iter_symbols():
+                    name = sym.name
+                    if not name or name.startswith("$") or name.startswith("."):
+                        continue
+                    addr = sym['st_value']
+                    size = sym['st_size']
+                    lower_n = name.lower()
+
+                    # Check for framebuffer keywords and size > 256 bytes
+                    if any(pat in lower_n for pat in target_patterns) and size >= 256:
+                        # Guess dimensions if possible
+                        # Common sizes: 128*64/8=1024, 320*240*2=153600, 240*240*2=115200, 160*80*2=25600, 480*320*2=307200
+                        guessed_w = 320
+                        guessed_h = 240
+                        guessed_fmt = "rgb565"
+                        if size == 1024:
+                            guessed_w, guessed_h, guessed_fmt = 128, 64, "mono"
+                        elif size == 115200:
+                            guessed_w, guessed_h, guessed_fmt = 240, 240, "rgb565"
+                        elif size == 153600:
+                            guessed_w, guessed_h, guessed_fmt = 320, 240, "rgb565"
+                        elif size == 307200:
+                            guessed_w, guessed_h, guessed_fmt = 480, 320, "rgb565"
+
+                        candidates.append({
+                            "name": name,
+                            "address": f"0x{addr:08X}",
+                            "raw_address": addr,
+                            "size": size,
+                            "suggested_width": guessed_w,
+                            "suggested_height": guessed_h,
+                            "suggested_format": guessed_fmt
+                        })
+
+        return {
+            "file_path": file_path,
+            "count": len(candidates),
+            "candidates": candidates
         }
 
 
@@ -2875,6 +3085,11 @@ DIRECT_TOOL_METHODS = [
     "inspect_firmware_file",
     "merge_hex_files",
     "merge_bin_files",
+    "detect_rtos_kernel",
+    "capture_lcd_framebuffer",
+    "parse_firmware_functions",
+    "detect_lcd_framebuffer_symbol",
+    "sample_pc_trace",
 ]
 
 
@@ -2926,7 +3141,10 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
             address = int(address, 16 if address.startswith("0x") else 10)
         count = int(arguments["count"])
         file_path = arguments["file_path"]
-        return PyOCDController.dump_memory_to_file(address, count, file_path, probe_id, target_override)
+        freq = arguments.get("frequency")
+        if isinstance(freq, str):
+            freq = int(freq, 16 if freq.startswith("0x") else 10)
+        return PyOCDController.dump_memory_to_file(address, count, file_path, probe_id, target_override, frequency=freq)
     elif name == "load_file_to_memory":
         address = arguments["address"]
         if isinstance(address, str):
@@ -2956,7 +3174,25 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         width = int(arguments.get("width", 320))
         height = int(arguments.get("height", 240))
         pixel_format = arguments.get("pixel_format", "rgb565")
-        return PyOCDController.capture_lcd_framebuffer(address, width, height, pixel_format, probe_id, target_override)
+        freq = arguments.get("frequency")
+        if isinstance(freq, str):
+            freq = int(freq, 16 if freq.startswith("0x") else 10)
+        return PyOCDController.capture_lcd_framebuffer(address, width, height, pixel_format, probe_id, target_override, frequency=freq)
+    elif name == "parse_firmware_functions":
+        file_path = arguments["file_path"]
+        kw = arguments.get("filter_keyword")
+        max_r = int(arguments.get("max_results", 500))
+        return AxfSymbolParser.parse_functions(file_path, kw, max_r)
+    elif name == "detect_lcd_framebuffer_symbol":
+        file_path = arguments["file_path"]
+        return AxfSymbolParser.detect_lcd_framebuffer_symbol(file_path)
+    elif name == "sample_pc_trace":
+        count = int(arguments.get("count", 500))
+        trace_caller = bool(arguments.get("trace_caller", False))
+        freq = arguments.get("frequency")
+        if isinstance(freq, str):
+            freq = int(freq, 16 if freq.startswith("0x") else 10)
+        return PyOCDController.sample_pc_trace(count, trace_caller, probe_id, target_override, frequency=freq)
     elif name == "start_rtt":
         probe_type = arguments.get("probe_type")
         block_addr = arguments.get("block_address")

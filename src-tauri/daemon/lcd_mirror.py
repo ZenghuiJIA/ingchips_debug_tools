@@ -63,8 +63,88 @@ class LcdMirror:
         except Exception as e:
             return {"status": "error", "message": f"Failed to read framebuffer memory at 0x{address:08X}: {e}"}
 
+        def make_bmp_data_uri(raw_bytes: bytes, w: int, h: int, pixel_fmt: str) -> str:
+            """Pure Python 24-bit BMP generator (no PIL required) as universal fallback."""
+            # Convert any format to 24-bit BGR rows
+            row_bytes_unpadded = w * 3
+            padding = (4 - (row_bytes_unpadded % 4)) % 4
+            row_size = row_bytes_unpadded + padding
+            image_size = row_size * h
+            file_size = 54 + image_size
+
+            header = bytearray(54)
+            # BMP Header
+            header[0:2] = b'BM'
+            header[2:6] = file_size.to_bytes(4, 'little')
+            header[10:14] = (54).to_bytes(4, 'little')
+            # DIB Header (BITMAPINFOHEADER)
+            header[14:18] = (40).to_bytes(4, 'little')
+            header[18:22] = w.to_bytes(4, 'little')
+            header[22:26] = (-h).to_bytes(4, 'little', signed=True)  # Top-down bitmap
+            header[26:28] = (1).to_bytes(2, 'little')
+            header[28:30] = (24).to_bytes(2, 'little')
+            header[34:38] = image_size.to_bytes(4, 'little')
+
+            pixels = bytearray(image_size)
+            p_idx = 0
+
+            if pixel_fmt == "rgb565":
+                src_idx = 0
+                for _ in range(h):
+                    for _ in range(w):
+                        if src_idx + 1 < len(raw_bytes):
+                            val = raw_bytes[src_idx] | (raw_bytes[src_idx + 1] << 8)
+                            r = ((val >> 11) & 0x1F) * 255 // 31
+                            g = ((val >> 5) & 0x3F) * 255 // 63
+                            b = (val & 0x1F) * 255 // 31
+                            pixels[p_idx] = b
+                            pixels[p_idx + 1] = g
+                            pixels[p_idx + 2] = r
+                        src_idx += 2
+                        p_idx += 3
+                    p_idx += padding
+            elif pixel_fmt == "rgb888":
+                src_idx = 0
+                for _ in range(h):
+                    for _ in range(w):
+                        if src_idx + 2 < len(raw_bytes):
+                            pixels[p_idx] = raw_bytes[src_idx + 2]     # B
+                            pixels[p_idx + 1] = raw_bytes[src_idx + 1] # G
+                            pixels[p_idx + 2] = raw_bytes[src_idx]     # R
+                        src_idx += 3
+                        p_idx += 3
+                    p_idx += padding
+            elif pixel_fmt == "argb8888":
+                src_idx = 0
+                for _ in range(h):
+                    for _ in range(w):
+                        if src_idx + 3 < len(raw_bytes):
+                            pixels[p_idx] = raw_bytes[src_idx]     # B
+                            pixels[p_idx + 1] = raw_bytes[src_idx + 1] # G
+                            pixels[p_idx + 2] = raw_bytes[src_idx + 2] # R
+                        src_idx += 4
+                        p_idx += 3
+                    p_idx += padding
+            else: # mono
+                bit_idx = 0
+                for _ in range(h):
+                    for _ in range(w):
+                        byte_pos = bit_idx // 8
+                        bit_pos = 7 - (bit_idx % 8)
+                        val = 255 if (byte_pos < len(raw_bytes) and (raw_bytes[byte_pos] & (1 << bit_pos))) else 0
+                        pixels[p_idx] = val
+                        pixels[p_idx + 1] = val
+                        pixels[p_idx + 2] = val
+                        bit_idx += 1
+                        p_idx += 3
+                    p_idx += padding
+
+            bmp_content = bytes(header) + bytes(pixels)
+            b64_bmp = base64.b64encode(bmp_content).decode("utf-8")
+            return f"data:image/bmp;base64,{b64_bmp}"
+
         if not PIL_AVAILABLE:
-            # Return raw hex or length
+            bmp_uri = make_bmp_data_uri(raw_data, width, height, fmt)
             return {
                 "status": "success",
                 "address": f"0x{address:08X}",
@@ -72,8 +152,7 @@ class LcdMirror:
                 "height": height,
                 "format": fmt,
                 "byte_count": len(raw_data),
-                "image_base64": None,
-                "message": "PIL library not installed, raw memory fetched."
+                "image_base64": bmp_uri
             }
 
         try:

@@ -589,6 +589,9 @@ export interface HilStepParams {
   target_device?: string;
   single_addr?: string;
 
+  // probe_id for all SWD actions (flash, reset, memory assert, svd check)
+  probe_id?: string;
+
   // reset_target
   reset_method?: 'swd_soft_reset' | 'pin_dtr_pulse' | 'bootloader_reset';
   pulse_ms?: number;

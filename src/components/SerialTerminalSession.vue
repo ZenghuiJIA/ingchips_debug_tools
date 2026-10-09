@@ -53,7 +53,31 @@ const emit = defineEmits<{
 const dtrState = ref<boolean>(false);
 const rtsState = ref<boolean>(false);
 const isResetting = ref<boolean>(false);
-const baudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+const baudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 1152000, 1500000, 2000000];
+const isCustomBaud = ref<boolean>(false);
+const customBaudInput = ref<number>(props.baudRate);
+
+watch(() => props.baudRate, (newVal) => {
+  if (!baudRates.includes(newVal)) {
+    isCustomBaud.value = true;
+    customBaudInput.value = newVal;
+  }
+}, { immediate: true });
+
+function handleBaudSelect(val: string) {
+  if (val === 'custom') {
+    isCustomBaud.value = true;
+  } else {
+    isCustomBaud.value = false;
+    emit('change-baud', Number(val));
+  }
+}
+
+function handleCustomBaudApply() {
+  if (customBaudInput.value && customBaudInput.value > 0) {
+    emit('change-baud', customBaudInput.value);
+  }
+}
 
 async function refreshPinStates() {
   if (!props.isConnected || props.portName.startsWith('RTT')) return;
@@ -551,18 +575,30 @@ onUnmounted(() => {
           </select>
           <span v-else class="text-zinc-200 font-mono">{{ portName }}</span>
 
-          <!-- Switch Baud Rate Dropdown (Enabled even if connected, supports runtime adjustment) -->
-          <select
-            v-if="!portName.startsWith('RTT')"
-            :value="baudRate"
-            @change="(e: any) => emit('change-baud', Number(e.target.value))"
-            class="bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-300 py-0.5 px-1.5 rounded outline-none font-mono cursor-pointer hover:border-zinc-700"
-            :title="isConnected ? t('term_baud_adjust_tip') : t('term_baud_set_tip')"
-          >
-            <option v-for="b in baudRates" :key="b" :value="b">
-              {{ b }}
-            </option>
-          </select>
+          <!-- Switch Baud Rate Dropdown & Custom Input (Enabled even if connected, supports runtime adjustment) -->
+          <div v-if="!portName.startsWith('RTT')" class="flex items-center gap-1">
+            <select
+              :value="isCustomBaud ? 'custom' : baudRate"
+              @change="(e: any) => handleBaudSelect(e.target.value)"
+              class="bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-300 py-0.5 px-1.5 rounded outline-none font-mono cursor-pointer hover:border-zinc-700"
+              :title="isConnected ? t('term_baud_adjust_tip') : t('term_baud_set_tip')"
+            >
+              <option v-for="b in baudRates" :key="b" :value="b">
+                {{ b >= 1000000 ? (b / 1000000) + 'M' : b }}
+              </option>
+              <option value="custom">自定义...</option>
+            </select>
+            <input
+              v-if="isCustomBaud"
+              v-model.number="customBaudInput"
+              type="number"
+              placeholder="Baud"
+              @keyup.enter="handleCustomBaudApply"
+              @blur="handleCustomBaudApply"
+              class="w-18 bg-zinc-950 border border-amber-600/70 text-[10px] text-amber-300 py-0.5 px-1 rounded outline-none font-mono text-center"
+              title="按回车或失焦生效自定义波特率"
+            />
+          </div>
 
           <!-- Direct Open / Close Port Button inside Tab -->
           <button

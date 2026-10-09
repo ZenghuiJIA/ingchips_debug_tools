@@ -261,11 +261,11 @@ function formatHexGrid(bytes: number[], startAddr: number) {
         <select
           v-if="probes.length > 0"
           v-model="selectedProbeId"
-          class="bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-zinc-200 outline-none focus:border-rose-500 font-mono text-xs max-w-[190px]"
+          class="bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-zinc-200 outline-none focus:border-rose-500 font-mono text-xs max-w-[210px] truncate"
           :title="t('hf_tip_select_probe')"
         >
           <option v-for="p in probes" :key="p.unique_id" :value="p.unique_id">
-            {{ getProbeBadge(p) }} {{ p.description }}
+            {{ getProbeBadge(p) }} {{ p.product_name || p.description }} (SN: {{ p.unique_id }})
           </option>
         </select>
 

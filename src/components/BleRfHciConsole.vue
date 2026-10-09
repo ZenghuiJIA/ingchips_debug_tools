@@ -25,9 +25,29 @@ export interface HciPacket {
   fields: Array<{ name: string; value: string }>;
 }
 
-// Available Ports
+// Available Ports & Baud
 const availablePorts = ref<PortInfo[]>([]);
 const selectedPort = ref<string>('');
+const selectedBaud = ref<number>(115200);
+const isPortOpen = ref<boolean>(false);
+const baudPresets = [9600, 115200, 230400, 460800, 921600, 1000000, 1152000, 1500000, 2000000];
+const isCustomBaud = ref<boolean>(false);
+const customBaudInput = ref<number>(115200);
+
+function handleBaudSelect(val: string) {
+  if (val === 'custom') {
+    isCustomBaud.value = true;
+  } else {
+    isCustomBaud.value = false;
+    selectedBaud.value = Number(val);
+  }
+}
+
+function handleCustomBaudApply() {
+  if (customBaudInput.value && customBaudInput.value > 0) {
+    selectedBaud.value = customBaudInput.value;
+  }
+}
 
 // Active Tab: 'dtm' (Direct Test Mode) | 'hci_trace' (Packet Inspector)
 const activeSubTab = ref<'dtm' | 'hci_trace'>('dtm');
@@ -99,12 +119,52 @@ async function loadPorts() {
   }
 }
 
+async function ensurePortOpen() {
+  if (!selectedPort.value) return;
+  try {
+    await safeInvoke('open_serial_port', {
+      portName: selectedPort.value,
+      baudRate: Number(selectedBaud.value) || 115200
+    });
+    isPortOpen.value = true;
+  } catch (err: any) {
+    // If port is already open by app, treat as open
+    isPortOpen.value = true;
+  }
+}
+
+async function togglePortConnection() {
+  if (!selectedPort.value) return;
+  if (isPortOpen.value) {
+    try {
+      await safeInvoke('close_serial_port', { portName: selectedPort.value });
+      isPortOpen.value = false;
+      addDtmLog(`串口 [${selectedPort.value}] 已关闭`, 'info');
+    } catch (e: any) {
+      addDtmLog(`关闭串口失败: ${e}`, 'error');
+    }
+  } else {
+    try {
+      await safeInvoke('open_serial_port', {
+        portName: selectedPort.value,
+        baudRate: Number(selectedBaud.value) || 115200
+      });
+      isPortOpen.value = true;
+      addDtmLog(`串口 [${selectedPort.value}] 已打开 @ ${selectedBaud.value} bps`, 'success');
+    } catch (e: any) {
+      addDtmLog(`打开串口失败: ${e}`, 'error');
+    }
+  }
+}
+
 // Start / Stop DTM Test
 async function startDtmTest() {
   if (!selectedPort.value) {
     alert('请先选择目标芯片串口端口');
     return;
   }
+
+  await ensurePortOpen();
 
   isDtmRunning.value = true;
   rxPacketsCount.value = 0;
@@ -302,6 +362,38 @@ onUnmounted(() => {
             </option>
           </select>
         </div>
+
+        <div class="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs">
+          <span class="text-zinc-500 font-mono">波特率:</span>
+          <select
+            :value="isCustomBaud ? 'custom' : selectedBaud"
+            @change="(e: any) => handleBaudSelect(e.target.value)"
+            class="bg-transparent text-amber-400 font-mono outline-none cursor-pointer"
+          >
+            <option v-for="b in baudPresets" :key="b" :value="b">
+              {{ b >= 1000000 ? `${(b / 1000000).toFixed(b % 1000000 === 0 ? 0 : 2)}M` : b }}
+            </option>
+            <option value="custom">自定义...</option>
+          </select>
+          <input
+            v-if="isCustomBaud"
+            v-model.number="customBaudInput"
+            type="number"
+            placeholder="Baud"
+            @keyup.enter="handleCustomBaudApply"
+            @blur="handleCustomBaudApply"
+            class="w-18 bg-zinc-900 border border-amber-600/70 text-[11px] text-amber-300 py-0.5 px-1 rounded outline-none font-mono text-center ml-1"
+            title="按回车或失焦生效自定义波特率"
+          />
+        </div>
+
+        <button
+          @click="togglePortConnection"
+          class="px-2.5 py-1 rounded text-xs font-semibold border transition-colors cursor-pointer"
+          :class="isPortOpen ? 'bg-rose-950/70 border-rose-800 text-rose-300 hover:bg-rose-900/80' : 'bg-emerald-950/70 border-emerald-800 text-emerald-300 hover:bg-emerald-900/80'"
+        >
+          {{ isPortOpen ? '断开' : '连接' }}
+        </button>
 
         <div class="flex items-center bg-zinc-950 border border-zinc-800 rounded p-0.5 text-xs">
           <button

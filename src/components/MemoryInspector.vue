@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { safeInvoke } from '../utils/ipc';
 import { t } from '../utils/i18n';
+import type { ProbeInfo } from '../types';
 import {
   Database,
   RefreshCw,
@@ -24,6 +25,41 @@ defineProps<{
 }>();
 
 const isDiffMode = ref<boolean>(false);
+
+// --- SWD Probes State ---
+const probes = ref<ProbeInfo[]>([]);
+const selectedProbeId = ref<string>('');
+const isScanningProbes = ref<boolean>(false);
+const swdFrequencyHz = ref<number>(4000000); // 4MHz default
+const swdFreqPresets = [
+  { label: '500 kHz', value: 500000 },
+  { label: '1 MHz', value: 1000000 },
+  { label: '4 MHz', value: 4000000 },
+  { label: '10 MHz (高速)', value: 10000000 },
+  { label: '20 MHz (极速)', value: 20000000 }
+];
+
+function formatProbeLabel(p: ProbeInfo): string {
+  const typeLabel = p.probe_type === 'jlink' || p.description.toLowerCase().includes('jlink') || p.description.toLowerCase().includes('j-link')
+    ? '🔗 [J-Link]' : (p.probe_type === 'daplink' || p.description.toLowerCase().includes('dap') || p.description.toLowerCase().includes('cmsis')
+    ? '⚡ [CMSIS-DAP]' : '🔌 [Probe]');
+  return `${typeLabel} ${p.product_name || p.description} (SN: ${p.unique_id})`;
+}
+
+async function scanProbes() {
+  isScanningProbes.value = true;
+  try {
+    const list: ProbeInfo[] = await safeInvoke('pyocd_list_probes');
+    probes.value = list;
+    if (list.length > 0 && !selectedProbeId.value) {
+      selectedProbeId.value = list[0].unique_id;
+    }
+  } catch (err) {
+    console.warn('Scan probes failed in MemoryInspector:', err);
+  } finally {
+    isScanningProbes.value = false;
+  }
+}
 
 // --- View Format Mode ---
 export type ViewFormat = '8bit' | '16bit' | '32bit' | '64bit';
@@ -102,8 +138,9 @@ async function handleReadMemory() {
     const res: any = await safeInvoke('pyocd_read_memory', {
       address: addressInput.value.trim(),
       count: Number(byteCount.value) || 256,
-      probeId: null,
+      probeId: selectedProbeId.value || null,
       targetOverride: null,
+      frequency: swdFrequencyHz.value || 4000000,
     });
 
     const newBytes: number[] = res.bytes || [];
@@ -237,7 +274,7 @@ async function commitEditChunk() {
       await safeInvoke('pyocd_write_memory_byte', {
         address: addrHex,
         value: val,
-        probeId: null,
+        probeId: selectedProbeId.value || null,
         targetOverride: null,
       });
       memoryBytes.value[startIdx + i] = val;
@@ -415,8 +452,9 @@ async function handleExecuteDump() {
       address: dumpAddress.value.trim(),
       count: totalBytes,
       filePath: dumpFilePath.value.trim(),
-      probeId: null,
+      probeId: selectedProbeId.value || null,
       targetOverride: null,
+      frequency: swdFrequencyHz.value || 4000000,
     });
     dumpStatus.value = t('mem_status_dump_ok', { count: res.count, path: res.file_path });
   } catch (err: any) {
@@ -439,7 +477,7 @@ async function handleExecuteLoad() {
     const res: any = await safeInvoke('pyocd_load_file_to_memory', {
       address: loadAddress.value.trim(),
       filePath: loadFilePath.value.trim(),
-      probeId: null,
+      probeId: selectedProbeId.value || null,
       targetOverride: null,
     });
     loadStatus.value = t('mem_status_load_ok', { count: res.count, addr: res.address });
@@ -453,6 +491,7 @@ async function handleExecuteLoad() {
 
 // --- Lifecycle (No auto-reading on mount per user requirement) ---
 onMounted(() => {
+  scanProbes();
   // Do not read automatically. User must explicitly click "读取"
 });
 
@@ -483,11 +522,45 @@ function isChunkChanged(startIdx: number, size: number): boolean {
   <div class="h-full flex flex-col bg-zinc-950 text-zinc-100 font-mono text-xs overflow-hidden select-text">
     <!-- Top Control Bar -->
     <div class="bg-zinc-900 border-b border-zinc-800 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 shrink-0">
-      <!-- Address & Quick Select -->
+      <!-- Address & Quick Select & Probe -->
       <div class="flex flex-wrap items-center gap-2">
         <div class="flex items-center gap-1.5 text-zinc-200 font-semibold mr-1">
           <Database class="w-4 h-4 text-emerald-400" />
           <span>{{ t("mem_title") }}</span>
+        </div>
+
+        <!-- Probe Selector -->
+        <div class="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5">
+          <select
+            v-model="selectedProbeId"
+            class="bg-transparent text-xs text-zinc-300 font-mono outline-none cursor-pointer max-w-[200px] truncate"
+            title="选择调试探针"
+          >
+            <option value="">{{ probes.length === 0 ? '未检测到调试探针' : '默认调试器 (自动识别)' }}</option>
+            <option v-for="p in probes" :key="p.unique_id" :value="p.unique_id">
+              {{ formatProbeLabel(p) }}
+            </option>
+          </select>
+          <button
+            @click="scanProbes"
+            :disabled="isScanningProbes"
+            class="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-zinc-200"
+            title="刷新调试设备"
+          >
+            <RefreshCw class="w-3 h-3" :class="{ 'animate-spin': isScanningProbes }" />
+          </button>
+
+          <!-- SWD Clock Frequency Selector -->
+          <span class="text-zinc-600 text-[10px] pl-1 border-l border-zinc-800">CLK:</span>
+          <select
+            v-model.number="swdFrequencyHz"
+            class="bg-transparent text-amber-300 font-bold outline-none text-xs cursor-pointer"
+            title="SWD 探针通信时钟频率"
+          >
+            <option v-for="sp in swdFreqPresets" :key="sp.value" :value="sp.value" class="bg-zinc-900 text-zinc-200">
+              {{ sp.label }}
+            </option>
+          </select>
         </div>
 
         <div class="h-4 w-px bg-zinc-800 hidden sm:block"></div>

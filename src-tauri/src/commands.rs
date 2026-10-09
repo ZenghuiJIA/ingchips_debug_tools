@@ -190,6 +190,7 @@ pub fn pyocd_read_memory(
     count: u32,
     probe_id: Option<String>,
     target_override: Option<String>,
+    frequency: Option<u32>,
 ) -> Result<Value, String> {
     state.daemon.ensure_started(&app)?;
     state.daemon.call_rpc(
@@ -198,7 +199,8 @@ pub fn pyocd_read_memory(
             "address": address,
             "count": count,
             "probe_id": probe_id,
-            "target_override": target_override
+            "target_override": target_override,
+            "frequency": frequency
         }),
     )
 }
@@ -211,6 +213,7 @@ pub fn pyocd_write_memory(
     value: String,
     probe_id: Option<String>,
     target_override: Option<String>,
+    frequency: Option<u32>,
 ) -> Result<Value, String> {
     state.daemon.ensure_started(&app)?;
     state.daemon.call_rpc(
@@ -219,7 +222,8 @@ pub fn pyocd_write_memory(
             "address": address,
             "value": value,
             "probe_id": probe_id,
-            "target_override": target_override
+            "target_override": target_override,
+            "frequency": frequency
         }),
     )
 }
@@ -232,6 +236,7 @@ pub fn pyocd_write_memory_byte(
     value: u8,
     probe_id: Option<String>,
     target_override: Option<String>,
+    frequency: Option<u32>,
 ) -> Result<Value, String> {
     state.daemon.ensure_started(&app)?;
     state.daemon.call_rpc(
@@ -240,7 +245,8 @@ pub fn pyocd_write_memory_byte(
             "address": address,
             "value": value,
             "probe_id": probe_id,
-            "target_override": target_override
+            "target_override": target_override,
+            "frequency": frequency
         }),
     )
 }
@@ -254,6 +260,7 @@ pub fn pyocd_dump_memory_to_file(
     file_path: String,
     probe_id: Option<String>,
     target_override: Option<String>,
+    frequency: Option<u32>,
 ) -> Result<Value, String> {
     state.daemon.ensure_started(&app)?;
     state.daemon.call_rpc(
@@ -263,7 +270,8 @@ pub fn pyocd_dump_memory_to_file(
             "count": count,
             "file_path": file_path,
             "probe_id": probe_id,
-            "target_override": target_override
+            "target_override": target_override,
+            "frequency": frequency
         }),
     )
 }
@@ -871,6 +879,7 @@ pub fn pyocd_capture_framebuffer(
     pixel_format: String,
     probe_id: Option<String>,
     target_override: Option<String>,
+    frequency: Option<u32>,
 ) -> Result<Value, String> {
     state.daemon.ensure_started(&app)?;
     state.daemon.call_rpc(
@@ -882,6 +891,64 @@ pub fn pyocd_capture_framebuffer(
             "pixel_format": pixel_format,
             "probe_id": probe_id,
             "target_override": target_override,
+            "frequency": frequency
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn parse_firmware_functions(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    file_path: String,
+    filter_keyword: Option<String>,
+    max_results: Option<u32>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "parse_firmware_functions",
+        json!({
+            "file_path": file_path,
+            "filter_keyword": filter_keyword,
+            "max_results": max_results.unwrap_or(500),
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn detect_lcd_framebuffer_symbol(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    file_path: String,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "detect_lcd_framebuffer_symbol",
+        json!({
+            "file_path": file_path,
+        }),
+    )
+}
+
+#[tauri::command]
+pub fn pyocd_sample_pc_trace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    count: u32,
+    trace_caller: bool,
+    probe_id: Option<String>,
+    target_override: Option<String>,
+    frequency: Option<u32>,
+) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(
+        "sample_pc_trace",
+        json!({
+            "count": count,
+            "trace_caller": trace_caller,
+            "probe_id": probe_id,
+            "target_override": target_override,
+            "frequency": frequency
         }),
     )
 }
@@ -977,6 +1044,50 @@ pub fn read_local_binary_file(file_path: String) -> Result<Vec<u8>, String> {
 #[tauri::command]
 pub fn save_bytes_to_file(file_path: String, data: Vec<u8>) -> Result<(), String> {
     std::fs::write(&file_path, &data).map_err(|e| format!("写入文件失败 ({}): {}", file_path, e))
+}
+
+#[tauri::command]
+pub fn append_bytes_to_file(file_path: String, data: Vec<u8>) -> Result<u64, String> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file_path)
+        .map_err(|e| format!("打开/创建文件失败 ({}): {}", file_path, e))?;
+    file.write_all(&data).map_err(|e| format!("追加写入失败: {}", e))?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    Ok(metadata.len())
+}
+
+#[tauri::command]
+pub async fn pick_save_trace_file(default_name: Option<String>) -> Result<Option<String>, String> {
+    let name = default_name.unwrap_or_else(|| {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("hil_trace_{}.hiltrace", timestamp)
+    });
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("选择 PC Trace 离线日志保存路径")
+        .set_file_name(&name)
+        .add_filter("HIL PC Trace 文件 (*.hiltrace)", &["hiltrace"])
+        .add_filter("所有文件 (*.*)", &["*"])
+        .save_file()
+        .await;
+    Ok(file.map(|f| f.path().to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn pick_open_trace_file() -> Result<Option<String>, String> {
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("选择加载 HIL PC Trace 日志文件 (*.hiltrace)")
+        .add_filter("HIL PC Trace 文件 (*.hiltrace)", &["hiltrace"])
+        .add_filter("所有文件 (*.*)", &["*"])
+        .pick_file()
+        .await;
+    Ok(file.map(|f| f.path().to_string_lossy().to_string()))
 }
 
 

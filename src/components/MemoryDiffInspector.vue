@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import type { ProbeInfo } from '../types';
 import {
   Download,
   RefreshCw,
@@ -14,6 +15,37 @@ const props = defineProps<{
   initialAddress?: string;
   isConnected: boolean;
 }>();
+
+// SWD Probe State
+const probes = ref<ProbeInfo[]>([]);
+const selectedProbeId = ref<string>('');
+const isScanningProbes = ref<boolean>(false);
+
+function formatProbeLabel(p: ProbeInfo): string {
+  const typeLabel = p.probe_type === 'jlink' || p.description.toLowerCase().includes('jlink') || p.description.toLowerCase().includes('j-link')
+    ? '🔗 [J-Link]' : (p.probe_type === 'daplink' || p.description.toLowerCase().includes('dap') || p.description.toLowerCase().includes('cmsis')
+    ? '⚡ [CMSIS-DAP]' : '🔌 [Probe]');
+  return `${typeLabel} ${p.product_name || p.description} (SN: ${p.unique_id})`;
+}
+
+async function scanProbes() {
+  isScanningProbes.value = true;
+  try {
+    const list: ProbeInfo[] = await safeInvoke('pyocd_list_probes');
+    probes.value = list;
+    if (list.length > 0 && !selectedProbeId.value) {
+      selectedProbeId.value = list[0].unique_id;
+    }
+  } catch (err) {
+    console.warn('Scan probes failed in MemoryDiffInspector:', err);
+  } finally {
+    isScanningProbes.value = false;
+  }
+}
+
+onMounted(() => {
+  scanProbes();
+});
 
 // Target parameters
 const dumpAddressHex = ref<string>(props.initialAddress || '0x02000000');
@@ -124,7 +156,7 @@ async function captureSnapshotA() {
     const res: any = await safeInvoke('pyocd_read_memory', {
       address: dumpAddressHex.value,
       count: dumpLengthBytes.value,
-      probeId: null,
+      probeId: selectedProbeId.value || null,
       targetOverride: null
     });
     bufferA.value = res.bytes || [];
@@ -148,7 +180,7 @@ async function captureSnapshotB() {
     const res: any = await safeInvoke('pyocd_read_memory', {
       address: dumpAddressHex.value,
       count: dumpLengthBytes.value,
-      probeId: null,
+      probeId: selectedProbeId.value || null,
       targetOverride: null
     });
     bufferB.value = res.bytes || [];
@@ -231,6 +263,28 @@ function toAscii(b: number): string {
 
       <!-- Controls -->
       <div class="flex items-center gap-2">
+        <!-- SWD Probe Selector -->
+        <div class="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5">
+          <select
+            v-model="selectedProbeId"
+            class="bg-transparent text-xs text-zinc-300 font-mono outline-none cursor-pointer max-w-[190px] truncate"
+            title="选择调试探针"
+          >
+            <option value="">{{ probes.length === 0 ? '未检测到调试设备' : '默认调试器 (自动识别)' }}</option>
+            <option v-for="p in probes" :key="p.unique_id" :value="p.unique_id">
+              {{ formatProbeLabel(p) }}
+            </option>
+          </select>
+          <button
+            @click="scanProbes"
+            :disabled="isScanningProbes"
+            class="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-zinc-200"
+            title="刷新调试设备"
+          >
+            <RefreshCw class="w-3 h-3" :class="{ 'animate-spin': isScanningProbes }" />
+          </button>
+        </div>
+
         <!-- Address & Length Input -->
         <div class="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded px-2 py-1">
           <span class="text-zinc-500">起始地址:</span>

@@ -1175,6 +1175,7 @@ export const messages: Record<LocaleType, Record<string, string>> = {
     // BLE RF & MCU Profiler Tabs
     tab_ble_rf: 'BLE 射频与HCI',
     tab_profiler: 'DWT 实时性能Profiler',
+    tab_calculator: '进制转换计算器',
   },
   en: {
     // Top Brand & Nav
@@ -2337,6 +2338,7 @@ export const messages: Record<LocaleType, Record<string, string>> = {
     // BLE RF & MCU Profiler Tabs
     tab_ble_rf: 'BLE RF & HCI',
     tab_profiler: 'DWT Profiler',
+    tab_calculator: 'Radix Lab Calculator',
   }
 };
 

@@ -167,6 +167,9 @@ pub fn run() {
             commands::send_network_data,
             commands::pyocd_detect_rtos,
             commands::pyocd_capture_framebuffer,
+            commands::pyocd_sample_pc_trace,
+            commands::parse_firmware_functions,
+            commands::detect_lcd_framebuffer_symbol,
             commands::modbus_build_ascii_request,
             commands::ing_pick_ini_file,
             commands::ing_pick_firmware_file,
@@ -175,6 +178,9 @@ pub fn run() {
             commands::ing_cancel_flash,
             commands::read_local_binary_file,
             commands::save_bytes_to_file,
+            commands::append_bytes_to_file,
+            commands::pick_save_trace_file,
+            commands::pick_open_trace_file,
         ])
         .build(tauri::generate_context!()) {
             Ok(a) => {

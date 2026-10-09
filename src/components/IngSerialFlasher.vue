@@ -86,7 +86,8 @@ const manualBoot = ref<boolean>(
   readSetting(BASE_KEY_MANUAL_BOOT, 'false') === 'true'
 );
 
-const baudRates = [115200, 230400, 460800, 921600];
+const baudRates = [9600, 115200, 230400, 460800, 921600, 1000000, 1152000, 1500000];
+const isCustomBaud = ref<boolean>(!baudRates.includes(selectedBaud.value));
 
 // Parsed INI data
 const parsedIni = ref<IngIniConfig | null>(null);
@@ -412,11 +413,30 @@ onUnmounted(() => {
           <div class="flex items-center gap-1.5">
             <span class="text-zinc-400">{{ t('ing_baud') }}</span>
             <select
-              v-model="selectedBaud"
+              :value="isCustomBaud ? 'custom' : selectedBaud"
+              @change="(e: Event) => {
+                const val = (e.target as HTMLSelectElement).value;
+                if (val === 'custom') {
+                  isCustomBaud = true;
+                } else {
+                  isCustomBaud = false;
+                  selectedBaud = Number(val);
+                }
+              }"
               class="bg-zinc-900 border border-zinc-700/80 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-hidden focus:border-indigo-500 font-mono"
             >
-              <option v-for="b in baudRates" :key="b" :value="b">{{ b }} bps</option>
+              <option v-for="b in baudRates" :key="b" :value="b">
+                {{ b >= 1000000 ? `${(b / 1000000).toFixed(b % 1000000 === 0 ? 0 : 2)}M` : b }} bps
+              </option>
+              <option value="custom">自定义 / 手动输入...</option>
             </select>
+            <input
+              v-if="isCustomBaud"
+              type="number"
+              v-model.number="selectedBaud"
+              placeholder="波特率"
+              class="w-24 bg-zinc-900 border border-indigo-500/80 rounded px-2 py-1 text-xs text-indigo-300 font-mono focus:outline-hidden"
+            />
           </div>
 
           <!-- Manual Boot Listening Mode Checkbox -->
