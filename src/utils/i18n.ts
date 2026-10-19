@@ -120,6 +120,12 @@ export const messages: Record<LocaleType, Record<string, string>> = {
     term_chk_crc16: '校验: CRC16-CCITT / XModem',
     term_chk_sum8: '校验: Checksum-8 (累加和)',
     term_chk_xor8: '校验: XOR-8 (异或和)',
+    term_split_single: '单屏模式',
+    term_split_horizontal: '横向左右拆分',
+    term_split_vertical: '纵向上下拆分',
+    term_split_tip: '拆分窗口模式 (单屏 / 左右分屏 / 上下分屏)',
+    term_split_secondary_select: '选择右侧/下方展示的串口:',
+    term_split_reset_ratio: '双击分割条复位居中 50%',
 
     // New Port Modal Dialog
     dialog_hardware_device: '串口 / RTT 硬件设备',
@@ -1283,6 +1289,12 @@ export const messages: Record<LocaleType, Record<string, string>> = {
     term_chk_crc16: 'Checksum: CRC16-CCITT',
     term_chk_sum8: 'Checksum: Checksum-8',
     term_chk_xor8: 'Checksum: XOR-8',
+    term_split_single: 'Single View',
+    term_split_horizontal: 'Split Horizontal (Left / Right)',
+    term_split_vertical: 'Split Vertical (Top / Bottom)',
+    term_split_tip: 'Split View Mode (Single / Horizontal / Vertical)',
+    term_split_secondary_select: 'Select Secondary Port:',
+    term_split_reset_ratio: 'Double-click splitter to reset to 50%',
 
     // New Port Modal Dialog
     dialog_hardware_device: 'Serial / RTT Hardware',

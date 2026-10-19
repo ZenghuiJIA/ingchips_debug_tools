@@ -1,54 +1,24 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onUnmounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
-import type { ProbeInfo } from '../types';
+import { usePersistentState } from '../composables/usePersistentState';
+import ProbeSelect from './common/ProbeSelect.vue';
+import SwdClockSelect from './common/SwdClockSelect.vue';
+import CpuFreqSelect from './common/CpuFreqSelect.vue';
+
 import {
   Play,
   Square,
   Activity,
-  RefreshCw,
   FolderOpen,
-  FileCode
+  FileCode,
+  RefreshCw
 } from '@lucide/vue';
 
-// SWD Probe State
-const probes = ref<ProbeInfo[]>([]);
-const selectedProbeId = ref<string>('');
-const isScanningProbes = ref<boolean>(false);
-const swdFrequencyHz = ref<number>(4000000); // 4MHz default
-const swdFreqPresets = [
-  { label: '500 kHz (低速安全)', value: 500000 },
-  { label: '1 MHz (标准兼容)', value: 1000000 },
-  { label: '4 MHz (常用推荐)', value: 4000000 },
-  { label: '10 MHz (高速)', value: 10000000 },
-  { label: '20 MHz (极速)', value: 20000000 }
-];
+// SWD Probe State (带有本地持久化记忆)
+const selectedProbeId = usePersistentState<string>('hil_mcu_profiler_probe_id', '');
+const swdFrequencyHz = usePersistentState<number>('hil_mcu_profiler_swd_freq', 10000000); // 10MHz default
 
-function formatProbeLabel(p: ProbeInfo): string {
-  const typeLabel = p.probe_type === 'jlink' || p.description.toLowerCase().includes('jlink') || p.description.toLowerCase().includes('j-link')
-    ? '🔗 [J-Link]' : (p.probe_type === 'daplink' || p.description.toLowerCase().includes('dap') || p.description.toLowerCase().includes('cmsis')
-    ? '⚡ [CMSIS-DAP]' : '🔌 [Probe]');
-  return `${typeLabel} ${p.product_name || p.description} (SN: ${p.unique_id})`;
-}
-
-async function scanProbes() {
-  isScanningProbes.value = true;
-  try {
-    const list: ProbeInfo[] = await safeInvoke('pyocd_list_probes');
-    probes.value = list;
-    if (list.length > 0 && !selectedProbeId.value) {
-      selectedProbeId.value = list[0].unique_id;
-    }
-  } catch (err) {
-    console.warn('Scan probes failed in McuProfiler:', err);
-  } finally {
-    isScanningProbes.value = false;
-  }
-}
-
-onMounted(() => {
-  scanProbes();
-});
 
 // Function Execution Profiling Record
 export interface FunctionProfileItem {
@@ -67,30 +37,11 @@ export interface FunctionProfileItem {
   histogram: number[]; // 10 bins of execution time distribution
 }
 
-// Global Profiler Settings
-const cpuFreqMhz = ref<number>(64); // 64MHz default for ING9188 / Cortex-M
-const isCustomCpuFreq = ref<boolean>(false);
-const customCpuFreqInput = ref<number>(64);
+// Global Profiler Settings (带持久化记忆)
+const cpuFreqMhz = usePersistentState<number>('hil_mcu_profiler_cpu_freq', 64);
 const isProfiling = ref<boolean>(false);
-const alertThresholdUs = ref<number>(200); // 200µs threshold alert
+const alertThresholdUs = usePersistentState<number>('hil_mcu_profiler_alert_us', 200);
 
-// Freq Presets
-const freqPresets = [16, 24, 32, 48, 64, 80, 120, 168, 240];
-
-function handleCpuFreqChange(val: string) {
-  if (val === 'custom') {
-    isCustomCpuFreq.value = true;
-  } else {
-    isCustomCpuFreq.value = false;
-    cpuFreqMhz.value = Number(val);
-  }
-}
-
-function handleCustomCpuFreqApply() {
-  if (customCpuFreqInput.value && customCpuFreqInput.value > 0) {
-    cpuFreqMhz.value = customCpuFreqInput.value;
-  }
-}
 
 // Firmware ELF / AXF Symbol Parsing State
 const symbolFilePath = ref<string>('');
@@ -245,13 +196,14 @@ const functionsList = ref<FunctionProfileItem[]>([
 // Sub-view: 'profiler' (DWT Execution Time Table) vs 'pc_trace' (PC Statistical Trace Stream)
 const activeSubView = ref<'profiler' | 'pc_trace'>('pc_trace');
 
-// PC Trace Sampling Mode & Configuration
-const traceMode = ref<'burst' | 'continuous'>('continuous'); // 'burst' (单次突发) or 'continuous' (连续采样)
-const traceDepth = ref<number>(500); // 批次大小 / 突发深度
-const maxBufferLimit = ref<number>(10000); // 环形缓冲区最大样本容量限制 (e.g. 5000, 10000, 30000, 50000)
+// PC Trace Sampling Mode & Configuration (持久化记忆)
+const traceMode = usePersistentState<'burst' | 'continuous'>('hil_mcu_profiler_trace_mode', 'continuous');
+const traceDepth = usePersistentState<number>('hil_mcu_profiler_trace_depth', 500);
+const maxBufferLimit = usePersistentState<number>('hil_mcu_profiler_max_buffer', 10000);
 const isCustomBufferLimit = ref<boolean>(false);
-const customBufferInput = ref<number>(10000);
-const traceCaller = ref<boolean>(false); // false = fast PC only, true = PC + LR
+const customBufferInput = ref<number>(maxBufferLimit.value);
+const traceCaller = usePersistentState<boolean>('hil_mcu_profiler_trace_caller', false);
+
 
 const isSamplingPc = ref<boolean>(false);
 const isContinuousRunning = ref<boolean>(false);
@@ -435,14 +387,15 @@ async function runBurstSampling() {
   }
 }
 
-// 持久化写盘与黑匣子异常冻结配置
-const isDiskPersistenceEnabled = ref<boolean>(false);
-const diskTraceFilePath = ref<string>('');
+// 持久化写盘与黑匣子异常冻结配置 (记忆)
+const isDiskPersistenceEnabled = usePersistentState<boolean>('hil_mcu_profiler_disk_persist', false);
+const diskTraceFilePath = usePersistentState<string>('hil_mcu_profiler_disk_filepath', '');
 const diskWrittenBytes = ref<number>(0);
 const diskWriteError = ref<string>('');
-const isAutoFreezeOnException = ref<boolean>(true); // 捕获到异常/HardFault/死循环时自动冻结现场
+const isAutoFreezeOnException = usePersistentState<boolean>('hil_mcu_profiler_auto_freeze', true);
 const isReplayMode = ref<boolean>(false); // 是否处于查看离线回放状态
 const replayFileName = ref<string>('');
+
 
 // 选择保存持久化 Trace 文件路径
 async function handleChooseDiskTraceFile() {
@@ -763,62 +716,14 @@ onUnmounted(() => {
       <!-- Controls -->
       <div class="flex items-center gap-3">
         <!-- SWD Probe Selector & Clock -->
-        <div class="flex items-center gap-1 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5">
-          <select
-            v-model="selectedProbeId"
-            class="bg-transparent text-xs text-zinc-300 font-mono outline-none cursor-pointer max-w-[170px] truncate"
-            title="选择调试探针"
-          >
-            <option value="">{{ probes.length === 0 ? '未检测到调试设备' : '默认调试器 (自动识别)' }}</option>
-            <option v-for="p in probes" :key="p.unique_id" :value="p.unique_id">
-              {{ formatProbeLabel(p) }}
-            </option>
-          </select>
-          <button
-            @click="scanProbes"
-            :disabled="isScanningProbes"
-            class="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-zinc-200"
-            title="刷新调试设备"
-          >
-            <RefreshCw class="w-3 h-3" :class="{ 'animate-spin': isScanningProbes }" />
-          </button>
-
-          <!-- SWD Clock Frequency Selector -->
-          <span class="text-zinc-600 text-[10px] pl-1 border-l border-zinc-800">CLK:</span>
-          <select
-            v-model.number="swdFrequencyHz"
-            class="bg-transparent text-cyan-300 text-xs font-mono outline-none cursor-pointer"
-            title="SWD 探针通信时钟频率"
-          >
-            <option v-for="sp in swdFreqPresets" :key="sp.value" :value="sp.value">
-              {{ sp.label }}
-            </option>
-          </select>
+        <div class="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5">
+          <ProbeSelect v-model="selectedProbeId" max-width="160px" />
+          <span class="text-zinc-700">|</span>
+          <SwdClockSelect v-model="swdFrequencyHz" />
         </div>
 
         <!-- CPU Frequency Input & Custom Input -->
-        <div class="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs font-mono">
-          <span class="text-zinc-500">CPU 主频:</span>
-          <select
-            :value="isCustomCpuFreq ? 'custom' : cpuFreqMhz"
-            @change="(e: any) => handleCpuFreqChange(e.target.value)"
-            class="bg-transparent text-amber-400 font-bold outline-none cursor-pointer"
-            title="选择或自定义设置 MCU 当前运行主频"
-          >
-            <option v-for="f in freqPresets" :key="f" :value="f">{{ f }} MHz</option>
-            <option value="custom">自定义主频...</option>
-          </select>
-          <input
-            v-if="isCustomCpuFreq"
-            v-model.number="customCpuFreqInput"
-            type="number"
-            placeholder="MHz"
-            @keyup.enter="handleCustomCpuFreqApply"
-            @blur="handleCustomCpuFreqApply"
-            class="w-16 bg-zinc-900 border border-amber-500/80 rounded px-1 text-amber-300 font-bold outline-none text-center"
-            title="输入自定义 CPU 主频 (MHz) 并回车"
-          />
-        </div>
+        <CpuFreqSelect v-model="cpuFreqMhz" />
 
         <!-- Import ELF / AXF Symbol Button -->
         <div class="flex items-center gap-1.5">

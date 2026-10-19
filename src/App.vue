@@ -45,9 +45,12 @@ import {
   X
 } from '@lucide/vue';
 
+import { usePersistentState } from './composables/usePersistentState';
+
 const activeSessionsCount = ref<number>(0);
-const currentTab = ref<'terminal' | 'plotter' | 'flasher' | 'merger' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'sequencer' | 'ble_rf' | 'profiler' | 'calculator' | 'ai'>('terminal');
-const sharedFirmwarePath = ref<string>('');
+const currentTab = usePersistentState<'terminal' | 'plotter' | 'flasher' | 'merger' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'sequencer' | 'ble_rf' | 'profiler' | 'calculator' | 'ai'>('hil_app_current_tab', 'terminal');
+const sharedFirmwarePath = usePersistentState<string>('hil_app_shared_firmware_path', '');
+
 const runningInBrowser = ref<boolean>(!isTauri());
 const isSettingsOpen = ref<boolean>(false);
 const isNavModalOpen = ref<boolean>(false);

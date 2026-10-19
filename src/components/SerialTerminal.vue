@@ -5,6 +5,7 @@ import { t } from '../utils/i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { TerminalSessionTab, PortInfo, SvdDevice } from '../types';
 import SerialTerminalSession from './SerialTerminalSession.vue';
+import BaudrateSelect from './common/BaudrateSelect.vue';
 import {
   Plus,
   X,
@@ -13,7 +14,10 @@ import {
   Radio,
   FolderArchive,
   Network,
-  Globe
+  Globe,
+  Columns2,
+  Rows2,
+  Square
 } from '@lucide/vue';
 
 const props = defineProps<{
@@ -33,6 +37,88 @@ const isRefreshingPorts = ref<boolean>(false);
 // Storage keys for tabs persistence
 const STORAGE_KEY_TABS = 'ai_hil_serial_tabs';
 const STORAGE_KEY_ACTIVE_TAB = 'ai_hil_serial_active_tab';
+const STORAGE_KEY_SPLIT_MODE = 'ai_hil_serial_split_mode';
+const STORAGE_KEY_SECONDARY_TAB = 'ai_hil_serial_secondary_tab';
+const STORAGE_KEY_SPLIT_RATIO = 'ai_hil_serial_split_ratio';
+
+// Split Screen Modes: 'single' | 'horizontal' (side by side) | 'vertical' (top and bottom)
+export type SplitMode = 'single' | 'horizontal' | 'vertical';
+
+const splitMode = ref<SplitMode>(
+  (localStorage.getItem(STORAGE_KEY_SPLIT_MODE) as SplitMode) || 'single'
+);
+
+const secondaryTabId = ref<string>(
+  localStorage.getItem(STORAGE_KEY_SECONDARY_TAB) || ''
+);
+
+// Split ratio percentage for first pane (e.g., 50 for 50%/50%)
+const splitRatio = ref<number>(
+  Number(localStorage.getItem(STORAGE_KEY_SPLIT_RATIO)) || 50
+);
+
+function setSplitMode(mode: SplitMode) {
+  splitMode.value = mode;
+  localStorage.setItem(STORAGE_KEY_SPLIT_MODE, mode);
+
+  // If entering split mode, ensure secondaryTabId is valid and different from activeTabId
+  if (mode !== 'single') {
+    if (!secondaryTabId.value || secondaryTabId.value === activeTabId.value || !tabs.value.some(t => t.id === secondaryTabId.value)) {
+      const other = tabs.value.find(t => t.id !== activeTabId.value);
+      if (other) {
+        secondaryTabId.value = other.id;
+        localStorage.setItem(STORAGE_KEY_SECONDARY_TAB, other.id);
+      }
+    }
+  }
+}
+
+function setSecondaryTabId(id: string) {
+  secondaryTabId.value = id;
+  localStorage.setItem(STORAGE_KEY_SECONDARY_TAB, id);
+}
+
+// Splitter Dragging Implementation
+const isSplitDragging = ref<boolean>(false);
+const splitContainerRef = ref<HTMLElement | null>(null);
+
+function startSplitterDrag(e: MouseEvent) {
+  e.preventDefault();
+  isSplitDragging.value = true;
+  document.body.style.userSelect = 'none';
+  document.body.style.cursor = splitMode.value === 'horizontal' ? 'col-resize' : 'row-resize';
+
+  const onPointerMove = (ev: MouseEvent) => {
+    if (!isSplitDragging.value || !splitContainerRef.value) return;
+    const rect = splitContainerRef.value.getBoundingClientRect();
+    let ratio: number;
+    if (splitMode.value === 'horizontal') {
+      ratio = ((ev.clientX - rect.left) / rect.width) * 100;
+    } else {
+      ratio = ((ev.clientY - rect.top) / rect.height) * 100;
+    }
+    // Clamp between 20% and 80%
+    ratio = Math.max(20, Math.min(80, ratio));
+    splitRatio.value = Math.round(ratio * 10) / 10;
+  };
+
+  const onPointerUp = () => {
+    isSplitDragging.value = false;
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+    localStorage.setItem(STORAGE_KEY_SPLIT_RATIO, String(splitRatio.value));
+    window.removeEventListener('mousemove', onPointerMove);
+    window.removeEventListener('mouseup', onPointerUp);
+  };
+
+  window.addEventListener('mousemove', onPointerMove);
+  window.addEventListener('mouseup', onPointerUp);
+}
+
+function resetSplitRatio() {
+  splitRatio.value = 50;
+  localStorage.setItem(STORAGE_KEY_SPLIT_RATIO, '50');
+}
 
 function loadSavedTabs(): TerminalSessionTab[] {
   try {
@@ -97,7 +183,6 @@ const isNewPortModalOpen = ref<boolean>(false);
 const newPortTabType = ref<'serial' | 'network'>('serial');
 const newPortSelected = ref<string>('');
 const newPortBaud = ref<number>(115200);
-const baudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
 // Network Stream Configuration
 const networkMode = ref<'tcp_client' | 'tcp_server' | 'udp_socket'>('tcp_client');
@@ -423,6 +508,19 @@ async function closeTab(tab: TerminalSessionTab, e?: MouseEvent) {
         activeTabId.value = '';
       }
     }
+    if (secondaryTabId.value === tab.id) {
+      const other = tabs.value.find(t => t.id !== activeTabId.value);
+      secondaryTabId.value = other ? other.id : '';
+      if (secondaryTabId.value) {
+        localStorage.setItem(STORAGE_KEY_SECONDARY_TAB, secondaryTabId.value);
+      } else {
+        localStorage.removeItem(STORAGE_KEY_SECONDARY_TAB);
+      }
+    }
+    // If fewer than 2 tabs remaining, auto-revert to single view
+    if (tabs.value.length < 2 && splitMode.value !== 'single') {
+      setSplitMode('single');
+    }
   }
 }
 
@@ -558,36 +656,189 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <!-- Right: Active Session Quick Controls -->
+      <!-- Right: Active Session Quick Controls & Split Screen Switcher -->
       <div v-if="tabs.length > 0" class="flex items-center gap-2 shrink-0 pb-1">
+        <!-- Split Mode Buttons -->
+        <div class="flex items-center bg-zinc-950 border border-zinc-800 rounded p-0.5 text-zinc-400">
+          <!-- Single View -->
+          <button
+            @click="setSplitMode('single')"
+            class="p-1 rounded transition-colors"
+            :class="splitMode === 'single' ? 'bg-zinc-800 text-emerald-400 font-bold' : 'hover:text-zinc-200'"
+            :title="t('term_split_single')"
+          >
+            <Square class="w-3.5 h-3.5" />
+          </button>
+
+          <!-- Horizontal Split (Side by Side) -->
+          <button
+            @click="setSplitMode('horizontal')"
+            :disabled="tabs.length < 2"
+            class="p-1 rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            :class="splitMode === 'horizontal' ? 'bg-zinc-800 text-emerald-400 font-bold' : 'hover:text-zinc-200'"
+            :title="tabs.length < 2 ? '至少打开 2 个串口以启用拆分' : t('term_split_horizontal')"
+          >
+            <Columns2 class="w-3.5 h-3.5" />
+          </button>
+
+          <!-- Vertical Split (Top and Bottom) -->
+          <button
+            @click="setSplitMode('vertical')"
+            :disabled="tabs.length < 2"
+            class="p-1 rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            :class="splitMode === 'vertical' ? 'bg-zinc-800 text-emerald-400 font-bold' : 'hover:text-zinc-200'"
+            :title="tabs.length < 2 ? '至少打开 2 个串口以启用拆分' : t('term_split_vertical')"
+          >
+            <Rows2 class="w-3.5 h-3.5" />
+          </button>
+        </div>
+
         <span class="text-[11px] text-zinc-500 font-mono hidden md:inline">
           {{ t('term_concurrent_conns') }}: <strong class="text-emerald-400">{{ tabs.filter(t => t.isConnected).length }}</strong> / {{ tabs.length }}
         </span>
       </div>
     </div>
 
-    <!-- Active Tab Contents Area (KeepAlive / v-show to preserve background receiving & triggers) -->
+    <!-- Active Tab Contents Area (Single View vs Split View) -->
     <div class="flex-1 overflow-hidden relative">
       <template v-if="tabs.length > 0">
+        <!-- 1. Single View Mode -->
+        <template v-if="splitMode === 'single' || tabs.length < 2">
+          <div
+            v-for="tab in tabs"
+            :key="tab.id"
+            v-show="activeTabId === tab.id"
+            class="h-full w-full"
+          >
+            <SerialTerminalSession
+              :tab-id="tab.id"
+              :port-name="tab.portName"
+              :baud-rate="tab.baudRate"
+              :is-connected="tab.isConnected"
+              :is-daplink="tab.isDaplink"
+              :available-ports="availablePorts"
+              @switch-tab="(t) => emit('switch-tab', t)"
+              @update-stats="(s) => handleTabStatsUpdate(tab.id, s)"
+              @toggle-connection="toggleTabConnection(tab)"
+              @change-baud="(b) => handleTabBaudChange(tab, b)"
+              @change-port="(p) => handleTabPortChange(tab, p)"
+            />
+          </div>
+        </template>
+
+        <!-- 2. Split Screen Mode (Horizontal or Vertical) -->
         <div
-          v-for="tab in tabs"
-          :key="tab.id"
-          v-show="activeTabId === tab.id"
-          class="h-full w-full"
+          v-else
+          ref="splitContainerRef"
+          class="h-full w-full flex overflow-hidden relative select-none"
+          :class="splitMode === 'horizontal' ? 'flex-row' : 'flex-col'"
         >
-          <SerialTerminalSession
-            :tab-id="tab.id"
-            :port-name="tab.portName"
-            :baud-rate="tab.baudRate"
-            :is-connected="tab.isConnected"
-            :is-daplink="tab.isDaplink"
-            :available-ports="availablePorts"
-            @switch-tab="(t) => emit('switch-tab', t)"
-            @update-stats="(s) => handleTabStatsUpdate(tab.id, s)"
-            @toggle-connection="toggleTabConnection(tab)"
-            @change-baud="(b) => handleTabBaudChange(tab, b)"
-            @change-port="(p) => handleTabPortChange(tab, p)"
-          />
+          <!-- Primary Pane (Active Tab) -->
+          <div
+            class="min-w-0 min-h-0 flex flex-col overflow-hidden relative"
+            :style="splitMode === 'horizontal' ? { width: `${splitRatio}%` } : { height: `${splitRatio}%` }"
+          >
+            <div
+              v-for="tab in tabs"
+              :key="'primary_' + tab.id"
+              v-show="activeTabId === tab.id"
+              class="h-full w-full border-r border-zinc-800/80"
+              :class="splitMode === 'vertical' ? 'border-b border-r-0' : ''"
+            >
+              <SerialTerminalSession
+                :tab-id="tab.id"
+                :port-name="tab.portName"
+                :baud-rate="tab.baudRate"
+                :is-connected="tab.isConnected"
+                :is-daplink="tab.isDaplink"
+                :available-ports="availablePorts"
+                @switch-tab="(t) => emit('switch-tab', t)"
+                @update-stats="(s) => handleTabStatsUpdate(tab.id, s)"
+                @toggle-connection="toggleTabConnection(tab)"
+                @change-baud="(b) => handleTabBaudChange(tab, b)"
+                @change-port="(p) => handleTabPortChange(tab, p)"
+              />
+            </div>
+          </div>
+
+          <!-- Splitter Drag Handle Bar -->
+          <div
+            @mousedown="startSplitterDrag"
+            @dblclick="resetSplitRatio"
+            :title="t('term_split_reset_ratio')"
+            class="z-30 shrink-0 flex items-center justify-center transition-colors select-none group/splitter"
+            :class="[
+              splitMode === 'horizontal'
+                ? 'w-2 cursor-col-resize hover:bg-emerald-500/20 active:bg-emerald-500/40'
+                : 'h-2 cursor-row-resize hover:bg-emerald-500/20 active:bg-emerald-500/40',
+              isSplitDragging ? 'bg-emerald-500/40' : 'bg-zinc-900 border-zinc-800'
+            ]"
+          >
+            <div
+              class="rounded-full transition-colors"
+              :class="[
+                splitMode === 'horizontal' ? 'w-[2px] h-8' : 'h-[2px] w-8',
+                isSplitDragging ? 'bg-emerald-400' : 'bg-zinc-600 group-hover/splitter:bg-emerald-400'
+              ]"
+            ></div>
+          </div>
+
+          <!-- Secondary Pane -->
+          <div
+            class="min-w-0 min-h-0 flex-1 flex flex-col overflow-hidden relative"
+          >
+            <!-- Secondary Pane Header: Port Switcher -->
+            <div class="bg-zinc-900/90 border-b border-zinc-800 px-2 py-1 flex items-center justify-between text-xs shrink-0 select-none">
+              <div class="flex items-center gap-1.5 text-zinc-400 font-mono text-[11px]">
+                <span>{{ t('term_split_secondary_select') }}</span>
+                <select
+                  :value="secondaryTabId"
+                  @change="(e: any) => setSecondaryTabId(e.target.value)"
+                  class="bg-zinc-950 border border-zinc-800 text-emerald-400 font-semibold px-2 py-0.5 rounded outline-none cursor-pointer"
+                >
+                  <option
+                    v-for="t in tabs"
+                    :key="'sec_opt_' + t.id"
+                    :value="t.id"
+                  >
+                    {{ t.portName }} ({{ t.baudRate }}) {{ t.isConnected ? '●' : '○' }}
+                  </option>
+                </select>
+              </div>
+
+              <button
+                @click="setSplitMode('single')"
+                class="p-1 text-zinc-500 hover:text-rose-400 hover:bg-zinc-800 rounded transition-colors"
+                title="关闭副屏，回到单屏"
+              >
+                <X class="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <!-- Secondary Session Contents -->
+            <div class="flex-1 overflow-hidden relative">
+              <div
+                v-for="tab in tabs"
+                :key="'secondary_' + tab.id"
+                v-show="secondaryTabId === tab.id"
+                class="h-full w-full"
+              >
+                <SerialTerminalSession
+                  :tab-id="tab.id"
+                  :port-name="tab.portName"
+                  :baud-rate="tab.baudRate"
+                  :is-connected="tab.isConnected"
+                  :is-daplink="tab.isDaplink"
+                  :available-ports="availablePorts"
+                  @switch-tab="(t) => emit('switch-tab', t)"
+                  @update-stats="(s) => handleTabStatsUpdate(tab.id, s)"
+                  @toggle-connection="toggleTabConnection(tab)"
+                  @change-baud="(b) => handleTabBaudChange(tab, b)"
+                  @change-port="(p) => handleTabPortChange(tab, p)"
+                />
+              </div>
+            </div>
+          </div>
         </div>
       </template>
 
@@ -745,14 +996,7 @@ onUnmounted(() => {
           <!-- Baud Rate (if not RTT) -->
           <div v-if="!newPortSelected.startsWith('RTT')">
             <label class="block text-xs text-zinc-300 mb-1.5">{{ t('dialog_baud_rate') }}</label>
-            <select
-              v-model="newPortBaud"
-              class="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-lg px-3 py-2 text-xs text-zinc-200 outline-none cursor-pointer"
-            >
-              <option v-for="b in baudRates" :key="b" :value="b" class="bg-zinc-900 text-zinc-200">
-                {{ b }} bps {{ b === 921600 ? t('dialog_baud_fast') : '' }}
-              </option>
-            </select>
+            <BaudrateSelect v-model="newPortBaud" />
           </div>
 
           <!-- RTT Memory Scan Preset & Custom / Pack Options (if RTT) -->

@@ -169,7 +169,7 @@ defineExpose({
 </script>
 
 <template>
-  <div class="w-88 h-full bg-zinc-900 border-l border-zinc-800 flex flex-col font-mono text-xs select-none">
+  <div class="w-full h-full bg-zinc-900 border-l border-zinc-800 flex flex-col font-mono text-xs select-none">
     <!-- Header -->
     <div class="px-3 py-2 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/90">
       <div class="flex items-center gap-1.5 font-semibold text-amber-300">

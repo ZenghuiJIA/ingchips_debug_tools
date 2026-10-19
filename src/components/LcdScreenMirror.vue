@@ -1,63 +1,32 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onUnmounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
 import { t } from '../utils/i18n';
-import type { ProbeInfo } from '../types';
+import { usePersistentState } from '../composables/usePersistentState';
+import ProbeSelect from './common/ProbeSelect.vue';
+import SwdClockSelect from './common/SwdClockSelect.vue';
 import {
   Monitor,
   Camera,
   Play,
   Square,
   Download,
-  AlertTriangle,
-  RefreshCw
+  AlertTriangle
 } from '@lucide/vue';
 
-const probes = ref<ProbeInfo[]>([]);
-const selectedProbeId = ref<string>('');
-const isScanningProbes = ref<boolean>(false);
-const swdFrequencyHz = ref<number>(10000000); // 10MHz default for fast framebuffer transfer
-const swdFreqPresets = [
-  { label: '1 MHz (兼容)', value: 1000000 },
-  { label: '4 MHz (常用)', value: 4000000 },
-  { label: '10 MHz (高速推荐)', value: 10000000 },
-  { label: '20 MHz (极速传输)', value: 20000000 },
-  { label: '30 MHz (J-Link极速)', value: 30000000 }
-];
+// 记住上一次选中的探针与 SWD 传输时钟频率
+const selectedProbeId = usePersistentState<string>('hil_lcd_probe_id', '');
+const swdFrequencyHz = usePersistentState<number>('hil_lcd_swd_freq', 10000000); // 10MHz default
 
-function formatProbeLabel(p: ProbeInfo): string {
-  const typeLabel = p.probe_type === 'jlink' || p.description.toLowerCase().includes('jlink') || p.description.toLowerCase().includes('j-link')
-    ? '🔗 [J-Link]' : (p.probe_type === 'daplink' || p.description.toLowerCase().includes('dap') || p.description.toLowerCase().includes('cmsis')
-    ? '⚡ [CMSIS-DAP]' : '🔌 [Probe]');
-  return `${typeLabel} ${p.product_name || p.description} (SN: ${p.unique_id})`;
-}
-
-async function scanProbes() {
-  isScanningProbes.value = true;
-  try {
-    const list: ProbeInfo[] = await safeInvoke('pyocd_list_probes');
-    probes.value = list;
-    if (list.length > 0 && !selectedProbeId.value) {
-      selectedProbeId.value = list[0].unique_id;
-    }
-  } catch (err) {
-    console.warn('Scan probes failed in LcdScreenMirror:', err);
-  } finally {
-    isScanningProbes.value = false;
-  }
-}
-
-onMounted(() => {
-  scanProbes();
-});
-
-const fbAddress = ref<string>('0x20000000');
-const fbWidth = ref<number>(320);
-const fbHeight = ref<number>(240);
-const pixelFormat = ref<'rgb565' | 'rgb888' | 'argb8888' | 'mono'>('rgb565');
+// 记住上一次设置的显存地址、宽、高与格式
+const fbAddress = usePersistentState<string>('hil_lcd_fb_address', '0x20000000');
+const fbWidth = usePersistentState<number>('hil_lcd_fb_width', 320);
+const fbHeight = usePersistentState<number>('hil_lcd_fb_height', 240);
+const pixelFormat = usePersistentState<'rgb565' | 'rgb888' | 'argb8888' | 'mono'>('hil_lcd_pixel_format', 'rgb565');
 
 // Symbol Auto-Sniffing from ELF/AXF
 const isSniffing = ref<boolean>(false);
+
 const sniffNotice = ref<string>('');
 
 async function handleSniffFromFirmware() {
@@ -175,45 +144,11 @@ onUnmounted(() => {
         <span>{{ t("lcd_title") }}</span>
       </div>
 
-      <!-- Probe Selector -->
+      <!-- Probe & Clock Selector -->
       <div class="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded px-2 py-1">
-        <span class="text-[10px] text-zinc-400 font-bold shrink-0">SWD:</span>
-        <select
-          v-model="selectedProbeId"
-          class="bg-transparent text-cyan-300 font-bold outline-none text-xs max-w-[200px] truncate cursor-pointer"
-        >
-          <option v-if="probes.length === 0" value="" class="bg-zinc-900 text-zinc-400">
-            {{ isScanningProbes ? '正在搜索探针...' : '未检测到探针 (自动选默认)' }}
-          </option>
-          <option
-            v-for="p in probes"
-            :key="p.unique_id"
-            :value="p.unique_id"
-            class="bg-zinc-900 text-zinc-200"
-          >
-            {{ formatProbeLabel(p) }}
-          </option>
-        </select>
-        <button
-          @click="scanProbes"
-          :disabled="isScanningProbes"
-          title="刷新探针列表"
-          class="text-zinc-400 hover:text-cyan-400 p-0.5 rounded transition"
-        >
-          <RefreshCw class="w-3 h-3" :class="{ 'animate-spin': isScanningProbes }" />
-        </button>
-
-        <!-- SWD Clock Frequency Selector -->
-        <span class="text-zinc-600 text-[10px] pl-1 border-l border-zinc-800">CLK:</span>
-        <select
-          v-model.number="swdFrequencyHz"
-          class="bg-transparent text-amber-300 font-bold outline-none text-xs cursor-pointer"
-          title="SWD 探针传输时钟速率 (显存推荐 10MHz~20MHz)"
-        >
-          <option v-for="sp in swdFreqPresets" :key="sp.value" :value="sp.value" class="bg-zinc-900 text-zinc-200">
-            {{ sp.label }}
-          </option>
-        </select>
+        <ProbeSelect v-model="selectedProbeId" max-width="170px" />
+        <span class="text-zinc-700">|</span>
+        <SwdClockSelect v-model="swdFrequencyHz" />
       </div>
 
       <!-- Sniff From ELF/AXF Button -->

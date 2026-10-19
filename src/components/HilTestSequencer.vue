@@ -33,6 +33,7 @@ import {
   XCircle,
   FolderOpen
 } from '@lucide/vue';
+import ResizableDrawer from './common/ResizableDrawer.vue';
 
 // Available action templates for the palette
 const actionTemplates: Array<{
@@ -1069,8 +1070,16 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- Bottom Runner Logs Drawer -->
-        <div class="h-44 border-t border-zinc-800 bg-zinc-950 flex flex-col shrink-0">
+        <!-- Bottom Runner Logs Drawer (Resizable) -->
+        <ResizableDrawer
+          direction="vertical"
+          side="top"
+          storage-key="hil_drawer_height_sequencer_logs"
+          :min="100"
+          :max="500"
+          :default-size="176"
+          class="border-t border-zinc-800 bg-zinc-950 flex flex-col shrink-0"
+        >
           <div class="px-3 py-1.5 bg-zinc-900 border-b border-zinc-800 flex items-center justify-between text-xs">
             <div class="flex items-center gap-2">
               <Terminal class="w-3.5 h-3.5 text-emerald-400" />
@@ -1102,7 +1111,7 @@ onUnmounted(() => {
               </span>
             </div>
           </div>
-        </div>
+        </ResizableDrawer>
       </div>
 
       <!-- 3. Right: Step Parameter Inspector (步骤参数配置检查器) -->

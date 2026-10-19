@@ -28,6 +28,8 @@ import SerialXtermView from './SerialXtermView.vue';
 import ModbusDrawer from './ModbusDrawer.vue';
 import ProtocolDashboard from './ProtocolDashboard.vue';
 import IngSerialFlasher from './IngSerialFlasher.vue';
+import BaudrateSelect from './common/BaudrateSelect.vue';
+import ResizableDrawer from './common/ResizableDrawer.vue';
 import { encodeCommand } from '../utils/commandEncoder';
 import { appendChecksum, type ChecksumAlgorithm } from '../utils/crc';
 import { t } from '../utils/i18n';
@@ -53,31 +55,7 @@ const emit = defineEmits<{
 const dtrState = ref<boolean>(false);
 const rtsState = ref<boolean>(false);
 const isResetting = ref<boolean>(false);
-const baudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 1152000, 1500000, 2000000];
-const isCustomBaud = ref<boolean>(false);
-const customBaudInput = ref<number>(props.baudRate);
 
-watch(() => props.baudRate, (newVal) => {
-  if (!baudRates.includes(newVal)) {
-    isCustomBaud.value = true;
-    customBaudInput.value = newVal;
-  }
-}, { immediate: true });
-
-function handleBaudSelect(val: string) {
-  if (val === 'custom') {
-    isCustomBaud.value = true;
-  } else {
-    isCustomBaud.value = false;
-    emit('change-baud', Number(val));
-  }
-}
-
-function handleCustomBaudApply() {
-  if (customBaudInput.value && customBaudInput.value > 0) {
-    emit('change-baud', customBaudInput.value);
-  }
-}
 
 async function refreshPinStates() {
   if (!props.isConnected || props.portName.startsWith('RTT')) return;
@@ -576,29 +554,11 @@ onUnmounted(() => {
           <span v-else class="text-zinc-200 font-mono">{{ portName }}</span>
 
           <!-- Switch Baud Rate Dropdown & Custom Input (Enabled even if connected, supports runtime adjustment) -->
-          <div v-if="!portName.startsWith('RTT')" class="flex items-center gap-1">
-            <select
-              :value="isCustomBaud ? 'custom' : baudRate"
-              @change="(e: any) => handleBaudSelect(e.target.value)"
-              class="bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-300 py-0.5 px-1.5 rounded outline-none font-mono cursor-pointer hover:border-zinc-700"
-              :title="isConnected ? t('term_baud_adjust_tip') : t('term_baud_set_tip')"
-            >
-              <option v-for="b in baudRates" :key="b" :value="b">
-                {{ b >= 1000000 ? (b / 1000000) + 'M' : b }}
-              </option>
-              <option value="custom">自定义...</option>
-            </select>
-            <input
-              v-if="isCustomBaud"
-              v-model.number="customBaudInput"
-              type="number"
-              placeholder="Baud"
-              @keyup.enter="handleCustomBaudApply"
-              @blur="handleCustomBaudApply"
-              class="w-18 bg-zinc-950 border border-amber-600/70 text-[10px] text-amber-300 py-0.5 px-1 rounded outline-none font-mono text-center"
-              title="按回车或失焦生效自定义波特率"
-            />
-          </div>
+          <BaudrateSelect
+            v-if="!portName.startsWith('RTT')"
+            :model-value="baudRate"
+            @update:model-value="(b) => emit('change-baud', b)"
+          />
 
           <!-- Direct Open / Close Port Button inside Tab -->
           <button
@@ -907,10 +867,14 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Right: Collapsible Custom Protocol Dashboard -->
-      <div
-        v-show="isDashboardOpen"
-        class="shrink-0 overflow-hidden"
+      <!-- Right: Collapsible Custom Protocol Dashboard (Resizable) -->
+      <ResizableDrawer
+        v-if="isDashboardOpen"
+        storage-key="hil_drawer_width_protocol"
+        :min="300"
+        :max="900"
+        :default-size="420"
+        side="left"
       >
         <ProtocolDashboard
           :port-name="portName"
@@ -919,12 +883,16 @@ onUnmounted(() => {
           @log="appendLog"
           @bytes-sent="handleBytesSent"
         />
-      </div>
+      </ResizableDrawer>
 
-      <!-- Right: Collapsible Modbus RTU Drawer -->
-      <div
-        v-show="isModbusDrawerOpen"
-        class="shrink-0 overflow-hidden"
+      <!-- Right: Collapsible Modbus RTU Drawer (Resizable) -->
+      <ResizableDrawer
+        v-if="isModbusDrawerOpen"
+        storage-key="hil_drawer_width_modbus"
+        :min="300"
+        :max="850"
+        :default-size="380"
+        side="left"
       >
         <ModbusDrawer
           ref="modbusDrawerRef"
@@ -934,12 +902,16 @@ onUnmounted(() => {
           @log="appendLog"
           @bytes-sent="handleBytesSent"
         />
-      </div>
+      </ResizableDrawer>
 
-      <!-- Right: Collapsible Command Group Panel -->
-      <div
-        v-show="isCommandPanelOpen"
-        class="w-88 border-l border-zinc-800 flex flex-col shrink-0 overflow-hidden"
+      <!-- Right: Collapsible Command Group Panel (Resizable) -->
+      <ResizableDrawer
+        v-if="isCommandPanelOpen"
+        storage-key="hil_drawer_width_commands"
+        :min="280"
+        :max="750"
+        :default-size="350"
+        side="left"
       >
         <CommandGroupPanel
           ref="cmdPanelRef"
@@ -949,18 +921,22 @@ onUnmounted(() => {
           @bytes-sent="handleBytesSent"
           @group-changed="(g) => activeGroup = g"
         />
-      </div>
+      </ResizableDrawer>
 
-      <!-- Right: Collapsible Smart Trigger Panel -->
-      <div
-        v-show="isTriggerPanelOpen"
-        class="flex flex-col shrink-0 overflow-hidden"
+      <!-- Right: Collapsible Smart Trigger Panel (Resizable) -->
+      <ResizableDrawer
+        v-if="isTriggerPanelOpen"
+        storage-key="hil_drawer_width_trigger"
+        :min="300"
+        :max="850"
+        :default-size="384"
+        side="left"
       >
         <TriggerPanel
           ref="triggerPanelRef"
           @close="isTriggerPanelOpen = false"
         />
-      </div>
+      </ResizableDrawer>
     </div>
 
     <!-- Quick Commands Bar -->

@@ -96,6 +96,9 @@ pub fn run() {
             log_debug("[SETUP] Tauri application setup hook triggered");
             for (label, window) in app.webview_windows() {
                 log_debug(&format!("[SETUP] Found window: {}", label));
+                if label == "main" {
+                    platform::window_state::restore_window_state(&window);
+                }
                 log_debug(&format!("[SETUP] is_visible: {:?}", window.is_visible()));
                 log_debug(&format!("[SETUP] show() result: {:?}", window.show()));
                 log_debug(&format!("[SETUP] set_focus() result: {:?}", window.set_focus()));
@@ -220,8 +223,11 @@ pub fn run() {
             tauri::RunEvent::Ready => {
                 log_debug("[EVENT] RunEvent::Ready");
             }
-            tauri::RunEvent::WindowEvent { event, .. } => {
+            tauri::RunEvent::WindowEvent { label, event, .. } => {
                 if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
+                    if let Some(win) = _app_handle.get_webview_window(&label) {
+                        platform::window_state::save_window_state(&win);
+                    }
                     let _ = serial_exit.close(None);
                     daemon_exit.stop();
                 }

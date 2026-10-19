@@ -194,7 +194,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="h-full flex flex-col bg-zinc-900 border-l border-zinc-800 w-96 text-xs text-zinc-100 shadow-2xl">
+  <div class="h-full flex flex-col bg-zinc-900 border-l border-zinc-800 w-full text-xs text-zinc-100 shadow-2xl">
     <!-- Header -->
     <div class="bg-zinc-950 border-b border-zinc-800 p-3 flex items-center justify-between">
       <div class="flex items-center gap-2">
