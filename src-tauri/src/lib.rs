@@ -64,10 +64,8 @@ pub fn run() {
     #[cfg(debug_assertions)]
     ensure_dev_server_running();
 
-    // 1. Asynchronously cleanup lingering background daemons so main UI thread is NEVER blocked
-    std::thread::spawn(|| {
-        daemon::process_manager::kill_all_daemons();
-    });
+    // 1. Cleanup lingering background daemons before initializing
+    daemon::process_manager::kill_all_daemons();
 
     let serial = Arc::new(SerialManager::new());
     let daemon = Arc::new(DaemonManager::new());

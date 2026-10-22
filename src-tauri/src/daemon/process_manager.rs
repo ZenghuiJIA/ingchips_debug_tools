@@ -10,20 +10,40 @@ use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 use crate::platform::windows::job_object::ProcessJob;
 
-/// Clean up any orphan or lingering hil-daemon background processes
+/// Clean up any orphan or lingering hil-daemon background processes that belong to this app or are orphaned
 pub fn kill_all_daemons() {
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let my_pid = std::process::id();
 
     for (pid, proc_) in sys.processes() {
-        if pid.as_u32() == my_pid {
+        let raw_pid = pid.as_u32();
+        if raw_pid == my_pid {
             continue;
         }
         let name = proc_.name().to_string_lossy().to_lowercase();
         if name.contains("hil-daemon") {
-            println!("[DaemonManager] Killing lingering daemon process: PID {} ({})", pid, name);
-            let _ = proc_.kill();
+            // Determine whether this process is an orphan or was launched by this app
+            let is_orphan_or_mine = if let Some(ppid) = proc_.parent() {
+                let parent_id = ppid.as_u32();
+                // Parent is this app, or parent no longer exists in system -> orphan
+                parent_id == my_pid || !sys.processes().contains_key(&ppid)
+            } else {
+                true
+            };
+
+            if is_orphan_or_mine {
+                println!("[DaemonManager] Killing lingering daemon process tree: PID {} ({})", raw_pid, name);
+                #[cfg(target_os = "windows")]
+                {
+                    use std::os::windows::process::CommandExt;
+                    let _ = Command::new("taskkill")
+                        .args(["/F", "/T", "/PID", &raw_pid.to_string()])
+                        .creation_flags(0x08000000)
+                        .output();
+                }
+                let _ = proc_.kill();
+            }
         }
     }
 }
@@ -114,6 +134,10 @@ impl DaemonManager {
             return Err("Neither standalone binary nor daemon_entry.py found".to_string());
         };
 
+        let my_pid = std::process::id();
+        cmd.env("AI_HIL_PARENT_PID", my_pid.to_string());
+        cmd.arg("--parent-pid").arg(my_pid.to_string());
+
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped());
 
@@ -138,7 +162,10 @@ impl DaemonManager {
         {
             if let Some(ref job) = self._job {
                 use std::os::windows::io::AsRawHandle;
-                let _ = job.assign_process(child.as_raw_handle());
+                match job.assign_process(child.as_raw_handle()) {
+                    Ok(_) => println!("[DaemonManager] Process {} assigned to Windows Job Object", pid),
+                    Err(e) => println!("[DaemonManager] Warning: JobObject assign_process failed: {}", e),
+                }
             }
         }
 
@@ -252,16 +279,48 @@ impl DaemonManager {
     }
 
     pub fn stop(&self) {
-        let mut child_guard = self.child.lock().unwrap();
-        if let Some(ref mut child) = *child_guard {
-            let _ = child.kill();
+        let child_pid = { *self.child_pid.lock().unwrap() };
+        println!("[DaemonManager] Stopping daemon (child PID: {:?})...", child_pid);
+
+        // 1. Try sending graceful shutdown RPC and close stdin pipe to trigger immediate EOF in daemon
+        {
+            let mut writer_guard = self.stdin_writer.lock().unwrap();
+            if let Some(mut writer) = writer_guard.take() {
+                let _ = writeln!(writer, "{{\"jsonrpc\":\"2.0\",\"id\":999999,\"method\":\"shutdown\",\"params\":{{}}}}");
+                let _ = writer.flush();
+                drop(writer);
+            }
         }
-        *child_guard = None;
-        *self.stdin_writer.lock().unwrap() = None;
         *self.stdout_reader.lock().unwrap() = None;
+
+        // 2. Kill the process tree on Windows via taskkill /F /T immediately
+        #[cfg(target_os = "windows")]
+        if let Some(pid) = child_pid {
+            use std::os::windows::process::CommandExt;
+            let _ = Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .creation_flags(0x08000000)
+                .output();
+        }
+
+        // 3. Kill the direct child handle and reap
+        {
+            let mut child_guard = self.child.lock().unwrap();
+            if let Some(ref mut child) = *child_guard {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            *child_guard = None;
+        }
         *self.child_pid.lock().unwrap() = None;
 
-        // Ensure all child processes (including PyInstaller workers) are completely stopped
+        // 4. Ensure all orphaned daemon processes are cleaned up
         kill_all_daemons();
+    }
+}
+
+impl Drop for DaemonManager {
+    fn drop(&mut self) {
+        self.stop();
     }
 }

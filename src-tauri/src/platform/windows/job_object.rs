@@ -38,6 +38,7 @@ struct JobobjectExtendedLimitInformation {
 }
 
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x2000;
+const JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK: DWORD = 0x1000;
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
 
 #[link(name = "kernel32")]
@@ -69,7 +70,7 @@ impl ProcessJob {
             }
 
             let mut info: JobobjectExtendedLimitInformation = std::mem::zeroed();
-            info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
 
             let res = SetInformationJobObject(
                 job,

@@ -3364,17 +3364,77 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         raise ValueError(f"Unknown MCP tool: {name}")
 
 
+def is_process_running(pid: int) -> bool:
+    """Check if process with given PID is still active."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            SYNCHRONIZE = 0x00100000
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+            if not handle:
+                return False
+            res = kernel32.WaitForSingleObject(handle, 0)
+            kernel32.CloseHandle(handle)
+            # 258 == WAIT_TIMEOUT (still running); 0 == WAIT_OBJECT_0 (terminated)
+            return res == 258
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+
+
+def start_parent_watchdog(parent_pid: int):
+    """Monitors parent process; automatically terminates daemon if parent dies."""
+    def _watchdog():
+        logger.info(f"Parent watchdog started for PID {parent_pid}")
+        while True:
+            time.sleep(1.0)
+            if not is_process_running(parent_pid):
+                logger.info(f"Parent process PID {parent_pid} terminated. Exiting daemon immediately.")
+                os._exit(0)
+
+    t = threading.Thread(target=_watchdog, daemon=True, name="ParentWatchdogThread")
+    t.start()
+
+
 def main():
     logger.info("Starting HIL Python Daemon (JSON-RPC 2.0 / MCP Server)...")
     trim_process_memory()
+
+    # Parse parent PID from env var or CLI args
+    parent_pid = None
+    if "AI_HIL_PARENT_PID" in os.environ:
+        try:
+            parent_pid = int(os.environ["AI_HIL_PARENT_PID"])
+        except ValueError:
+            pass
+
+    for i, arg in enumerate(sys.argv):
+        if arg == "--parent-pid" and i + 1 < len(sys.argv):
+            try:
+                parent_pid = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+
+    if parent_pid and parent_pid > 0:
+        logger.info(f"Configured parent process monitoring for PID: {parent_pid}")
+        start_parent_watchdog(parent_pid)
 
     while True:
         try:
             line = sys.stdin.readline()
             if not line:
-                # EOF: Parent process closed pipe, exit gracefully
-                logger.info("stdin closed, exiting daemon.")
-                break
+                # EOF: Parent process closed pipe, exit gracefully and immediately
+                logger.info("stdin closed (EOF), exiting daemon immediately.")
+                os._exit(0)
 
             line = line.strip()
             if not line:
@@ -3402,7 +3462,13 @@ def main():
 
             # Handle JSON-RPC / MCP Methods
             try:
-                if method == "initialize":
+                if method in ("shutdown", "exit"):
+                    response = {"jsonrpc": "2.0", "result": "ok", "id": req_id}
+                    sys.stdout.write(json.dumps(response) + "\n")
+                    sys.stdout.flush()
+                    logger.info("Explicit shutdown requested via RPC. Exiting.")
+                    os._exit(0)
+                elif method == "initialize":
                     # 回显客户端请求的协议版本，避免 SDK 因版本不在支持列表而拒绝连接
                     requested = params.get("protocolVersion")
                     result = {
@@ -3455,6 +3521,7 @@ def main():
             logger.error(f"Top-level loop error: {e}")
 
     logger.info("HIL Python Daemon terminated.")
+    os._exit(0)
 
 
 if __name__ == "__main__":
