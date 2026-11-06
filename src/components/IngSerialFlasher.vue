@@ -45,10 +45,7 @@ const BASE_KEY_SINGLE_ADDR = 'ing_flasher_last_single_address';
 const BASE_KEY_FAMILY = 'ing_flasher_last_family';
 const BASE_KEY_MODE = 'ing_flasher_last_mode';
 const BASE_KEY_BAUD = 'ing_flasher_last_baud';
-// This dialog has no verified board-wiring profile editor. Never restore the
-// legacy automatic RTS/DTR setting; only manual ISP entry is supported here.
-const manualBoot = true;
-const bootPolicyNotice = '自动 RTS/DTR 复位不可用：尚未配置并验证板级接线。点击开始烧录后，请在等待握手期间按板卡说明手动进入 ISP。';
+const BASE_KEY_MANUAL_BOOT = 'ing_flasher_last_manual_boot';
 
 // Helper to read setting scoped to tab/port, checking portName key as fallback before global default
 function readSetting(baseKey: string, defaultValue: string = ''): string {
@@ -87,6 +84,8 @@ const selectedBaud = ref<number>(
   Number(readSetting(BASE_KEY_BAUD, '115200')) || 115200
 );
 
+const manualBoot = ref<boolean>(readSetting(BASE_KEY_MANUAL_BOOT, 'false') === 'true');
+
 const baudRates = [9600, 115200, 230400, 460800, 921600, 1000000, 1152000, 1500000];
 const isCustomBaud = ref<boolean>(!baudRates.includes(selectedBaud.value));
 
@@ -115,6 +114,7 @@ watch([() => props.tabId, () => props.portName], ([newTab, newPort]) => {
   singleAddress.value = readSetting(BASE_KEY_SINGLE_ADDR, '0x02002000');
   selectedFamily.value = readSetting(BASE_KEY_FAMILY, 'auto');
   selectedBaud.value = Number(readSetting(BASE_KEY_BAUD, '115200')) || 115200;
+  manualBoot.value = readSetting(BASE_KEY_MANUAL_BOOT, 'false') === 'true';
 
   if (iniPath.value && mode.value === 'ini') {
     loadAndParseIni(iniPath.value);
@@ -159,6 +159,12 @@ watch(selectedBaud, (v) => {
   localStorage.setItem(getPortKey(BASE_KEY_BAUD), String(v));
   if (props.portName) {
     localStorage.setItem(`${BASE_KEY_BAUD}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, String(v));
+  }
+});
+watch(manualBoot, (v) => {
+  localStorage.setItem(getPortKey(BASE_KEY_MANUAL_BOOT), String(v));
+  if (props.portName) {
+    localStorage.setItem(`${BASE_KEY_MANUAL_BOOT}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, String(v));
   }
 });
 
@@ -272,7 +278,7 @@ async function startFlash() {
         single_address: mode.value === 'single' ? singleAddress.value : null,
         family: selectedFamily.value,
         target_baud: selectedBaud.value,
-        manual_boot: manualBoot,
+        manual_boot: manualBoot.value,
         timeout_sec: 15
       }
     });
@@ -437,19 +443,18 @@ onUnmounted(() => {
             />
           </div>
 
-          <!-- Automatic reset stays unavailable without verified board wiring. -->
-          <label class="flex items-center gap-1.5 text-xs select-none ml-1 text-zinc-300" :title="bootPolicyNotice">
+          <label class="flex items-center gap-1.5 text-xs select-none ml-1 text-zinc-300 cursor-pointer" :title="t('ing_manual_boot_tip')">
             <input
               type="checkbox"
-              :checked="manualBoot"
-              disabled
+              v-model="manualBoot"
               aria-describedby="ing-boot-policy"
-              class="rounded bg-zinc-950 border-zinc-700 text-indigo-500 focus:ring-0 cursor-not-allowed"
+              class="rounded bg-zinc-950 border-zinc-700 text-indigo-500 focus:ring-indigo-500 cursor-pointer"
             />
-            <span class="text-amber-300 font-semibold">{{ t('ing_manual_boot') }}</span>
+            <span :class="manualBoot ? 'text-amber-300 font-semibold' : 'text-zinc-400'">{{ t('ing_manual_boot') }}</span>
           </label>
         </div>
-        <p id="ing-boot-policy" class="mt-2 text-xs text-amber-300" role="note">{{ bootPolicyNotice }}</p>
+        <p id="ing-boot-policy" v-if="manualBoot" class="mt-2 text-xs text-amber-300" role="note">已开启手动 Boot 模式：点击开始烧录后，请在 15 秒等待握手期间手动按复位/BOOT 按键或重新上电。</p>
+        <p id="ing-boot-policy" v-else class="mt-2 text-xs text-emerald-400/90" role="note">自动硬件复位已就绪：点击烧录将自动发送 RTS/DTR 脉冲使芯片进入 Boot 模式。</p>
       </div>
 
       <!-- Main Config Body (Scrollable) -->

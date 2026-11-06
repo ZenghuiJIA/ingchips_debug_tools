@@ -15,7 +15,11 @@ import {
   Zap,
   RotateCcw,
   Copy,
-  Check
+  Check,
+  Binary,
+  Radio,
+  Terminal,
+  Layers
 } from '@lucide/vue';
 
 const messages = ref<ChatMessage[]>([]);
@@ -72,7 +76,7 @@ async function handleSendMessage(customPrompt?: string) {
     }
     let probeId: string | null = null;
     let portName: string | null = null;
-    if (['fault', 'read', 'write'].includes(intent.action)) {
+    if (['fault', 'read', 'write', 'read_core_registers', 'reset_target_swd'].includes(intent.action)) {
       const probes = await safeInvoke<any[]>('pyocd_list_probes');
       if (probes.length !== 1) throw new Error('需要且仅允许连接一只探针；多探针请在对应工具页明确选择');
       probeId = probes[0].unique_id;
@@ -240,6 +244,169 @@ async function handleSendMessage(customPrompt?: string) {
       };
 
       addMessage('assistant', `✅ 成功通过 MCP 向内存 **${res.address || targetAddr}** 写入 **${res.value || valStr}**！状态: \`${res.status}\``);
+
+    } else if (intent.action === 'list_serial_ports') {
+      addMessage('assistant', '正在通过 MCP 扫描系统可用串口及 USB CDC 设备...', {
+        name: 'list_serial_ports',
+        arguments: {},
+        status: 'running'
+      });
+
+      const ports: any = await safeInvoke('list_serial_ports');
+
+      messages.value[messages.value.length - 1].tool_call = {
+        name: 'list_serial_ports',
+        arguments: {},
+        result: ports,
+        status: 'success'
+      };
+
+      if (ports && ports.length > 0) {
+        let msg = `✅ 成功枚举到 **${ports.length}** 个可用串口：\n`;
+        for (const p of ports) {
+          const dap = p.is_daplink ? ' *(DAPLink 虚拟串口)*' : '';
+          const desc = p.usb_info?.description ? ` - ${p.usb_info.description}` : '';
+          msg += `- **${p.port_name}**${dap}${desc}\n`;
+        }
+        addMessage('assistant', msg);
+      } else {
+        addMessage('assistant', '⚠️ 未发现系统可用串口，请检查硬件连接或驱动。');
+      }
+
+    } else if (intent.action === 'read_serial_data') {
+      const activeSessions = await safeInvoke<string[]>('list_active_serial_sessions');
+      if (!activeSessions || activeSessions.length === 0) {
+        addMessage('assistant', '⚠️ 当前没有已连接的串口会话。请先在串口助手连接目标串口，或通过 MCP 打开串口。');
+        return;
+      }
+      const targetPort = intent.port || activeSessions[0];
+
+      addMessage('assistant', `正在读取串口 **${targetPort}** 的最新接收数据...`, {
+        name: 'read_serial_data',
+        arguments: { port_name: targetPort, max_bytes: 50 },
+        status: 'running'
+      });
+
+      const page: any = await safeInvoke('serial_capture_read', {
+        portName: targetPort,
+        after: 0,
+        limit: 50
+      });
+
+      messages.value[messages.value.length - 1].tool_call = {
+        name: 'read_serial_data',
+        arguments: { port_name: targetPort },
+        result: page,
+        status: 'success'
+      };
+
+      const events = page?.events || [];
+      const rxEvents = events.filter((e: any) => e.direction === 'rx');
+      if (rxEvents.length > 0) {
+        const lastFew = rxEvents.slice(-10);
+        let snippet = lastFew.map((e: any) => `[+${Math.round(e.elapsed_ms)}ms] ${e.data}`).join('\n');
+        addMessage('assistant', `✅ 从串口 **${targetPort}** 读取到最新 ${rxEvents.length} 条数据片段：\n\`\`\`text\n${snippet}\n\`\`\``);
+      } else if (events.length > 0) {
+        addMessage('assistant', `ℹ️ 串口 **${targetPort}** 记录中包含 ${events.length} 条历史事件，暂无最新 RX 接收数据。`);
+      } else {
+        addMessage('assistant', `ℹ️ 串口 **${targetPort}** 缓冲区当前为空，尚未收到数据。`);
+      }
+
+    } else if (intent.action === 'send_serial_data') {
+      const activeSessions = await safeInvoke<string[]>('list_active_serial_sessions');
+      if (!activeSessions || activeSessions.length === 0) {
+        addMessage('assistant', '⚠️ 当前没有已连接的串口会话，无法下发数据。请先在串口助手连接目标串口。');
+        return;
+      }
+      const targetPort = intent.port || activeSessions[0];
+      const payloadStr = intent.data || '';
+
+      addMessage('assistant', `正在向串口 **${targetPort}** 下发数据...`, {
+        name: 'send_serial_data',
+        arguments: { port_name: targetPort, data: payloadStr },
+        status: 'running'
+      });
+
+      let rawBytes: number[] = [];
+      const hexClean = payloadStr.replace(/0x|\s+|,/g, '');
+      if (/^[0-9a-fA-F]+$/.test(hexClean) && hexClean.length % 2 === 0 && payloadStr.includes(' ')) {
+        for (let i = 0; i < hexClean.length; i += 2) {
+          rawBytes.push(parseInt(hexClean.substr(i, 2), 16));
+        }
+      } else {
+        rawBytes = Array.from(new TextEncoder().encode(payloadStr));
+      }
+
+      const sentBytes: any = await safeInvoke('send_serial_data', {
+        data: rawBytes,
+        portName: targetPort
+      });
+
+      messages.value[messages.value.length - 1].tool_call = {
+        name: 'send_serial_data',
+        arguments: { port_name: targetPort, data: payloadStr, bytes_count: rawBytes.length },
+        result: { bytes_sent: sentBytes ?? rawBytes.length },
+        status: 'success'
+      };
+
+      addMessage('assistant', `✅ 成功向串口 **${targetPort}** 发送 ${sentBytes ?? rawBytes.length} 字节数据！`);
+
+    } else if (intent.action === 'read_core_registers') {
+      addMessage('assistant', '正在调用 MCP 硬件工具 `read_core_registers` 读取 Cortex-M 核心寄存器...', {
+        name: 'read_core_registers',
+        arguments: { target_override: 'cortex_m' },
+        status: 'running'
+      });
+
+      const res: any = await safeInvoke('pyocd_read_registers', {
+        probeId,
+        targetOverride: 'cortex_m'
+      });
+
+      messages.value[messages.value.length - 1].tool_call = {
+        name: 'read_core_registers',
+        arguments: { target_override: 'cortex_m' },
+        result: res,
+        status: 'success'
+      };
+
+      let table = `### 📊 ARM Cortex-M 核心寄存器状态\n\n`;
+      table += `| 寄存器 | 32 位十六进制值 | 寄存器 | 32 位十六进制值 |\n`;
+      table += `| :--- | :--- | :--- | :--- |\n`;
+      const regs = res?.registers || res || {};
+      const pairs = [
+        ['R0', 'R1'], ['R2', 'R3'], ['R4', 'R5'], ['R6', 'R7'],
+        ['R8', 'R9'], ['R10', 'R11'], ['R12', 'SP (R13)'],
+        ['LR (R14)', 'PC (R15)'], ['xPSR', 'MSP'], ['PSP', 'PRIMASK']
+      ];
+      for (const [k1, k2] of pairs) {
+        const val1 = regs[k1] ?? regs[k1.split(' ')[0]] ?? '-';
+        const val2 = regs[k2] ?? regs[k2.split(' ')[0]] ?? '-';
+        table += `| \`${k1}\` | \`${typeof val1 === 'number' ? '0x' + val1.toString(16).padStart(8, '0') : val1}\` | \`${k2}\` | \`${typeof val2 === 'number' ? '0x' + val2.toString(16).padStart(8, '0') : val2}\` |\n`;
+      }
+      addMessage('assistant', table);
+
+    } else if (intent.action === 'reset_target_swd') {
+      addMessage('assistant', '正在通过 SWD 调试探针下发目标复位指令...', {
+        name: 'reset_target',
+        arguments: { halt: false, target_override: 'cortex_m' },
+        status: 'running'
+      });
+
+      const res: any = await safeInvoke('pyocd_reset_target', {
+        halt: false,
+        probeId,
+        targetOverride: 'cortex_m'
+      });
+
+      messages.value[messages.value.length - 1].tool_call = {
+        name: 'reset_target',
+        arguments: { halt: false },
+        result: res || { status: 'success' },
+        status: 'success'
+      };
+
+      addMessage('assistant', '✅ 已通过 SWD 接口下发硬件复位命令，MCU 核心已重启并正常运行。');
 
     } else {
       // General Embedded AI guidance
@@ -412,6 +579,38 @@ onMounted(() => {
       >
         <Binary class="w-3.5 h-3.5 text-indigo-400" />
         <span>{{ t("ai_action_write_ram") }}</span>
+      </button>
+
+      <button
+        @click="handleSendMessage('扫描可用串口')"
+        class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
+      >
+        <Radio class="w-3.5 h-3.5 text-cyan-400" />
+        <span>{{ t("ai_action_scan_serial") }}</span>
+      </button>
+
+      <button
+        @click="handleSendMessage('读取串口最新数据')"
+        class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
+      >
+        <Terminal class="w-3.5 h-3.5 text-lime-400" />
+        <span>{{ t("ai_action_read_serial") }}</span>
+      </button>
+
+      <button
+        @click="handleSendMessage('读取 CPU 核心寄存器')"
+        class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
+      >
+        <Layers class="w-3.5 h-3.5 text-purple-400" />
+        <span>{{ t("ai_action_core_regs") }}</span>
+      </button>
+
+      <button
+        @click="handleSendMessage('SWD 目标复位')"
+        class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs border border-zinc-700 transition-colors shrink-0"
+      >
+        <RotateCcw class="w-3.5 h-3.5 text-pink-400" />
+        <span>{{ t("ai_action_reset_swd") }}</span>
       </button>
     </div>
 

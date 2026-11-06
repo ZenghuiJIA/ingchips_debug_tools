@@ -78,11 +78,13 @@ pub fn run() {
     let daemon_exit = Arc::clone(&daemon);
     let serial_win = Arc::clone(&serial);
     let daemon_win = Arc::clone(&daemon);
+    let serial_bridge = Arc::clone(&serial);
 
     let app = match tauri::Builder::default()
         .on_window_event(move |_window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
                 log_debug("[WINDOW_EVENT] Window closing, cleaning up all background processes...");
+                crate::hardware::desktop_bridge::DesktopBridgeServer::stop();
                 let _ = serial_win.close(None);
                 daemon_win.stop();
             }
@@ -90,8 +92,9 @@ pub fn run() {
         .on_page_load(|window, payload| {
             log_debug(&format!("[PAGE_LOAD] {}: url={}, event={:?}", window.label(), payload.url(), payload.event()));
         })
-        .setup(|app| {
+        .setup(move |app| {
             log_debug("[SETUP] Tauri application setup hook triggered");
+            let _ = crate::hardware::desktop_bridge::DesktopBridgeServer::start(app.handle().clone(), Arc::clone(&serial_bridge));
             for (label, window) in app.webview_windows() {
                 log_debug(&format!("[SETUP] Found window: {}", label));
                 if label == "main" {

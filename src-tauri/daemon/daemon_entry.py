@@ -8,6 +8,7 @@ Communicates with Tauri Rust backend over JSON-RPC 2.0 via stdin/stdout.
 import sys
 import os
 import json
+import tempfile
 import logging
 import gc
 import traceback
@@ -2449,6 +2450,54 @@ class JScopeController:
             return {"status": "stopped"}
 
 
+class DesktopBridgeClient:
+    """与正在运行的 Tauri/Vue 桌面主进程进行本地进程间资源共享通信。"""
+    @staticmethod
+    def get_bridge_info() -> Optional[Dict[str, Any]]:
+        bridge_file = Path(tempfile.gettempdir()) / "ai-hil-serial-bridge.json"
+        if not bridge_file.exists():
+            return None
+        try:
+            data = json.loads(bridge_file.read_text(encoding="utf-8"))
+            pid = data.get("pid")
+            port = data.get("port")
+            if pid and port:
+                return data
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def call_bridge(cls, action: str, **kwargs) -> Optional[Dict[str, Any]]:
+        info = cls.get_bridge_info()
+        if not info:
+            return None
+        port = info.get("port")
+        if not port:
+            return None
+
+        req = {"action": action, "params": kwargs}
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.5)
+            s.connect(("127.0.0.1", int(port)))
+            s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+
+            resp_bytes = b""
+            while b"\n" not in resp_bytes:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                resp_bytes += chunk
+            s.close()
+
+            if resp_bytes:
+                return json.loads(resp_bytes.decode("utf-8", errors="replace").strip())
+        except Exception as e:
+            logger.debug(f"[DesktopBridgeClient] Bridge call error: {e}")
+        return None
+
+
 class SerialController:
     """多串口并发管理与智能端口调度控制器。
     支持同时打开多个串口进行独立收发，当仅有一个串口活动时支持免传 port_name 智能路由。
@@ -2466,6 +2515,11 @@ class SerialController:
         """枚举系统当前所有可用串口及状态。"""
         if not SERIAL_AVAILABLE:
             raise RuntimeError("pyserial 未安装或不可用")
+
+        bridge_resp = DesktopBridgeClient.call_bridge("list_ports")
+        if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") == "ok"):
+            res = bridge_resp.get("result", {})
+            return res.get("ports", bridge_resp.get("ports", []))
 
         ports = serial.tools.list_ports.comports()
         result = []
@@ -2525,6 +2579,18 @@ class SerialController:
             raise RuntimeError("pyserial 未安装或不可用")
 
         port_name = port_name.strip().upper() if port_name.upper().startswith("COM") else port_name.strip()
+        bridge_resp = DesktopBridgeClient.call_bridge("open_port", port_name=port_name, baudrate=baudrate)
+        if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") == "ok"):
+            cls._last_active_port = port_name
+            res = bridge_resp.get("result", {})
+            return {
+                "status": "opened_shared",
+                "port": port_name,
+                "baudrate": baudrate,
+                "shared_with_vue": True,
+                "message": res.get("message", "Port shared with desktop")
+            }
+
         with cls._lock:
             if port_name in cls._ports and cls._ports[port_name].is_open:
                 if cls._ports[port_name].baudrate != baudrate:
@@ -2615,6 +2681,15 @@ class SerialController:
     @classmethod
     def close_port(cls, port_name: Optional[str] = None) -> Dict[str, Any]:
         """关闭串口。若仅打开一个串口可不传 port_name。"""
+        bridge_resp = DesktopBridgeClient.call_bridge("close_port", port_name=port_name)
+        if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") == "ok"):
+            res = bridge_resp.get("result", {})
+            return {
+                "status": "closed",
+                "port": port_name or res.get("port_name", "active"),
+                "shared_with_vue": True
+            }
+
         with cls._lock:
             target = cls._resolve_port_name(port_name)
             cls._running_flags[target] = False
@@ -2646,6 +2721,16 @@ class SerialController:
         append_crlf: bool = False
     ) -> Dict[str, Any]:
         """向串口发送数据。未指定 port_name 且只打开单个串口时自动免选。"""
+        bridge_resp = DesktopBridgeClient.call_bridge("send_serial_data", port_name=port_name, data=data, is_hex=is_hex, append_crlf=append_crlf)
+        if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") == "ok"):
+            res = bridge_resp.get("result", {})
+            return {
+                "status": "sent",
+                "port": port_name or res.get("port_name", "active"),
+                "bytes_written": res.get("bytes_sent", len(data)),
+                "shared_with_vue": True
+            }
+
         with cls._lock:
             target = cls._resolve_port_name(port_name)
             ser = cls._ports[target]
@@ -2683,6 +2768,23 @@ class SerialController:
         clear_buffer: bool = True
     ) -> Dict[str, Any]:
         """从串口接收缓存或总线读取数据。未指定 port_name 且只打开单个串口时自动免选。"""
+        bridge_resp = DesktopBridgeClient.call_bridge("read_serial_data", port_name=port_name, max_bytes=max_bytes, format=format_type, clear_buffer=clear_buffer)
+        if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") == "ok"):
+            res = bridge_resp.get("result", {})
+            text_val = res.get("text", "")
+            hex_val = res.get("hex", "")
+            data_val = hex_val if format_type == "hex" else text_val
+            return {
+                "status": "read",
+                "port": port_name or res.get("port_name", "active"),
+                "format": format_type,
+                "bytes_read": res.get("bytes_count", len(data_val)),
+                "data": data_val,
+                "text": text_val,
+                "hex": hex_val,
+                "shared_with_vue": True
+            }
+
         target = cls._resolve_port_name(port_name)
 
         # 稍微等待数据到达
@@ -3177,7 +3279,7 @@ MCP_TOOLS = [
 ]
 
 MCP_SERVER_NAME = "embedded-hil-debugger"
-MCP_SERVER_VERSION = "1.7.1"
+MCP_SERVER_VERSION = "1.3.3"
 MCP_DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
 # 兼容旧调用方式：直接以工具名作为 JSON-RPC method

@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "ai-hil-debugger"
-version = "1.7.1"
+version = "1.3.3"
 dependencies = [
  "hil-debug-core",
  "hil-runtime",
@@ -1413,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "hil-runtime"
-version = "1.7.1"
+version = "1.3.3"
 dependencies = [
  "addr2line",
  "base64 0.22.1",

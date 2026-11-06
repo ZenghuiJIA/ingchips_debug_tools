@@ -1024,6 +1024,10 @@ export const messages: Record<LocaleType, Record<string, string>> = {
     ai_action_probes: '扫描调试探针',
     ai_action_read_ram: '读取 RAM (0x20000000)',
     ai_action_write_ram: '写入 RAM (0x20000000)',
+    ai_action_scan_serial: '扫描可用串口',
+    ai_action_read_serial: '读取串口最新数据',
+    ai_action_core_regs: '读取 CPU 核心寄存器',
+    ai_action_reset_swd: 'SWD 目标复位',
     ai_placeholder_input: '向 AI 描述您的硬件调试需求，或输入指令直接调用 MCP Tools...',
     ai_btn_send: '发送',
 
@@ -2232,6 +2236,10 @@ export const messages: Record<LocaleType, Record<string, string>> = {
     ai_action_probes: 'Scan Probes',
     ai_action_read_ram: 'Read RAM (0x20000000)',
     ai_action_write_ram: 'Write RAM (0x20000000)',
+    ai_action_scan_serial: 'Scan Serial Ports',
+    ai_action_read_serial: 'Read Serial Data',
+    ai_action_core_regs: 'Read Core Registers',
+    ai_action_reset_swd: 'SWD Reset Target',
     ai_placeholder_input: 'Describe debugging tasks or call MCP tools...',
     ai_btn_send: 'Send',
 

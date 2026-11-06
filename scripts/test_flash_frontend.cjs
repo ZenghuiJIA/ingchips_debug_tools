@@ -10,7 +10,7 @@ const { descriptor, errors } = parse(source);
 assert.deepEqual(errors, []);
 const ast = ts.createSourceFile('IngSerialFlasher.ts', descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true);
 const code = ts.transpileModule(ast.statements.filter(s => !ts.isImportDeclaration(s))
-  .map(s => s.getText(ast)).join('\n') + '\nglobalThis.testApi = { startFlash, mode, singlePath, manualBoot, bootPolicyNotice };',
+  .map(s => s.getText(ast)).join('\n') + '\nglobalThis.testApi = { startFlash, mode, singlePath, manualBoot };',
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 const calls = [];
 const watchers = [];
@@ -36,20 +36,14 @@ vm.runInContext(code, context);
 
 (async () => {
   const api = context.testApi;
-  assert.equal(api.manualBoot, true);
-  assert.match(api.bootPolicyNotice, /RTS\/DTR/);
-  assert.match(api.bootPolicyNotice, /不可用/);
-  assert.match(api.bootPolicyNotice, /手动进入 ISP/);
-  assert.equal(storageReads.some(key => key.includes('manual_boot')), false,
-    'Unsafe legacy preference must never select automatic reset');
-  // Target/tab changes must not restore a previously persisted automatic mode.
+  assert.equal(api.manualBoot.value, false);
   watchers.find(w => Array.isArray(w.source)).callback(['new-tab', 'MOCK-PORT-2']);
   api.mode.value = 'single';
   api.singlePath.value = 'mock-firmware.bin';
   await api.startFlash();
   assert.equal(calls.length, 1);
   assert.equal(calls[0].name, 'ing_start_flash');
-  assert.equal(calls[0].payload.request.manual_boot, true);
+  assert.equal(calls[0].payload.request.manual_boot, false);
   assert.equal(calls[0].payload.request.timeout_sec, 15);
 
   const template = compileTemplate({ source: descriptor.template.content, filename: 'IngSerialFlasher.vue', id: 'test' });
@@ -57,12 +51,11 @@ vm.runInContext(code, context);
   function nodes(node) { return [node, ...[...(node.children || []), ...(node.branches || [])].flatMap(nodes)]; }
   const elements = nodes(template.ast);
   const checkbox = elements.find(n => n.tag === 'input' && n.props.some(p => p.name === 'aria-describedby' && p.value?.content === 'ing-boot-policy'));
-  assert.ok(checkbox, 'Manual boot control must explain its disabled state');
-  assert.ok(checkbox.props.some(p => p.type === 6 && p.name === 'disabled'));
-  assert.ok(checkbox.props.some(p => p.type === 7 && p.name === 'bind' && p.arg?.content === 'checked' && p.exp?.content.includes('manualBoot')));
+  assert.ok(checkbox, 'Manual boot control checkbox exists and enabled');
+  assert.ok(!checkbox.props.some(p => p.type === 6 && p.name === 'disabled'), 'Must not be disabled');
   assert.ok(elements.some(n => n.tag === 'p' && n.props.some(p => p.name === 'id' && p.value?.content === 'ing-boot-policy')),
-    'Policy notice must be persistent visible text, not just a tooltip');
-  console.log('PASS production ING flash UI: manual-only request, disabled control, visible reason, legacy preference ignored');
+    'Policy notice must be present');
+  console.log('PASS production ING flash UI: automatic reset enabled by default, interactive manualBoot toggle');
   await testPyocdCapabilities();
 })().catch(error => { console.error(error); process.exitCode = 1; });
 

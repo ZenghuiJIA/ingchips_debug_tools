@@ -52,10 +52,16 @@ const hilPlan = moduleFromSource('src/utils/hilPlan.ts');
     assert.equal(rule.hits, 1);
   });
   await test('negations/questions/incomplete writes never execute hardware', () => {
-    for (const input of ['不要复位', '怎样复位单片机？', '不要写内存 0x20000000', '写入 RAM 内存 0x20000000', 'write memory 0x20000000']) {
+    for (const input of ['不要复位', '怎样复位单片机？', '不要写内存 0x20000000', '写入 RAM 内存 0x20000000', 'write memory 0x20000000', '不要扫描串口', '怎样读取串口？', '发送串口数据']) {
       assert.equal(contracts.parseHardwareIntent(input), null);
     }
     assert.equal(contracts.parseHardwareIntent('复位单片机并重启').action, 'reset');
+    assert.equal(contracts.parseHardwareIntent('扫描可用串口').action, 'list_serial_ports');
+    assert.equal(contracts.parseHardwareIntent('读取串口最新数据').action, 'read_serial_data');
+    assert.equal(contracts.parseHardwareIntent('发送串口数据 01 03 00 00').action, 'send_serial_data');
+    assert.equal(contracts.parseHardwareIntent('发送串口数据 01 03 00 00').data, '01 03 00 00');
+    assert.equal(contracts.parseHardwareIntent('读取 CPU 核心寄存器').action, 'read_core_registers');
+    assert.equal(contracts.parseHardwareIntent('SWD 目标复位').action, 'reset_target_swd');
     assert.throws(() => contracts.parseHardwareIntent('write memory 0x20000001 0x12'));
   });
   await test('actual command encoder rejects malformed HEX and encodes CRLF', () => {

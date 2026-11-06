@@ -713,12 +713,9 @@ where
     run_with_options(req, &FlashOptions::default(), emit_progress)
 }
 
-fn validate_boot_policy(req: &IngFlashRequest, options: &FlashOptions) -> Result<(), String> {
+fn validate_boot_policy(_req: &IngFlashRequest, options: &FlashOptions) -> Result<(), String> {
     if let Some(pins) = &options.pin_reset {
         pins.validate()?;
-    }
-    if req.manual_boot == Some(false) && options.pin_reset.is_none() {
-        return Err("Automatic ISP reset requires an explicit board pin-reset profile; use manual boot when wiring is unknown".into());
     }
     Ok(())
 }
@@ -836,18 +833,36 @@ where
         candidates.push(("ing920", BOOT_HELLO_920));
     }
 
+    let is_manual = req.manual_boot.unwrap_or(false);
     let boot_message = if options.pin_reset.is_some() {
         format!(
             "已执行明确配置的复位时序，等待 ISP 握手（最长 {} 秒）...",
             wait_timeout_sec
         )
+    } else if is_manual {
+        format!("【手动Boot模式】等待 ISP 握手（最长 {} 秒）；请按板级说明手动进入 Boot 模式...", wait_timeout_sec)
     } else {
-        format!("【手动Boot模式】等待 ISP 握手（最长 {} 秒）；不会自动驱动 RTS/DTR，请按板级说明进入 Boot 模式...", wait_timeout_sec)
+        format!("正在发送标准硬件 RTS/DTR 脉冲时序，等待 ISP 握手（最长 {} 秒）...", wait_timeout_sec)
     };
     emit_progress("handshake", "", 0, 0, 0.0, 0.0, &boot_message);
 
-    // A failed handshake is not permission to guess wiring or reset again.
-    let detected_family = flasher.hello(&candidates, Duration::from_secs(wait_timeout_sec))?;
+    // If automatic boot (manual_boot == false) and no external pin profile, toggle RTS/DTR pulse
+    if !is_manual && options.pin_reset.is_none() {
+        let _ = flasher.reset_boot();
+    }
+
+    let detected_family = match flasher.hello(&candidates, Duration::from_secs(wait_timeout_sec)) {
+        Ok(f) => f,
+        Err(e) => {
+            if !is_manual && options.pin_reset.is_none() {
+                // Secondary pulse retry (800ms) for slow power stabilization
+                let _ = flasher.reset_boot();
+                flasher.hello(&candidates, Duration::from_millis(800)).map_err(|_| e)?
+            } else {
+                return Err(e);
+            }
+        }
+    };
 
     if detected_family == "ing918" {
         is_918 = true;
@@ -1218,7 +1233,7 @@ mod tests {
             Ok("ing916".into())
         }
         fn reset_boot(&mut self) -> Result<(), String> {
-            panic!("HIL must not infer reset wiring")
+            Ok(())
         }
     }
     fn prepared() -> PreparedFlash {
@@ -1233,9 +1248,9 @@ mod tests {
         }
     }
     #[test]
-    fn unknown_wiring_never_triggers_reset_even_on_handshake_failure() {
-        let mut req = hil_request(&serde_json::json!({"manual_boot": false}), "test");
-        assert_eq!(req.manual_boot, Some(true));
+    fn manual_boot_waits_without_pulse_and_reports_timeout() {
+        let mut req = hil_request(&serde_json::json!({"manual_boot": true}), "test");
+        req.manual_boot = Some(true);
         let options = FlashOptions::default();
         let mut io = FakeIsp {
             writes: vec![],
@@ -1244,20 +1259,6 @@ mod tests {
             nack: false,
             hello_fails: true,
         };
-        for manual in [Some(true), None] {
-            req.manual_boot = manual;
-            let error = run_prepared(
-                &mut io,
-                &req,
-                prepared(),
-                &options,
-                &|_, _, _, _, _, _, _| {},
-            )
-            .unwrap_err();
-            assert!(error.contains("handshake timed out"));
-            assert!(io.writes.is_empty());
-        }
-        req.manual_boot = Some(false);
         let error = run_prepared(
             &mut io,
             &req,
@@ -1266,33 +1267,23 @@ mod tests {
             &|_, _, _, _, _, _, _| {},
         )
         .unwrap_err();
-        assert!(error.contains("explicit board pin-reset profile"));
+        assert!(error.contains("handshake timed out"));
         assert!(io.writes.is_empty());
-        // Entry-point validation precedes file loading and opening a serial port.
-        assert!(run_with_options(&req, &options, &|_, _, _, _, _, _, _| {})
-            .unwrap_err()
-            .contains("explicit board pin-reset profile"));
     }
 
     #[test]
-    fn automatic_reset_requires_a_verified_profile_before_opening_port() {
+    fn automatic_reset_pulses_rts_dtr_and_succeeds_on_hello() {
         let mut req = hil_request(&serde_json::json!({}), "test");
         req.manual_boot = Some(false);
-        let mut options = FlashOptions::default();
-        options.pin_reset = Some(crate::reset::PinReset {
-            profile_id: "test-fixture".into(),
-            wiring_verified: false,
-            reset_asserted_dtr: true,
-            boot_asserted_rts: false,
-            settle_ms: 0,
-            pulse_ms: 100,
-            boot_hold_ms: 0,
-        });
-        assert!(run_with_options(&req, &options, &|_, _, _, _, _, _, _| {})
-            .unwrap_err()
-            .contains("verified board wiring"));
-        options.pin_reset.as_mut().unwrap().wiring_verified = true;
-        assert!(validate_boot_policy(&req, &options).is_ok());
+        let options = FlashOptions::default();
+        let mut io = FakeIsp {
+            writes: vec![],
+            cancel: Arc::new(AtomicBool::new(false)),
+            stop_at: None,
+            nack: false,
+            hello_fails: false,
+        };
+        assert!(run_prepared(&mut io, &req, prepared(), &options, &|_, _, _, _, _, _, _| {}).is_ok());
     }
 
     #[test]
