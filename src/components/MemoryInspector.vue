@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted, watch } from 'vue';
+import { ref, shallowRef, triggerRef, computed, onUnmounted, onDeactivated, watch } from 'vue';
+import { parseHexUint } from '../utils/hardwareContracts';
 import { safeInvoke } from '../utils/ipc';
 import { t } from '../utils/i18n';
 import { usePersistentState } from '../composables/usePersistentState';
@@ -46,8 +47,9 @@ const refreshIntervalMs = usePersistentState<number>('hil_mem_refresh_interval',
 const errorMessage = ref<string>('');
 const lastReadTime = ref<string>('');
 
-const memoryBytes = ref<number[]>([]);
-const previousBytes = ref<number[]>([]);
+const memoryBytes = shallowRef<number[]>([]);
+const snapshot = ref<{ address: number; probeId: string | null; frequency: number } | null>(null);
+const previousBytes = shallowRef<number[]>([]);
 const changedIndices = ref<Set<number>>(new Set());
 
 // --- Selection State (supports multi-byte range selection) ---
@@ -80,11 +82,7 @@ const loadStatus = ref<string>('');
 
 // --- Parsed Base Address ---
 const parsedBaseAddress = computed<number>(() => {
-  const raw = addressInput.value.trim();
-  if (raw.toLowerCase().startsWith('0x')) {
-    return parseInt(raw, 16) || 0;
-  }
-  return parseInt(raw, 16) || 0;
+  return snapshot.value?.address ?? 0;
 });
 
 // Quick address shortcuts
@@ -102,17 +100,23 @@ function setQuickAddress(addr: string) {
 
 // --- Read Memory (Manual trigger required, no auto-read on tab switch) ---
 async function handleReadMemory() {
-  if (isLoading.value) return;
+  if (isLoading.value || isWritingByte.value) return;
   isLoading.value = true;
   errorMessage.value = '';
 
   try {
-    const res: any = await safeInvoke('pyocd_read_memory', {
-      address: addressInput.value.trim(),
-      count: Number(byteCount.value) || 256,
+    const target = {
+      address: parseHexUint(addressInput.value),
       probeId: selectedProbeId.value || null,
-      targetOverride: null,
       frequency: swdFrequencyHz.value || 4000000,
+    };
+    if (!target.probeId) throw new Error('请明确选择探针后读取内存');
+    const res: any = await safeInvoke('pyocd_read_memory', {
+      address: `0x${target.address.toString(16)}`,
+      count: Number(byteCount.value) || 256,
+      probeId: target.probeId,
+      targetOverride: null,
+      frequency: target.frequency,
     });
 
     const newBytes: number[] = res.bytes || [];
@@ -126,6 +130,8 @@ async function handleReadMemory() {
       }
     }
 
+    snapshot.value = target;
+    editingStartIndex.value = null;
     previousBytes.value = [...newBytes];
     memoryBytes.value = newBytes;
     changedIndices.value = newChanged;
@@ -225,7 +231,7 @@ function cancelEdit() {
 }
 
 async function commitEditChunk() {
-  if (editingStartIndex.value === null) return;
+  if (editingStartIndex.value === null || isWritingByte.value || isLoading.value) return;
   const startIdx = editingStartIndex.value;
   const size = editingChunkSize.value;
   const rawHex = editingValue.value.trim();
@@ -238,22 +244,30 @@ async function commitEditChunk() {
 
   isWritingByte.value = true;
   try {
+    const target = snapshot.value && { ...snapshot.value };
+    if (!target || target.address !== parseHexUint(addressInput.value) || target.probeId !== (selectedProbeId.value || null)) {
+      throw new Error('地址或探针已改变，请重新读取内存后编辑');
+    }
+    if (startIdx + size > memoryBytes.value.length) throw new Error('写入超出快照范围');
     // Parse Little-Endian: rawHex has MSB first, so chunk[0] is the last 2 hex chars
     for (let i = 0; i < size; i++) {
       const hexByte = rawHex.slice((size - 1 - i) * 2, (size - i) * 2);
       const val = parseInt(hexByte, 16);
-      const addrHex = `0x${(parsedBaseAddress.value + startIdx + i).toString(16).toUpperCase()}`;
+      const addrHex = `0x${(target.address + startIdx + i).toString(16).toUpperCase()}`;
       await safeInvoke('pyocd_write_memory_byte', {
         address: addrHex,
         value: val,
-        probeId: selectedProbeId.value || null,
+        probeId: target.probeId,
         targetOverride: null,
+        frequency: target.frequency,
       });
       memoryBytes.value[startIdx + i] = val;
       previousBytes.value[startIdx + i] = val;
     }
     editingStartIndex.value = null;
     editingValue.value = '';
+    triggerRef(memoryBytes);
+    triggerRef(previousBytes);
   } catch (err: any) {
     alert(t('mem_err_write', { err }));
   } finally {
@@ -464,9 +478,20 @@ async function handleExecuteLoad() {
 // --- Lifecycle (No auto-reading on mount per user requirement) ---
 
 
+onDeactivated(() => {
+  autoRefresh.value = false;
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+});
+
 onUnmounted(() => {
   if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-  if (diffFadeTimer) clearTimeout(diffFadeTimer);
+  if (diffFadeTimer) {
+    clearTimeout(diffFadeTimer);
+    diffFadeTimer = null;
+  }
+  memoryBytes.value = [];
+  previousBytes.value = [];
+  changedIndices.value = new Set();
 });
 
 // Helper for formatted chunk rendering

@@ -1,0 +1,13 @@
+schema_version: 2
+name: protocol_request_example
+bench:
+  port_name: COM3
+  baud_rate: 115200
+steps:
+  - id: request
+    action: protocol_request
+    timeout_ms: 1000
+    params:
+      protocol: ./protocol-aa55.json
+      values: {seq: 1, value: 0, status: 0}
+      expected: {seq: 1, status: 0}

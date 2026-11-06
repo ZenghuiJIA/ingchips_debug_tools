@@ -2,14 +2,14 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { safeInvoke, isTauri } from '../utils/ipc';
 import { t } from '../utils/i18n';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { hilCall, displayReport, isHilSubmissionRejected, type HilStatus, type HilEvent, type HilReport } from '../utils/hilClient';
+import { normalizePipeline, pipelineSnapshot, HilRunGeneration } from '../utils/hilPlan';
 import type {
   HilTestPipeline,
   HilTestStep,
   HilStepAction,
   HilStepResult,
   HilExecutionReport,
-  SerialRxPayload,
   PortInfo,
   ProbeInfo
 } from '../types';
@@ -44,6 +44,10 @@ const actionTemplates: Array<{
   color: string;
   defaultParams: any;
 }> = [
+  { action: 'serial_open', nameKey: '打开串口采集', descKey: '在烧录和复位前持续采集日志', icon: Terminal,
+    color: 'text-cyan-400', defaultParams: { port_name: '', baud_rate: 115200 } },
+  { action: 'hil_observe', nameKey: 'HILv1 自测观察', descKey: '同时检查 BOOT、HB、RESULT 与 DONE', icon: Activity,
+    color: 'text-emerald-400', defaultParams: { port_name: '', baud_rate: 115200, timeout_ms: 1800000, boot_timeout_ms: 10000, idle_timeout_ms: 15000, boot_count: 1, continue_on_failure: true } },
   {
     action: 'flash_firmware',
     nameKey: 'seq_act_flash',
@@ -66,7 +70,7 @@ const actionTemplates: Array<{
     icon: RotateCcw,
     color: 'text-rose-400 border-rose-800/40 bg-rose-950/20',
     defaultParams: {
-      reset_method: 'pin_dtr_pulse',
+      reset_method: 'swd_soft_reset',
       pulse_ms: 100,
       port_name: '',
       probe_id: ''
@@ -83,7 +87,8 @@ const actionTemplates: Array<{
       baud_rate: 115200,
       send_data: 'AT+PING',
       send_format: 'string',
-      send_ending: 'crlf'
+      send_ending: 'crlf',
+      character_delay_ms: 0
     }
   },
   {
@@ -145,6 +150,8 @@ const actionTemplates: Array<{
 
 // Current pipeline state
 const pipeline = ref<HilTestPipeline>({
+  schema_version: 2,
+  bench: {},
   name: 'HIL_Regression_Pipeline_v1',
   version: '1.2.2',
   description: 'Automated Hardware-in-the-Loop test suite',
@@ -180,26 +187,71 @@ async function refreshProbes() {
 
 // Execution state
 const isRunning = ref<boolean>(false);
-const abortRequested = ref<boolean>(false);
-const currentStepIndex = ref<number>(-1);
+const isSubmitting = ref(false);
+const isStopping = ref(false);
 const currentLoopIndex = ref<number>(0);
 const stepResults = ref<Record<string, HilStepResult>>({});
 const runnerLogs = ref<Array<{ id: number; time: string; text: string; status: 'info' | 'success' | 'error' | 'warn' }>>([]);
 let nextLogId = 1;
 
-// Global buffer for serial listening
-const serialRxBuffers = ref<Record<string, string>>({});
-let unlistenSerialRx: UnlistenFn | null = null;
 
 // Report Modal
 const isReportModalOpen = ref<boolean>(false);
 const executionReport = ref<HilExecutionReport | null>(null);
 
+
 // Active selected step for property editing
 const selectedStepId = ref<string | null>(null);
-const selectedStep = computed(() => {
-  return pipeline.value.steps.find(s => s.id === selectedStepId.value) || null;
-});
+const selectedStep = computed(() => pipeline.value.steps.find(step => step.id === selectedStepId.value) || null);
+function ensurePinReset(step: HilTestStep) {
+  // Only an explicit user change creates pin-reset settings; selection/import is read-only.
+  if (step.params.reset_method !== 'swd_soft_reset' && !step.params.pin_reset) {
+    step.params.pin_reset = { profile_id: '', wiring_verified: false, reset_asserted_dtr: true, boot_asserted_rts: true, settle_ms: 50, pulse_ms: 100, boot_hold_ms: 50 };
+  }
+}
+const sourceVisible = ref(false);
+const sourceText = ref('');
+const sourceError = ref('');
+const sourceApplying = ref(false);
+const importError = ref('');
+const isImporting = ref(false);
+function editSource() {
+  sourceText.value = JSON.stringify(pipeline.value, null, 2);
+  sourceError.value = '';
+  sourceVisible.value = true;
+}
+async function applySource() {
+  if (sourceApplying.value) return;
+  sourceApplying.value = true;
+  sourceError.value = '';
+  try {
+    const normalized = normalizePipeline(JSON.parse(sourceText.value));
+    await hilCall('validate_hiltest', { document: normalized });
+    pipeline.value = normalized;
+    selectedStepId.value = normalized.steps[0]?.id || null;
+    sourceVisible.value = false;
+    addLog('脚本已校验并加载；参数、嵌套与旧版语义保留，当前运行不受影响', 'success');
+  } catch (err) {
+    sourceError.value = '脚本未应用: ' + String(err);
+    addLog(sourceError.value, 'error');
+  } finally { sourceApplying.value = false; }
+}
+
+async function importPipelineText(text: string) {
+  if (isImporting.value) return;
+  isImporting.value = true;
+  importError.value = '';
+  try {
+    const normalized = normalizePipeline(JSON.parse(text));
+    await hilCall('validate_hiltest', { document: normalized });
+    pipeline.value = normalized;
+    selectedStepId.value = normalized.steps[0]?.id || null;
+    addLog('已校验并导入工程: ' + normalized.name + '；运行中任务仍使用原快照', 'success');
+  } catch (err) {
+    importError.value = '工程未导入: ' + String(err);
+    addLog(importError.value, 'error');
+  } finally { isImporting.value = false; }
+}
 
 function addLog(text: string, status: 'info' | 'success' | 'error' | 'warn' = 'info') {
   const time = new Date().toTimeString().split(' ')[0] + '.' + new Date().getMilliseconds().toString().padStart(3, '0');
@@ -223,11 +275,7 @@ async function refreshPorts() {
 // Add a step from template
 function addStepFromTemplate(tmpl: typeof actionTemplates[0]) {
   const newId = `step_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  const defaultPort = availablePorts.value[0]?.port_name || 'COM1';
-  const initialParams = { ...tmpl.defaultParams };
-  if ('port_name' in initialParams && !initialParams.port_name) {
-    initialParams.port_name = defaultPort;
-  }
+  const initialParams = JSON.parse(JSON.stringify(tmpl.defaultParams));
 
   const step: HilTestStep = {
     id: newId,
@@ -235,7 +283,7 @@ function addStepFromTemplate(tmpl: typeof actionTemplates[0]) {
     action: tmpl.action,
     enabled: true,
     params: initialParams,
-    timeout_ms: initialParams.timeout_ms || 3000,
+    timeout_ms: initialParams.timeout_ms || (tmpl.action === 'flash_firmware' ? 300000 : 3000),
     on_failure: 'abort',
     retry_count: 0
   };
@@ -298,535 +346,283 @@ function savePipelineToFile() {
 }
 
 function openPipelineFromFile() {
+  if (isImporting.value) return;
+  importError.value = '';
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.hiltest,.json';
-  input.onchange = (e: any) => {
-    const file = e.target.files?.[0];
+  input.onchange = () => {
+    const file = input.files?.[0];
     if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { importError.value = '工程未导入：文件超过 2 MiB 编辑器上限'; return; }
     const reader = new FileReader();
-    reader.onload = (re) => {
-      try {
-        const parsed = JSON.parse(re.target?.result as string);
-        if (parsed.steps && Array.isArray(parsed.steps)) {
-          pipeline.value = parsed;
-          selectedStepId.value = parsed.steps[0]?.id || null;
-          addLog(`已成功加载工程: ${parsed.name} (${parsed.steps.length} 个步骤)`, 'success');
-        } else {
-          alert('无效的 .hiltest 工程文件格式');
-        }
-      } catch (err) {
-        alert(`工程解析失败: ${err}`);
-      }
-    };
+    reader.onload = () => { void importPipelineText(String(reader.result ?? '')); };
+    reader.onerror = () => { importError.value = '工程文件读取失败: ' + String(reader.error); addLog(importError.value, 'error'); };
+    reader.onabort = () => { importError.value = '工程文件读取已取消'; };
     reader.readAsText(file);
   };
   input.click();
 }
 
-// --- Step Execution Logic ---
-
-async function executeSingleStep(step: HilTestStep): Promise<HilStepResult> {
-  const startTime = Date.now();
-  const res: HilStepResult = {
-    step_id: step.id,
-    step_name: step.name,
-    status: 'running',
-    duration_ms: 0,
-    timestamp: new Date().toLocaleTimeString()
-  };
-
-  try {
-    switch (step.action) {
-      case 'delay': {
-        const ms = Number(step.params.delay_ms) || 500;
-        addLog(`[${step.name}] 正在延时等待 ${ms} ms...`, 'info');
-        await new Promise(r => setTimeout(r, ms));
-        res.status = 'pass';
-        res.message = `延时完成 (${ms}ms)`;
-        break;
-      }
-
-      case 'flash_firmware': {
-        const fPath = step.params.file_path;
-        if (!fPath) throw new Error('固件文件路径不能为空');
-        addLog(`[${step.name}] 开始烧录固件: ${fPath}`, 'info');
-
-        if (step.params.flash_type === 'ing_ini') {
-          // Parse & execute ING ini flash
-          await safeInvoke('ing_start_flash', {
-            request: {
-              port_name: step.params.port_name || availablePorts.value[0]?.port_name || 'COM1',
-              mode: 'ini',
-              ini_path: fPath,
-              single_file_path: null,
-              single_address: null,
-              family: 'auto',
-              target_baud: Number(step.params.baud_rate) || 921600,
-              manual_boot: false,
-              timeout_sec: 15
-            }
-          });
-          // Wait briefly for flashing initialization
-          await new Promise(r => setTimeout(r, 1500));
-        } else {
-          // Default PyOCD flash
-          await safeInvoke('pyocd_flash_firmware', {
-            filePath: fPath,
-            targetOverride: step.params.target_device || null,
-            probeId: step.params.probe_id || null,
-            packPath: null,
-            frequency: 10000000
-          });
-        }
-        res.status = 'pass';
-        res.message = `固件烧录成功 (${fPath})`;
-        break;
-      }
-
-      case 'reset_target': {
-        const method = step.params.reset_method || 'pin_dtr_pulse';
-        const pName = step.params.port_name || availablePorts.value[0]?.port_name;
-        addLog(`[${step.name}] 执行复位: ${method} (端口: ${pName || '默认'})`, 'info');
-
-        if (method === 'swd_soft_reset') {
-          await safeInvoke('pyocd_reset_target', {
-            halt: false,
-            probeId: step.params.probe_id || null,
-            targetOverride: null
-          });
-        } else if (method === 'bootloader_reset') {
-          await safeInvoke('execute_reset_sequence', { seqType: 'bootloader_reset', portName: pName || null });
-        } else {
-          // DTR pulse reset
-          const pulse = Number(step.params.pulse_ms) || 100;
-          await safeInvoke('set_dtr', { level: true, portName: pName || null });
-          await new Promise(r => setTimeout(r, pulse));
-          await safeInvoke('set_dtr', { level: false, portName: pName || null });
-        }
-        res.status = 'pass';
-        res.message = `复位信号触发成功 (${method})`;
-        break;
-      }
-
-      case 'serial_send': {
-        const pName = step.params.port_name || availablePorts.value[0]?.port_name;
-        const baud = Number(step.params.baud_rate) || 115200;
-        if (pName) {
-          try {
-            await safeInvoke('open_serial_port', { portName: pName, baudRate: baud });
-          } catch (_) {}
-        }
-
-        const textToSend = step.params.send_data || '';
-        let bytes: number[] = [];
-
-        if (step.params.send_format === 'hex') {
-          const cleanHex = textToSend.replace(/\s+/g, '');
-          for (let i = 0; i < cleanHex.length; i += 2) {
-            bytes.push(parseInt(cleanHex.substring(i, i + 2), 16));
-          }
-        } else {
-          let payload = textToSend;
-          if (step.params.send_ending === 'crlf') payload += '\r\n';
-          else if (step.params.send_ending === 'lf') payload += '\n';
-          bytes = Array.from(new TextEncoder().encode(payload));
-        }
-
-        addLog(`[${step.name}] 串口发送: "${textToSend}" -> 端口 [${pName}] @ ${baud}bps`, 'info');
-        await safeInvoke('send_serial_data', { data: bytes, portName: pName });
-        res.status = 'pass';
-        res.message = `串口数据发送成功 (${bytes.length} 字节)`;
-        break;
-      }
-
-      case 'serial_wait_match': {
-        const pName = step.params.port_name || availablePorts.value[0]?.port_name || '';
-        const baud = Number(step.params.baud_rate) || 115200;
-        if (pName) {
-          try {
-            await safeInvoke('open_serial_port', { portName: pName, baudRate: baud });
-          } catch (_) {}
-        }
-        const pattern = step.params.pattern || '';
-        const timeout = Number(step.params.timeout_ms) || 3000;
-        const matchType = step.params.match_type || 'contains';
-
-        addLog(`[${step.name}] 等待串口 [${pName}] 匹配 "${pattern}" (超时 ${timeout}ms)...`, 'info');
-
-        // Clear local buffer before wait
-        serialRxBuffers.value[pName] = '';
-
-        const waitStart = Date.now();
-        let matched = false;
-        let captured = '';
-
-        while (Date.now() - waitStart < timeout) {
-          if (abortRequested.value) throw new Error('用户中止执行');
-          const currentBuf = serialRxBuffers.value[pName] || '';
-          captured = currentBuf;
-
-          if (matchType === 'contains' && currentBuf.includes(pattern)) {
-            matched = true;
-            break;
-          } else if (matchType === 'regex') {
-            try {
-              if (new RegExp(pattern).test(currentBuf)) {
-                matched = true;
-                break;
-              }
-            } catch (_) {}
-          }
-          await new Promise(r => setTimeout(r, 50));
-        }
-
-        res.expected_output = pattern;
-        res.actual_output = captured.slice(-300); // Last 300 chars
-
-        if (matched) {
-          res.status = 'pass';
-          res.message = `成功匹配预期内容: "${pattern}"`;
-          addLog(`[${step.name}] 匹配成功!`, 'success');
-        } else {
-          res.status = 'fail';
-          res.message = `等待超时 (${timeout}ms)，未在串口输出中捕获到 "${pattern}"`;
-          addLog(`[${step.name}] 匹配超时失败!`, 'error');
-        }
-        break;
-      }
-
-      case 'swd_read_assert': {
-        const addr = step.params.memory_addr || '0x20000000';
-        const expected = parseInt(step.params.expected_value || '0', 16);
-        const op = step.params.operator || '==';
-
-        addLog(`[${step.name}] SWD 读取内存地址 ${addr} 并比对...`, 'info');
-        const readRes: any = await safeInvoke('pyocd_read_memory', {
-          address: addr,
-          count: 4,
-          probeId: step.params.probe_id || null,
-          targetOverride: null
-        });
-
-        const bytes: number[] = readRes.bytes || [0, 0, 0, 0];
-        // Little endian uint32
-        const actualVal = (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-        const actualHex = '0x' + actualVal.toString(16).toUpperCase().padStart(8, '0');
-        const expectedHex = '0x' + expected.toString(16).toUpperCase().padStart(8, '0');
-
-        res.actual_output = actualHex;
-        res.expected_output = `${op} ${expectedHex}`;
-
-        let passed = false;
-        if (op === '==') passed = actualVal === expected;
-        else if (op === '!=') passed = actualVal !== expected;
-        else if (op === '>') passed = actualVal > expected;
-        else if (op === '<') passed = actualVal < expected;
-        else if (op === '>=') passed = actualVal >= expected;
-        else if (op === '<=') passed = actualVal <= expected;
-
-        if (passed) {
-          res.status = 'pass';
-          res.message = `内存断言通过: ${addr} = ${actualHex} (${op} ${expectedHex})`;
-          addLog(`[${step.name}] 断言通过: ${actualHex}`, 'success');
-        } else {
-          res.status = 'fail';
-          res.message = `内存断言失败: 实际读取值 ${actualHex} 不满足 ${op} ${expectedHex}`;
-          addLog(`[${step.name}] 断言失败: 实际 ${actualHex} != 预期 ${expectedHex}`, 'error');
-        }
-        break;
-      }
-
-      case 'svd_check_reg': {
-        const periph = step.params.peripheral || 'UART0';
-        const reg = step.params.register || 'LSR';
-        const expected = parseInt(step.params.expected_reg_val || '0', 16);
-
-        addLog(`[${step.name}] 检查 SVD 寄存器 [${periph}->${reg}]...`, 'info');
-        // Fallback demo/mock or direct SVD read
-        const readVal: any = await safeInvoke('svd_read_register', {
-          address: '0x40000000', // Mock/direct fallback
-          probeId: step.params.probe_id || null,
-          targetOverride: null
-        }).catch(() => ({ value_uint: expected }));
-
-        const actualUint = readVal.value_uint !== undefined ? readVal.value_uint : expected;
-        res.actual_output = '0x' + actualUint.toString(16).toUpperCase();
-        res.expected_output = '0x' + expected.toString(16).toUpperCase();
-
-        if (actualUint === expected) {
-          res.status = 'pass';
-          res.message = `寄存器 ${periph}->${reg} 符合预期 (${res.actual_output})`;
-        } else {
-          res.status = 'fail';
-          res.message = `寄存器 ${periph}->${reg} 期望 ${res.expected_output}，实际 ${res.actual_output}`;
-        }
-        break;
-      }
-    }
-  } catch (err: any) {
-    res.status = 'fail';
-    res.message = String(err.message || err);
-    addLog(`[${step.name}] 异常出错: ${res.message}`, 'error');
-  } finally {
-    res.duration_ms = Date.now() - startTime;
-  }
-
-  return res;
-}
-
-// Main execution coordinator
-async function runPipeline() {
-  if (isRunning.value) return;
-  if (pipeline.value.steps.length === 0) {
-    alert(t('seq_empty_steps'));
-    return;
-  }
-
+// The backend owns execution; edits affect only the next submitted snapshot.
+const runId = ref(sessionStorage.getItem('hil.activeRun') || '');
+const runState = ref('');
+const cancellationDetail = ref('');
+const reportDir = ref('');
+const activeStepId = ref('');
+const runGeneration = new HilRunGeneration();
+let eventCursor = 0;
+let pollTimer: ReturnType<typeof setTimeout> | undefined;
+let disposed = false;
+const serialViews = new Map<string, TextDecoder>();
+// Restore the guard synchronously, before mounted device enumeration can yield.
+if (runId.value) {
   isRunning.value = true;
-  abortRequested.value = false;
-  stepResults.value = {};
-  clearLogs();
+  runState.value = 'UNKNOWN';
+  cancellationDetail.value = '正在恢复已记录任务状态；尚未确认任务结束。';
+}
+if (sessionStorage.getItem('hil.submissionUnknown') === 'true' && !runId.value) {
+  isRunning.value = true;
+  runState.value = 'UNKNOWN';
+  cancellationDetail.value = '上次提交结果未知且未获得任务 ID；请先核查后台任务，禁止重复提交。';
+}
 
-  const totalLoops = Math.max(1, Number(pipeline.value.loop_count) || 1);
-  const startTime = new Date();
-  addLog(`=== 开始运行测试流水线: ${pipeline.value.name} (总循环: ${totalLoops} 次) ===`, 'info');
+function rememberRun(key: string, value?: string) {
+  try {
+    if (value === undefined) sessionStorage.removeItem(key);
+    else sessionStorage.setItem(key, value);
+  } catch (err) { addLog('运行状态无法持久化，关闭页面后需人工核查后台任务: ' + String(err), 'warn'); }
+}
 
-  const accumulatedResults: HilStepResult[] = [];
+function restoreStoredRun() {
+  if (isSubmitting.value || disposed) return;
+  try {
+    const id = runId.value || sessionStorage.getItem('hil.activeRun');
+    if (!id) { addLog('没有已记录任务 ID；请核查后台任务，不能据此认定任务未启动。', 'warn'); return; }
+    runId.value = id;
+    isRunning.value = true;
+    if (pollTimer) clearTimeout(pollTimer);
+    void pollRun(id, runGeneration.next());
+  } catch (err) { addLog('无法恢复任务记录: ' + String(err), 'error'); }
+}
 
-  for (let loop = 1; loop <= totalLoops; loop++) {
-    currentLoopIndex.value = loop;
-    if (totalLoops > 1) {
-      addLog(`--- 执行第 ${loop}/${totalLoops} 次循环 ---`, 'info');
-    }
+function isCurrentRun(id: string, token: number): boolean {
+  return !disposed && isRunning.value && runId.value === id && runGeneration.current(token);
+}
 
-    for (let i = 0; i < pipeline.value.steps.length; i++) {
-      if (abortRequested.value) break;
-      const step = pipeline.value.steps[i];
-      currentStepIndex.value = i;
+function receiveRunEvent(event: HilEvent) {
+  if (event.kind === 'step.started' && event.step_id) {
+    stepResults.value[event.step_id] = { step_id: event.step_id, step_name: event.step_id, status: 'running', duration_ms: 0, timestamp: '' };
+  } else if (event.kind === 'step.finished' && event.result) {
+    stepResults.value[event.result.step_id] = event.result;
+    addLog(event.result.step_name + ': ' + (event.result.message || event.result.status), event.result.status === 'pass' ? 'success' : 'error');
+  } else if (event.kind === 'serial' && event.data) {
+    const port = event.port || 'UART';
+    if (!serialViews.has(port)) serialViews.set(port, new TextDecoder());
+    const bytes = Uint8Array.from(event.data.match(/.{2}/g) || [], v => parseInt(v, 16));
+    const text = serialViews.get(port)!.decode(bytes, { stream: true });
+    addLog('[' + port + '] ' + text, 'info');
+  } else if (event.line) addLog(event.line, 'info');
+}
 
-      if (!step.enabled) {
-        stepResults.value[step.id] = {
-          step_id: step.id,
-          step_name: step.name,
-          status: 'skipped',
-          duration_ms: 0,
-          message: '步骤已禁用，跳过',
-          timestamp: new Date().toLocaleTimeString()
-        };
-        continue;
+async function pollRun(id: string, token: number) {
+  if (!id || !isCurrentRun(id, token)) return;
+  let delay = 500;
+  try {
+    const state = await hilCall<HilStatus>('get_hiltest_status', { run_id: id });
+    if (!isCurrentRun(id, token)) return;
+    if (state.run_id !== id) throw new Error('后台返回了不匹配的任务 ID');
+    runState.value = state.state;
+    cancellationDetail.value = state.cancel_detail || state.stop_detail || (state.flash_state ? `烧录状态 ${state.flash_state.state} · 擦写停止确认 ${state.flash_state.erase_program_stopped ? '是' : '未确认'} · 目标暂停 ${state.flash_state.target_halted ? '是' : '未确认'}` : '');
+    reportDir.value = state.report_dir;
+    currentLoopIndex.value = state.loop || 0;
+    activeStepId.value = state.current_step || '';
+    // Drain at most 800 events per turn; yield to the UI before another bounded batch.
+    // A terminal state is not permission to discard the event tail or release the run guard.
+    let drained = false;
+    for (let page = 0; page < 4; page++) {
+      const after = eventCursor;
+      const batch = await hilCall<{ events: HilEvent[]; cursor: number }>('get_hiltest_events', { run_id: id, after, limit: 200 });
+      if (!isCurrentRun(id, token)) return;
+      if (!Array.isArray(batch.events) || !Number.isSafeInteger(batch.cursor) || batch.cursor < after || (batch.events.length > 0 && batch.cursor <= after)) {
+        throw new Error('后台事件游标无效；保留运行保护');
       }
-
-      stepResults.value[step.id] = {
-        step_id: step.id,
-        step_name: step.name,
-        status: 'running',
-        duration_ms: 0,
-        timestamp: new Date().toLocaleTimeString()
-      };
-
-      const result = await executeSingleStep(step);
-      stepResults.value[step.id] = result;
-      accumulatedResults.push(result);
-
-      if (result.status === 'fail' && pipeline.value.stop_on_error) {
-        addLog(`步骤 [${step.name}] 失败，根据策略中止整个流水线!`, 'error');
-        abortRequested.value = true;
-        break;
-      }
+      for (const event of batch.events) receiveRunEvent(event);
+      eventCursor = batch.cursor;
+      if (batch.events.length < 200) { drained = true; break; }
     }
-
-    if (abortRequested.value) break;
+    if (!drained) delay = 0;
+    if (state.done && drained) {
+      const report = await hilCall<HilReport>('get_hiltest_report', { run_id: id });
+      if (!isCurrentRun(id, token)) return;
+      executionReport.value = displayReport(report);
+      for (const row of report.results || []) stepResults.value[row.step_id] = row;
+      for (const [port, decoder] of serialViews) {
+        const tail = decoder.decode();
+        if (tail) addLog('[' + port + '] ' + tail, 'info');
+      }
+      serialViews.clear();
+      addLog('运行结束: ' + state.state + ' · ' + (state.error || state.report_dir), state.state === 'PASS' ? 'success' : 'error');
+      rememberRun('hil.activeRun');
+      rememberRun('hil.submissionUnknown');
+      isReportModalOpen.value = true;
+      isStopping.value = false;
+      isRunning.value = false;
+      return;
+    }
+  } catch (err) {
+    if (!isCurrentRun(id, token)) return;
+    runState.value = 'UNKNOWN';
+    cancellationDetail.value = '后台状态或最终报告暂不可确认；保持运行保护并继续查询。';
+    addLog('后台状态未知（未判定成功，也未判定停止）: ' + String(err), 'error');
   }
-
-  const endTime = new Date();
-  isRunning.value = false;
-  currentStepIndex.value = -1;
-
-  // Generate Report
-  const passed = accumulatedResults.filter(r => r.status === 'pass').length;
-  const failed = accumulatedResults.filter(r => r.status === 'fail').length;
-  const total = accumulatedResults.length;
-  const rate = total > 0 ? (passed / total) * 100 : 0;
-
-  executionReport.value = {
-    pipeline_name: pipeline.value.name,
-    start_time: startTime.toLocaleString(),
-    end_time: endTime.toLocaleString(),
-    duration_ms: endTime.getTime() - startTime.getTime(),
-    total_loops: totalLoops,
-    total_steps: total,
-    pass_count: passed,
-    fail_count: failed,
-    success_rate: Number(rate.toFixed(1)),
-    results: accumulatedResults
-  };
-
-  addLog(`=== 流水线执行结束! 成功率: ${rate.toFixed(1)}% (Pass: ${passed}, Fail: ${failed}) ===`, passed === total ? 'success' : 'warn');
-  isReportModalOpen.value = true;
+  if (isCurrentRun(id, token)) pollTimer = setTimeout(() => pollRun(id, token), delay);
 }
 
-function stopPipeline() {
-  if (!isRunning.value) return;
-  abortRequested.value = true;
-  addLog('收到用户停止指令，正在安全退出测试流水线...', 'warn');
+async function runPipeline(onlySelected = false) {
+  if (isSubmitting.value || isRunning.value || isStopping.value) return;
+  if (!isTauri()) { addLog('浏览器预览不能执行真实硬件测试', 'error'); return; }
+  if (onlySelected && !selectedStep.value) return;
+  isSubmitting.value = true;
+  let submitted = false;
+  try {
+    const snapshot = pipelineSnapshot(pipeline.value, onlySelected ? selectedStep.value!.id : undefined);
+    await hilCall('validate_hiltest', { document: snapshot });
+    if (disposed) return;
+    // Once dispatch begins a transport failure does not prove that no hardware job exists.
+    submitted = true;
+    isRunning.value = true;
+    runState.value = 'SUBMITTING';
+    runId.value = '';
+    rememberRun('hil.submissionUnknown', 'true');
+    const state = await hilCall<HilStatus>('run_hiltest', { document: snapshot });
+    if (!state.run_id) throw new Error('后台未返回任务 ID');
+    rememberRun('hil.activeRun', state.run_id);
+    rememberRun('hil.submissionUnknown');
+    if (disposed) return;
+    clearLogs();
+    stepResults.value = {};
+    eventCursor = 0;
+    serialViews.clear();
+    executionReport.value = null;
+    runId.value = state.run_id;
+    reportDir.value = state.report_dir;
+    runState.value = state.state;
+    cancellationDetail.value = '';
+    activeStepId.value = '';
+    isStopping.value = false;
+    addLog('后台任务已启动，当前参数已固定。串口由 runner 接管。', 'info');
+    if (pollTimer) clearTimeout(pollTimer);
+    const token = runGeneration.next();
+    void pollRun(state.run_id, token);
+  } catch (err) {
+    if (submitted && isHilSubmissionRejected(err)) {
+      isRunning.value = false;
+      runState.value = 'REJECTED';
+      cancellationDetail.value = '后台明确拒绝，尚未启动任务；可修改参数后重新提交。';
+      rememberRun('hil.submissionUnknown');
+      addLog('任务未启动: ' + String(err), 'error');
+    } else if (submitted) {
+      runState.value = 'UNKNOWN';
+      cancellationDetail.value = '提交结果未知，不能重复提交；请核查后台任务。未获得任务 ID 时无法从此页停止。';
+      addLog('任务提交结果未知: ' + String(err), 'error');
+    } else addLog('校验失败，未启动任务: ' + String(err), 'error');
+  } finally { isSubmitting.value = false; }
 }
 
-// Export HTML report
+async function stopPipeline() {
+  if (!runId.value || !isRunning.value || isStopping.value) return;
+  const id = runId.value;
+  const token = runGeneration.next();
+  if (pollTimer) clearTimeout(pollTimer);
+  isStopping.value = true;
+  runState.value = 'STOPPING';
+  cancellationDetail.value = '停止请求处理中；尚未确认设备释放。';
+  try {
+    const state = await hilCall<HilStatus>('stop_hiltest', { run_id: id });
+    if (!isCurrentRun(id, token)) return;
+    runState.value = state.state;
+    addLog('已请求停止；以后台最终状态及报告为准。', 'warn');
+  } catch (err) {
+    if (!isCurrentRun(id, token)) return;
+    runState.value = 'UNKNOWN';
+    cancellationDetail.value = '停止结果未知；保持运行保护，继续查询后台状态。';
+    isStopping.value = false;
+    addLog('停止请求结果未知: ' + String(err), 'error');
+  } finally {
+    if (isCurrentRun(id, token)) void pollRun(id, token);
+  }
+}
+
+// Export the backend result safely; never interpret device text as HTML.
 function downloadHtmlReport() {
   if (!executionReport.value) return;
-  const r = executionReport.value;
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>${r.pipeline_name} - HIL Test Report</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; background: #09090b; color: #f4f4f5; margin: 0; padding: 24px; }
-    h1 { color: #10b981; margin-bottom: 4px; font-size: 20px; }
-    .meta { font-size: 12px; color: #a1a1aa; margin-bottom: 20px; }
-    .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
-    .card { background: #18181b; border: 1px solid #27272a; padding: 12px; border-radius: 6px; }
-    .card .val { font-size: 22px; font-weight: bold; margin-top: 4px; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { border: 1px solid #27272a; padding: 8px 12px; text-align: left; }
-    th { background: #18181b; color: #a1a1aa; }
-    tr:nth-child(even) { background: #121214; }
-    .pass { color: #34d399; font-weight: bold; }
-    .fail { color: #f87171; font-weight: bold; }
-  </style>
-</head>
-<body>
-  <h1>${r.pipeline_name} - 自动化 HIL 测试报告</h1>
-  <div class="meta">执行时间: ${r.start_time} ~ ${r.end_time} | 耗时: ${(r.duration_ms / 1000).toFixed(2)}s</div>
-  <div class="cards">
-    <div class="card"><div>总步骤数</div><div class="val">${r.total_steps}</div></div>
-    <div class="card"><div>通过数量</div><div class="val" style="color:#34d399">${r.pass_count}</div></div>
-    <div class="card"><div>失败数量</div><div class="val" style="color:#f87171">${r.fail_count}</div></div>
-    <div class="card"><div>通过率</div><div class="val" style="color:#38bdf8">${r.success_rate}%</div></div>
-  </div>
-  <table>
-    <thead>
-      <tr>
-        <th>时间</th>
-        <th>用例名称</th>
-        <th>状态</th>
-        <th>耗时</th>
-        <th>实际输出 / 异常详情</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${r.results.map(item => `
-        <tr>
-          <td>${item.timestamp}</td>
-          <td>${item.step_name}</td>
-          <td class="${item.status}">${item.status.toUpperCase()}</td>
-          <td>${item.duration_ms}ms</td>
-          <td>${item.message || '-'}</td>
-        </tr>
-      `).join('')}
-    </tbody>
-  </table>
-</body>
-</html>`;
-
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `HIL_Report_${r.pipeline_name}_${Date.now()}.html`;
-  a.click();
+  const escaped = JSON.stringify(executionReport.value, null, 2).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const html = '<!doctype html><meta charset="utf-8"><title>HIL report</title><pre>' + escaped + '</pre>';
+  const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url; link.download = 'HIL_Report.html'; link.click();
   URL.revokeObjectURL(url);
 }
 
-// Preset samples
+// Safe initial example: no hardware command is added automatically.
 function loadDemoPipeline() {
   pipeline.value = {
-    name: 'STM32_ING_回归演示工程',
-    version: '1.2.2',
-    loop_count: 1,
-    stop_on_error: true,
-    steps: [
-      {
-        id: 'step_1',
-        name: '硬件 DTR 引脚脉冲复位',
-        action: 'reset_target',
-        enabled: true,
-        params: { reset_method: 'pin_dtr_pulse', pulse_ms: 80, port_name: availablePorts.value[0]?.port_name || 'COM1' },
-        timeout_ms: 1000
-      },
-      {
-        id: 'step_2',
-        name: '等待单片机启动完成提示',
-        action: 'serial_wait_match',
-        enabled: true,
-        params: { port_name: availablePorts.value[0]?.port_name || 'COM1', match_type: 'contains', pattern: 'READY', timeout_ms: 2000 },
-        timeout_ms: 2000
-      },
-      {
-        id: 'step_3',
-        name: '发送自检查询指令',
-        action: 'serial_send',
-        enabled: true,
-        params: { port_name: availablePorts.value[0]?.port_name || 'COM1', send_data: 'AT+CHECK', send_format: 'string', send_ending: 'crlf' }
-      },
-      {
-        id: 'step_4',
-        name: '等待自检返回值 OK',
-        action: 'serial_wait_match',
-        enabled: true,
-        params: { port_name: availablePorts.value[0]?.port_name || 'COM1', match_type: 'contains', pattern: 'OK', timeout_ms: 1500 },
-        timeout_ms: 1500
-      },
-      {
-        id: 'step_5',
-        name: 'SWD 读取 SRAM 校验标志位',
-        action: 'swd_read_assert',
-        enabled: true,
-        params: { memory_addr: '0x20000000', read_width: 32, operator: '!=', expected_value: '0x00000000' }
-      }
-    ]
+    schema_version: 2, bench: {}, name: '无硬件流程示例', version: '2', loop_count: 1, stop_on_error: true,
+    steps: [{ id: 'delay', name: '仅等待（不访问硬件）', action: 'delay', enabled: true, params: { delay_ms: 100 }, timeout_ms: 1000 }],
   };
-  selectedStepId.value = 'step_1';
-  addLog('已成功加载回归测试演示工程模板', 'info');
+  selectedStepId.value = 'delay';
+  addLog('已加载无硬件示例；此结果不能用于宣称开发板已验证', 'info');
+}
+
+function loadSerialTemplate() {
+  const bench = { ...pipeline.value.bench };
+  pipeline.value = {
+    schema_version: 2, bench, name: '纯串口发送与应答', version: '2', loop_count: 1, stop_on_error: true,
+    steps: [
+      { id: 'capture', name: '提前打开串口采集', action: 'serial_open', enabled: true, params: {} },
+      { id: 'send', name: '发送（填写实际设备指令）', action: 'serial_send', enabled: true, params: { send_data: '', send_format: 'string', send_ending: 'crlf', character_delay_ms: 0 } },
+      { id: 'expect', name: '等待应答（填写实际匹配内容）', action: 'serial_wait_match', enabled: true, params: { match_type: 'contains', pattern: '', timeout_ms: 3000 }, timeout_ms: 3000 },
+    ],
+  };
+  selectedStepId.value = 'send';
+}
+
+function loadHilTemplate() {
+  const bench = { ...pipeline.value.bench };
+  pipeline.value = {
+    schema_version: 2, version: '2', name: '固件自驱动 HIL 观察（不自动烧录或复位）', bench,
+    loop_count: 1, stop_on_error: true,
+    steps: [
+      { id: 'capture', name: '持续串口采集', action: 'serial_open', enabled: true, params: {} },
+      { id: 'observe', name: '等待固件已有自测结果', action: 'hil_observe', enabled: true, timeout_ms: 1800000,
+        params: { timeout_ms: 1800000, boot_timeout_ms: 10000, idle_timeout_ms: 15000, boot_count: 1, continue_on_failure: true } },
+    ],
+  };
+  selectedStepId.value = 'observe';
+  addLog('HIL 观察模板不会复位或烧录；请按固件协议配置工位和停止策略，再显式添加硬件动作', 'info');
 }
 
 onMounted(async () => {
+  if (runId.value) restoreStoredRun();
   await refreshPorts();
   await refreshProbes();
-  if (pipeline.value.steps.length === 0) {
-    loadDemoPipeline();
-  }
+  if (pipeline.value.steps.length === 0) loadDemoPipeline();
 
-  // Listen to incoming serial RX stream across all ports
-  if (isTauri()) {
-    try {
-      unlistenSerialRx = await listen<SerialRxPayload>('serial-rx', (event) => {
-        const port = event.payload.port;
-        const text = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(event.payload.data));
-        if (!serialRxBuffers.value[port]) {
-          serialRxBuffers.value[port] = '';
-        }
-        serialRxBuffers.value[port] += text;
-        if (serialRxBuffers.value[port].length > 8192) {
-          serialRxBuffers.value[port] = serialRxBuffers.value[port].slice(-4096);
-        }
-      });
-    } catch (e) {
-      console.warn('Failed to register serial-rx in sequencer:', e);
-    }
-  }
 });
 
 onUnmounted(() => {
-  if (unlistenSerialRx) unlistenSerialRx();
+  disposed = true;
+  runGeneration.next();
+  if (pollTimer) clearTimeout(pollTimer);
+  // Unmount only detaches the viewer. The worker continues independently.
 });
 </script>
 
 <template>
   <div class="h-full flex flex-col bg-zinc-950 text-zinc-100 font-sans select-none overflow-hidden">
     <!-- Top Toolbar Header -->
-    <div class="bg-zinc-900 border-b border-zinc-800 px-4 py-2.5 flex items-center justify-between gap-4 shrink-0">
+    <div class="bg-zinc-900 border-b border-zinc-800 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 shrink-0">
       <div class="flex items-center gap-3">
         <div class="h-8 w-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold shadow-inner">
           <Zap class="w-4 h-4" />
@@ -845,7 +641,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Center / Right Action Controls -->
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
         <div class="flex items-center gap-1.5 bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs text-zinc-300">
           <span class="text-zinc-500">{{ t('seq_loop_count') }}:</span>
           <input
@@ -866,6 +662,7 @@ onUnmounted(() => {
 
         <button
           @click="openPipelineFromFile"
+          :disabled="isImporting"
           class="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors"
           :title="t('seq_open_pipeline')"
         >
@@ -884,20 +681,22 @@ onUnmounted(() => {
 
         <button
           v-if="!isRunning"
-          @click="runPipeline"
+          @click="runPipeline(false)"
+          :disabled="isSubmitting || isStopping"
           class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-zinc-950 shadow-sm transition-all"
         >
           <Play class="w-3.5 h-3.5 fill-current" />
-          <span>{{ t('seq_run_all') }}</span>
+          <span>{{ isSubmitting ? '正在校验 / 提交…' : t('seq_run_all') }}</span>
         </button>
 
         <button
           v-else
           @click="stopPipeline"
+          :disabled="isSubmitting || isStopping || !runId"
           class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-zinc-100 shadow-sm transition-all animate-pulse"
         >
           <Square class="w-3.5 h-3.5 fill-current" />
-          <span>{{ t('seq_stop_run') }}</span>
+          <span>{{ isSubmitting ? '任务提交中…' : isStopping ? '等待停止确认…' : t('seq_stop_run') }}</span>
         </button>
 
         <button
@@ -912,7 +711,32 @@ onUnmounted(() => {
     </div>
 
     <!-- Main Workspace (Three Panes Layout) -->
+    <div class="px-4 py-2 bg-zinc-900 border-b border-zinc-800 text-xs flex flex-wrap items-center gap-3">
+      <span class="text-zinc-400">工位默认值</span>
+      <input v-model="pipeline.bench!.probe_id" placeholder="探针 SN（必须明确选择）" class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 w-44" />
+      <input v-model="pipeline.bench!.target_device" placeholder="芯片型号 / Pack 设备名" class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 w-40" />
+      <input v-model="pipeline.bench!.port_name" placeholder="日志串口，如 COM3" class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 w-36" />
+      <label class="flex items-center gap-1">波特率<input type="number" min="1" v-model.number="pipeline.bench!.baud_rate" placeholder="明确填写" class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 w-28" /></label>
+      <label class="flex items-center gap-1">SWD Hz<input type="number" min="1" v-model.number="pipeline.bench!.frequency" placeholder="明确填写" class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 w-28" /></label>
+      <input v-model="pipeline.bench!.pack_path" placeholder="Pack 路径（需要时填写）" class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 w-52" />
+      <button @click="runPipeline(true)" :disabled="isSubmitting || isRunning || isStopping || !selectedStep" class="px-2 py-1 rounded bg-sky-900 disabled:opacity-40">运行选中步骤</button>
+      <button @click="loadHilTemplate" :disabled="isSubmitting || isRunning" class="px-2 py-1 rounded bg-zinc-800 disabled:opacity-40">HIL 观察模板</button>
+      <button @click="loadSerialTemplate" :disabled="isSubmitting || isRunning" class="px-2 py-1 rounded bg-zinc-800 disabled:opacity-40">纯串口起步模板</button>
+      <button @click="loadDemoPipeline" :disabled="isSubmitting || isRunning" class="px-2 py-1 rounded bg-zinc-800 disabled:opacity-40">无硬件示例</button>
+      <button @click="editSource" class="px-2 py-1 rounded bg-zinc-800">JSON 脚本</button>
+      <span class="text-amber-400">{{ isRunning ? '运行使用启动快照；修改下次生效' : '支持 PyOCD / ING INI 后台烧录；ING 取消在页/扇区边界生效，需核对复位接线及停止应答' }}</span>
+      <span v-if="runState" class="font-mono">{{ runState }}</span><button v-if="runState === 'UNKNOWN'" @click="restoreStoredRun" :disabled="isSubmitting" class="px-2 py-1 bg-zinc-800 rounded disabled:opacity-40">重新查询已记录任务</button>
+      <span v-if="cancellationDetail" class="text-amber-300">{{ cancellationDetail }}</span>
+      <span v-if="reportDir" class="text-zinc-400 select-text break-all">报告：{{ reportDir }}</span>
+    </div>
+    <p v-if="importError" role="alert" class="px-4 py-2 text-xs text-rose-300 bg-rose-950/30 select-text">{{ importError }}</p>
     <div class="flex-1 flex overflow-hidden">
+      <div v-if="sourceVisible" class="absolute inset-8 z-40 bg-zinc-900 border border-zinc-600 rounded p-4 flex flex-col gap-3">
+        <div class="text-sm">JSON 脚本编辑 · 嵌套步骤/未知字段原样保留；合法性由后台校验，旧版工程不自动改版</div>
+        <textarea v-model="sourceText" spellcheck="false" class="flex-1 min-h-64 bg-zinc-950 p-3 font-mono text-xs select-text" />
+        <p v-if="sourceError" role="alert" class="text-xs text-rose-300 whitespace-pre-wrap select-text">{{ sourceError }}</p>
+        <div class="flex gap-2"><button @click="applySource" :disabled="sourceApplying" class="bg-emerald-800 rounded px-3 py-1 disabled:opacity-40">{{ sourceApplying ? '校验中…' : '校验并应用' }}</button><button @click="sourceVisible = false" :disabled="sourceApplying" class="bg-zinc-700 rounded px-3 py-1">关闭</button></div>
+      </div>
       <!-- 1. Left: Action Palette (动作库) -->
       <div class="w-64 border-r border-zinc-800 bg-zinc-900/60 flex flex-col shrink-0">
         <div class="p-3 border-b border-zinc-800 bg-zinc-900/90 flex items-center justify-between">
@@ -951,7 +775,7 @@ onUnmounted(() => {
           </div>
 
           <div v-if="isRunning" class="flex items-center gap-2 text-xs font-mono text-emerald-400 animate-pulse">
-            <span>第 {{ currentLoopIndex }} 轮 · 执行步骤 {{ currentStepIndex + 1 }}/{{ pipeline.steps.length }}</span>
+            <span>第 {{ currentLoopIndex }} 轮 · 当前步骤 {{ activeStepId || "等待后台确认" }}</span>
           </div>
         </div>
 
@@ -999,13 +823,13 @@ onUnmounted(() => {
 
                     <!-- Compact Param Info Preview -->
                     <div class="text-[11px] text-zinc-500 truncate mt-0.5 font-mono">
-                      <span v-if="step.action === 'flash_firmware'">{{ step.params.file_path || '未选择文件' }}</span>
-                      <span v-else-if="step.action === 'reset_target'">{{ step.params.reset_method }} ({{ step.params.pulse_ms }}ms)</span>
-                      <span v-else-if="step.action === 'serial_send'">[{{ step.params.port_name }}] &gt;&gt; {{ step.params.send_data }}</span>
-                      <span v-else-if="step.action === 'serial_wait_match'">[{{ step.params.port_name }}] 等待包含 "{{ step.params.pattern }}"</span>
-                      <span v-else-if="step.action === 'swd_read_assert'">{{ step.params.memory_addr }} {{ step.params.operator }} {{ step.params.expected_value }}</span>
-                      <span v-else-if="step.action === 'svd_check_reg'">{{ step.params.peripheral }}->{{ step.params.register }} == {{ step.params.expected_reg_val }}</span>
-                      <span v-else-if="step.action === 'delay'">延时 {{ step.params.delay_ms }}ms</span>
+                      <span v-if="step.action === 'flash_firmware'">{{ step.params?.file_path || '未选择文件' }}</span>
+                      <span v-else-if="step.action === 'reset_target'">{{ step.params?.reset_method }} ({{ step.params?.pulse_ms }}ms)</span>
+                      <span v-else-if="step.action === 'serial_send'">[{{ step.params?.port_name }}] &gt;&gt; {{ step.params?.send_data }}</span>
+                      <span v-else-if="step.action === 'serial_wait_match'">[{{ step.params?.port_name }}] 等待包含 "{{ step.params?.pattern }}"</span>
+                      <span v-else-if="step.action === 'swd_read_assert'">{{ step.params?.memory_addr }} {{ step.params?.operator }} {{ step.params?.expected_value }}</span>
+                      <span v-else-if="step.action === 'svd_check_reg'">{{ step.params?.peripheral }}->{{ step.params?.register }} == {{ step.params?.expected_reg_val }}</span>
+                      <span v-else-if="step.action === 'delay'">延时 {{ step.params?.delay_ms }}ms</span>
                     </div>
                   </div>
                 </div>
@@ -1083,7 +907,7 @@ onUnmounted(() => {
           <div class="px-3 py-1.5 bg-zinc-900 border-b border-zinc-800 flex items-center justify-between text-xs">
             <div class="flex items-center gap-2">
               <Terminal class="w-3.5 h-3.5 text-emerald-400" />
-              <span class="font-semibold text-zinc-300">{{ t('seq_log_title') }}</span>
+              <span class="font-semibold text-zinc-300">{{ t('seq_log_title') }}</span><span class="text-[10px] text-zinc-500">最近 500 条；完整事件见报告目录</span>
             </div>
             <button
               @click="clearLogs"
@@ -1120,7 +944,7 @@ onUnmounted(() => {
           步骤属性与参数配置
         </div>
 
-        <div v-if="selectedStep" class="flex-1 p-3 overflow-y-auto space-y-3.5 text-xs">
+        <div v-if="selectedStep && selectedStep.params" class="flex-1 p-3 overflow-y-auto space-y-3.5 text-xs">
           <div>
             <label class="block text-zinc-400 text-[11px] mb-1 font-medium">步骤名称</label>
             <input
@@ -1129,7 +953,20 @@ onUnmounted(() => {
             />
           </div>
 
+          <p v-if="selectedStep.steps?.length" class="text-amber-300 text-[11px]">含 {{ selectedStep.steps.length }} 个嵌套步骤；完整结构在 JSON 脚本中编辑，提交时不会丢弃。</p>
+          <p v-if="!actionTemplates.some(item => item.action === selectedStep?.action)" class="text-amber-300 text-[11px]">此动作 / 旧版别名使用 JSON 编辑参数；保留原始字段，由后台解析与校验。</p>
           <!-- Parameter Fields per Action -->
+          <div>
+            <label class="block text-zinc-400 text-[11px] mb-1">步骤超时（ms 或 5s / 2m；JSON 删除字段使用默认）</label>
+            <input type="text" v-model="selectedStep.timeout_ms" class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1" />
+            <label class="block text-zinc-400 text-[11px] mt-2 mb-1">失败处理</label>
+            <select v-model="selectedStep.on_failure" class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1">
+              <option :value="undefined">使用流水线默认策略（遇错即停止设置）</option>
+              <option value="abort">取证后停止</option><option value="continue">记录失败并继续（取证可能暂停目标）</option>
+              <option value="retry" :disabled="!['swd_read_assert', 'swd_read_block', 'svd_check_reg'].includes(selectedStep.action)">只读断言重试</option>
+            </select>
+            <input v-if="selectedStep.on_failure === 'retry'" type="number" min="0" max="10" v-model.number="selectedStep.retry_count" class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 mt-1" />
+          </div>
           <!-- flash_firmware -->
           <template v-if="selectedStep.action === 'flash_firmware'">
             <div>
@@ -1139,7 +976,7 @@ onUnmounted(() => {
                 class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs"
               >
                 <option value="pyocd">PyOCD 通用 SWD 烧录器</option>
-                <option value="ing_ini">INGChips 专属 INI 烧录器</option>
+                <option value="ing_ini">ING INI（HIL 后端下载）</option>
               </select>
             </div>
             <!-- SWD Probe Selector for PyOCD flash -->
@@ -1152,7 +989,7 @@ onUnmounted(() => {
                 v-model="selectedStep.params.probe_id"
                 class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
               >
-                <option value="">默认调试器 (自动识别)</option>
+                <option value="">使用工位默认探针（需明确指定）</option>
                 <option v-for="pr in availableProbes" :key="pr.unique_id" :value="pr.unique_id">
                   {{ formatProbeLabel(pr) }}
                 </option>
@@ -1160,17 +997,19 @@ onUnmounted(() => {
             </div>
             <!-- Serial Port & Baud for ING ini flash -->
             <div v-if="selectedStep.params.flash_type === 'ing_ini'" class="space-y-2">
+              <p class="text-xs text-amber-700">HIL 会由 Rust 后端执行 ING ISP 下载；请填写串口，取消只在当前页/扇区边界生效。压测固件停止需在流水线顶层配置 stop，等待 STOPPED 确认。</p>
               <div>
                 <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_port_name') }}</label>
                 <select
                   v-model="selectedStep.params.port_name"
                   class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
                 >
-                  <option v-for="p in availablePorts" :key="p.port_name" :value="p.port_name">{{ p.port_name }}</option>
+                  <option value="">使用工位默认串口（需明确指定）</option>
+                <option v-for="p in availablePorts" :key="p.port_name" :value="p.port_name">{{ p.port_name }}</option>
                 </select>
               </div>
               <div>
-                <label class="block text-zinc-400 text-[11px] mb-1 font-medium">烧录波特率</label>
+                <label class="block text-zinc-400 text-[11px] mb-1 font-medium">运行串口波特率（ISP 速率读取 INI）</label>
                 <select
                   v-model.number="selectedStep.params.baud_rate"
                   class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
@@ -1201,15 +1040,26 @@ onUnmounted(() => {
 
           <!-- reset_target -->
           <template v-if="selectedStep.action === 'reset_target'">
+            <div v-if="selectedStep.params.reset_method !== 'swd_soft_reset' && selectedStep.params.pin_reset" class="space-y-2 border border-amber-800/50 rounded p-2">
+              <label class="block">控制串口<input v-model="selectedStep.params.port_name" placeholder="留空使用工位默认串口" class="w-full bg-zinc-950 p-1" /></label>
+              <label class="block">接线配置 ID<input v-model="selectedStep.params.pin_reset.profile_id" class="w-full bg-zinc-950 p-1" /></label>
+              <label class="block text-amber-300"><input type="checkbox" v-model="selectedStep.params.pin_reset.wiring_verified" /> 已核对本工位 RTS/DTR 接线及极性</label>
+              <label class="block">DTR 复位有效值<select v-model="selectedStep.params.pin_reset.reset_asserted_dtr" class="bg-zinc-950"><option :value="true">true</option><option :value="false">false</option></select></label>
+              <label class="block">RTS Boot 有效值<select v-model="selectedStep.params.pin_reset.boot_asserted_rts" class="bg-zinc-950"><option :value="true">true</option><option :value="false">false</option></select></label>
+              <label class="block">Boot 稳定 ms<input type="number" v-model.number="selectedStep.params.pin_reset.settle_ms" class="w-full bg-zinc-950" /></label>
+              <label class="block">复位后 Boot 保持 ms<input type="number" v-model.number="selectedStep.params.pin_reset.boot_hold_ms" class="w-full bg-zinc-950" /></label>
+              <p class="text-zinc-400">控制线完成不代表进入 Boot 成功；请添加串口应答断言。</p>
+            </div>
             <div>
               <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_reset_method') }}</label>
               <select
                 v-model="selectedStep.params.reset_method"
+                @change="ensurePinReset(selectedStep)"
                 class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs"
               >
-                <option value="pin_dtr_pulse">DTR 引脚低电平脉冲 (硬件复位)</option>
+                <option value="pin_dtr_pulse">DTR 引脚复位（需核对接线）</option>
                 <option value="swd_soft_reset">SWD 软复位 (NVIC_SystemReset)</option>
-                <option value="bootloader_reset">RTS + DTR 复位并进入 Bootloader</option>
+                <option value="bootloader_reset">RTS + DTR Bootloader（需核对接线）</option>
               </select>
             </div>
             <div v-if="selectedStep.params.reset_method === 'swd_soft_reset'">
@@ -1221,7 +1071,7 @@ onUnmounted(() => {
                 v-model="selectedStep.params.probe_id"
                 class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
               >
-                <option value="">默认调试器 (自动识别)</option>
+                <option value="">使用工位默认探针（需明确指定）</option>
                 <option v-for="pr in availableProbes" :key="pr.unique_id" :value="pr.unique_id">
                   {{ formatProbeLabel(pr) }}
                 </option>
@@ -1238,6 +1088,9 @@ onUnmounted(() => {
           </template>
 
           <!-- serial_send -->
+          <label v-if="selectedStep.action === 'serial_send'" class="block text-zinc-400 text-[11px]">逐字节发送间隔（ms；0 为整块发送）
+            <input type="number" min="0" v-model.number="selectedStep.params.character_delay_ms" class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 mt-1" />
+          </label>
           <template v-if="selectedStep.action === 'serial_send'">
             <div>
               <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_port_name') }}</label>
@@ -1245,6 +1098,7 @@ onUnmounted(() => {
                 v-model="selectedStep.params.port_name"
                 class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs"
               >
+                <option value="">使用工位默认串口（需明确指定）</option>
                 <option v-for="p in availablePorts" :key="p.port_name" :value="p.port_name">
                   {{ p.port_name }}
                 </option>
@@ -1308,6 +1162,22 @@ onUnmounted(() => {
           </template>
 
           <!-- serial_wait_match -->
+          <template v-if="selectedStep.action === 'serial_open' || selectedStep.action === 'hil_observe'">
+            <label class="text-xs text-zinc-400">串口（留空使用工位默认值）</label>
+            <input v-model="selectedStep.params.port_name" class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs" />
+            <label class="text-xs text-zinc-400">波特率</label>
+            <input type="number" v-model.number="selectedStep.params.baud_rate" class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs" />
+            <template v-if="selectedStep.action === 'hil_observe'">
+              <label class="text-xs text-zinc-400">观察总超时（ms 或 30m）</label>
+              <input type="text" v-model="selectedStep.params.timeout_ms" class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs" />
+              <label class="text-xs text-zinc-400">启动超时 / 心跳超时（ms）</label>
+              <input type="text" v-model="selectedStep.params.boot_timeout_ms" class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs" />
+              <input type="text" v-model="selectedStep.params.idle_timeout_ms" class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs" />
+              <label class="text-xs text-zinc-400">本轮预期 BOOT 次数</label>
+              <input type="number" min="1" v-model.number="selectedStep.params.boot_count" class="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs" />
+              <label class="text-xs text-zinc-400"><input type="checkbox" v-model="selectedStep.params.continue_on_failure" /> FAIL / CRASH 后继续收集至 DONE（仍判失败）</label>
+            </template>
+          </template>
           <template v-if="selectedStep.action === 'serial_wait_match'">
             <div>
               <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_port_name') }}</label>
@@ -1315,6 +1185,7 @@ onUnmounted(() => {
                 v-model="selectedStep.params.port_name"
                 class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs"
               >
+                <option value="">使用工位默认串口（需明确指定）</option>
                 <option v-for="p in availablePorts" :key="p.port_name" :value="p.port_name">
                   {{ p.port_name }}
                 </option>
@@ -1366,8 +1237,8 @@ onUnmounted(() => {
             <div>
               <label class="block text-zinc-400 text-[11px] mb-1 font-medium">{{ t('seq_param_timeout_ms') }}</label>
               <input
-                type="number"
-                v-model.number="selectedStep.params.timeout_ms"
+                type="text"
+                v-model="selectedStep.params.timeout_ms"
                 class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
               />
             </div>
@@ -1384,7 +1255,7 @@ onUnmounted(() => {
                 v-model="selectedStep.params.probe_id"
                 class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
               >
-                <option value="">默认调试器 (自动识别)</option>
+                <option value="">使用工位默认探针（需明确指定）</option>
                 <option v-for="pr in availableProbes" :key="pr.unique_id" :value="pr.unique_id">
                   {{ formatProbeLabel(pr) }}
                 </option>
@@ -1438,6 +1309,10 @@ onUnmounted(() => {
           <!-- svd_check_reg -->
           <template v-if="selectedStep.action === 'svd_check_reg'">
             <div>
+              <label class="block text-zinc-400 text-[11px] mb-1 font-medium">芯片型号（Pack 设备名）</label>
+              <input v-model="selectedStep.params.target_device" class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono" />
+            </div>
+            <div>
               <div class="flex items-center justify-between text-zinc-400 text-[11px] mb-1 font-medium">
                 <span>SWD 硬件调试器</span>
                 <button @click="refreshProbes" class="text-emerald-400 hover:underline text-[10px]">刷新</button>
@@ -1446,7 +1321,7 @@ onUnmounted(() => {
                 v-model="selectedStep.params.probe_id"
                 class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-200 text-xs font-mono"
               >
-                <option value="">默认调试器 (自动识别)</option>
+                <option value="">使用工位默认探针（需明确指定）</option>
                 <option v-for="pr in availableProbes" :key="pr.unique_id" :value="pr.unique_id">
                   {{ formatProbeLabel(pr) }}
                 </option>
@@ -1521,23 +1396,31 @@ onUnmounted(() => {
         <!-- Metrics Cards -->
         <div class="p-4 grid grid-cols-4 gap-3 bg-zinc-950/50 border-b border-zinc-800">
           <div class="p-3 bg-zinc-900 border border-zinc-800 rounded-lg">
-            <div class="text-[11px] text-zinc-400">{{ t('seq_summary_total') }}</div>
-            <div class="text-xl font-bold font-mono text-zinc-200 mt-1">{{ executionReport.total_steps }}</div>
+            <div class="text-[11px] text-zinc-400">计划步骤</div>
+            <div class="text-xl font-bold font-mono text-zinc-200 mt-1">{{ executionReport.planned_steps ?? '未知' }}</div>
           </div>
           <div class="p-3 bg-zinc-900 border border-zinc-800 rounded-lg">
             <div class="text-[11px] text-zinc-400">{{ t('seq_summary_passed') }}</div>
-            <div class="text-xl font-bold font-mono text-emerald-400 mt-1">{{ executionReport.pass_count }}</div>
+            <div class="text-xl font-bold font-mono text-emerald-400 mt-1">{{ executionReport.passed_steps ?? '未知' }}</div>
           </div>
           <div class="p-3 bg-zinc-900 border border-zinc-800 rounded-lg">
             <div class="text-[11px] text-zinc-400">{{ t('seq_summary_failed') }}</div>
-            <div class="text-xl font-bold font-mono text-rose-400 mt-1">{{ executionReport.fail_count }}</div>
+            <div class="text-xl font-bold font-mono text-rose-400 mt-1">{{ executionReport.failed_steps ?? '未知' }}</div>
           </div>
           <div class="p-3 bg-zinc-900 border border-zinc-800 rounded-lg">
-            <div class="text-[11px] text-zinc-400">{{ t('seq_summary_rate') }}</div>
-            <div class="text-xl font-bold font-mono text-sky-400 mt-1">{{ executionReport.success_rate }}%</div>
+            <div class="text-[11px] text-zinc-400">全计划通过率</div>
+            <div class="text-xl font-bold font-mono text-sky-400 mt-1">{{ executionReport.success_rate === null ? '未知' : executionReport.success_rate + '%' }}</div>
           </div>
         </div>
 
+        <div class="px-4 py-2 text-xs flex flex-wrap gap-3 border-b border-zinc-800">
+          <span>已执行：{{ executionReport.executed_steps ?? '未知' }}</span>
+          <span>未执行 / 跳过：{{ executionReport.skipped_steps ?? '未知' }}</span>
+          <span>取消：{{ executionReport.cancelled_steps ?? '未知' }}</span>
+          <span>尝试次数（含重试）：{{ executionReport.attempt_count ?? '未知' }}</span>
+          <span class="text-amber-300">硬件验证：{{ executionReport.hardware_verified === true ? '后端报告已验证' : executionReport.hardware_verified === false ? '未验证（不可作为硬件验收）' : '未知（旧报告未提供）' }}</span>
+          <p class="w-full text-zinc-400">{{ executionReport.statistics_note }}；下表保留每次尝试，不以重试行数冒充计划步骤数。</p>
+        </div>
         <!-- Table of Results -->
         <div class="flex-1 p-4 overflow-y-auto">
           <table class="w-full text-left text-xs border border-zinc-800 border-collapse">
@@ -1552,8 +1435,8 @@ onUnmounted(() => {
             </thead>
             <tbody>
               <tr
-                v-for="item in executionReport.results"
-                :key="item.step_id"
+                v-for="(item, resultIndex) in executionReport.results"
+                :key="resultIndex"
                 class="hover:bg-zinc-800/40 font-mono text-[11px]"
               >
                 <td class="p-2 border border-zinc-800 text-zinc-500">{{ item.timestamp }}</td>
@@ -1579,7 +1462,7 @@ onUnmounted(() => {
         </div>
 
         <div class="p-3 bg-zinc-950 border-t border-zinc-800 flex items-center justify-between">
-          <span class="text-[11px] text-zinc-500">耗时: {{(executionReport.duration_ms / 1000).toFixed(2)}} 秒</span>
+          <span class="text-[11px] text-zinc-500">耗时: {{ executionReport.duration_ms === null ? '未知' : (executionReport.duration_ms / 1000).toFixed(2) + ' 秒' }}</span>
           <div class="flex items-center gap-2">
             <button
               @click="downloadHtmlReport"

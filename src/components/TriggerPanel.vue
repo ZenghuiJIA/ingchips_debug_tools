@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue';
+import { TriggerMatcher } from '../utils/serialLog';
 import type { TriggerRule, CommandEnding, CommandFormat } from '../types';
 import {
   Zap,
@@ -152,38 +153,16 @@ function restorePresets() {
 }
 
 // Expose public method for SerialTerminal to evaluate triggers on incoming text
+const matcher = new TriggerMatcher();
 function checkAndMatchTriggers(rxText: string): TriggerRule[] {
-  const matchedRules: TriggerRule[] = [];
-
-  for (const rule of rules.value) {
-    if (!rule.enabled) continue;
-
-    let matched = false;
-    if (rule.matchType === 'contains') {
-      matched = rxText.includes(rule.matchPattern);
-    } else if (rule.matchType === 'regex') {
-      try {
-        const re = new RegExp(rule.matchPattern);
-        matched = re.test(rxText);
-      } catch {
-        matched = false;
-      }
-    }
-
-    if (matched) {
-      rule.hits++;
-      rule.lastTriggerTime = new Date().toTimeString().split(' ')[0];
-      if (rule.mode === 'once') {
-        rule.enabled = false;
-      }
-      matchedRules.push(rule);
-    }
-  }
-
-  return matchedRules;
+  return matcher.feed(rxText, rules.value);
 }
+function resetMatcher() { matcher.reset(); }
+function suspendMatcher() { matcher.reset(); for (const rule of rules.value) rule.enabled = false; }
 
 defineExpose({
+  suspendMatcher,
+  resetMatcher,
   checkAndMatchTriggers,
   rules
 });

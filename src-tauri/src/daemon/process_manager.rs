@@ -4,8 +4,21 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
 use sysinfo::System;
 use tauri::AppHandle;
+
+fn receive_response(receiver: &Receiver<Result<Value, String>>, id: u64, timeout: Duration) -> Result<Value, String> {
+    let response = receiver.recv_timeout(timeout).map_err(|e| format!("RPC response timeout/disconnect: {}", e))??;
+    if response.get("id").and_then(Value::as_u64) != Some(id) {
+        return Err("RPC response ID mismatch".into());
+    }
+    if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || (response.get("result").is_none() && response.get("error").is_none()) {
+        return Err("Invalid JSON-RPC response".into());
+    }
+    Ok(response)
+}
 
 #[cfg(target_os = "windows")]
 use crate::platform::windows::job_object::ProcessJob;
@@ -51,7 +64,8 @@ pub fn kill_all_daemons() {
 pub struct DaemonManager {
     child: Arc<Mutex<Option<Child>>>,
     stdin_writer: Arc<Mutex<Option<std::process::ChildStdin>>>,
-    stdout_reader: Arc<Mutex<Option<BufReader<std::process::ChildStdout>>>>,
+    responses: Mutex<Option<Arc<Mutex<Receiver<Result<Value, String>>>>>>,
+    rpc_lock: Mutex<()>,
     req_counter: AtomicU64,
     pub child_pid: Arc<Mutex<Option<u32>>>,
     #[cfg(target_os = "windows")]
@@ -66,7 +80,8 @@ impl DaemonManager {
         Self {
             child: Arc::new(Mutex::new(None)),
             stdin_writer: Arc::new(Mutex::new(None)),
-            stdout_reader: Arc::new(Mutex::new(None)),
+            responses: Mutex::new(None),
+            rpc_lock: Mutex::new(()),
             req_counter: AtomicU64::new(1),
             child_pid: Arc::new(Mutex::new(None)),
             #[cfg(target_os = "windows")]
@@ -88,7 +103,7 @@ impl DaemonManager {
             }
             *child_guard = None;
             *self.stdin_writer.lock().unwrap() = None;
-            *self.stdout_reader.lock().unwrap() = None;
+            *self.responses.lock().unwrap() = None;
             *self.child_pid.lock().unwrap() = None;
         }
 
@@ -171,10 +186,25 @@ impl DaemonManager {
 
         let stdin = child.stdin.take().ok_or("Failed to capture daemon stdin")?;
         let stdout = child.stdout.take().ok_or("Failed to capture daemon stdout")?;
-        let reader = BufReader::new(stdout);
+        let (tx, rx) = mpsc::channel();
+        // Only this thread owns stdout. RPC callers wait on a bounded-time channel;
+        // shutdown never needs the lock held by a blocking pipe read.
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(line) => {
+                        if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                            if tx.send(Ok(value)).is_err() { return; }
+                        }
+                    }
+                    Err(err) => { let _ = tx.send(Err(err.to_string())); return; }
+                }
+            }
+            let _ = tx.send(Err("Daemon stdout closed".to_string()));
+        });
 
         *self.stdin_writer.lock().unwrap() = Some(stdin);
-        *self.stdout_reader.lock().unwrap() = Some(reader);
+        *self.responses.lock().unwrap() = Some(Arc::new(Mutex::new(rx)));
         *child_guard = Some(child);
 
         println!("[DaemonManager] Python Daemon started with PID {}", pid);
@@ -182,6 +212,10 @@ impl DaemonManager {
     }
 
     pub fn call_rpc(&self, method: &str, params: Value) -> Result<Value, String> {
+        let _transaction = self.rpc_lock.try_lock()
+            .map_err(|_| "硬件服务正在执行其他操作，请等待当前任务完成".to_string())?;
+        let receiver = self.responses.lock().unwrap().clone()
+            .ok_or("Daemon not started")?;
         let req_id = self.req_counter.fetch_add(1, Ordering::SeqCst);
         let req = json!({
             "jsonrpc": "2.0",
@@ -193,70 +227,29 @@ impl DaemonManager {
         let mut req_str = serde_json::to_string(&req).map_err(|e| e.to_string())?;
         req_str.push('\n');
 
-        // Write to child stdin
-        {
-            let mut writer_guard = self.stdin_writer.lock().unwrap();
-            if let Some(ref mut writer) = *writer_guard {
-                if let Err(e) = writer.write_all(req_str.as_bytes()).and_then(|_| writer.flush()) {
-                    drop(writer_guard);
-                    self.stop();
-                    return Err(format!("Daemon write error: {}", e));
-                }
-            } else {
-                return Err("Daemon stdin not available".to_string());
-            }
+        let writer = Arc::clone(&self.stdin_writer);
+        let (sent, written) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut guard = writer.lock().unwrap();
+            let result = match guard.as_mut() {
+                Some(writer) => writer.write_all(req_str.as_bytes()).and_then(|_| writer.flush()).map_err(|e| e.to_string()),
+                None => Err("Daemon stdin not available".to_string()),
+            };
+            let _ = sent.send(result);
+        });
+        if !matches!(written.recv_timeout(Duration::from_secs(5)), Ok(Ok(()))) {
+            self.stop();
+            return Err("Daemon request write failed/timed out; service stopped".into());
         }
 
-        // Read line from child stdout, skipping empty lines or non-JSON diagnostic noise
-        let mut resp_val: Option<Value> = None;
-        let mut last_raw_line = String::new();
-        {
-            let mut reader_guard = self.stdout_reader.lock().unwrap();
-            if let Some(ref mut reader) = *reader_guard {
-                loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(0) => {
-                            // EOF
-                            break;
-                        }
-                        Ok(_) => {
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() {
-                                continue;
-                            }
-                            last_raw_line = line.clone();
-                            // Attempt to parse as JSON-RPC object
-                            if trimmed.starts_with('{') {
-                                if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-                                    resp_val = Some(val);
-                                    break;
-                                }
-                            }
-                            // Otherwise it might be stray diagnostic output on stdout, skip and keep reading
-                            println!("[DaemonManager] Ignored non-JSON stdout line: {}", trimmed);
-                        }
-                        Err(e) => {
-                            drop(reader_guard);
-                            self.stop();
-                            return Err(format!("Daemon read error: {}", e));
-                        }
-                    }
-                }
-            } else {
-                return Err("Daemon stdout not available".to_string());
-            }
-        }
-
-        let resp_val = match resp_val {
-            Some(v) => v,
-            None => {
+        let tool = params.get("name").and_then(Value::as_str).unwrap_or(method);
+        let timeout = if tool.contains("flash") || tool.contains("dump") || tool.contains("load_file") { 300 } else { 30 };
+        let response = receive_response(&receiver.lock().unwrap(), req_id, Duration::from_secs(timeout));
+        let resp_val = match response {
+            Ok(value) => value,
+            other => {
                 self.stop();
-                if last_raw_line.trim().is_empty() {
-                    return Err("Daemon returned empty response (process may have terminated)".to_string());
-                } else {
-                    return Err(format!("Invalid JSON from daemon -> raw: {}", last_raw_line));
-                }
+                return Err(format!("Daemon RPC {} failed or timed out; service stopped, retry to restart: {:?}", method, other));
             }
         };
 
@@ -279,48 +272,52 @@ impl DaemonManager {
     }
 
     pub fn stop(&self) {
-        let child_pid = { *self.child_pid.lock().unwrap() };
-        println!("[DaemonManager] Stopping daemon (child PID: {:?})...", child_pid);
-
-        // 1. Try sending graceful shutdown RPC and close stdin pipe to trigger immediate EOF in daemon
-        {
-            let mut writer_guard = self.stdin_writer.lock().unwrap();
-            if let Some(mut writer) = writer_guard.take() {
-                let _ = writeln!(writer, "{{\"jsonrpc\":\"2.0\",\"id\":999999,\"method\":\"shutdown\",\"params\":{{}}}}");
-                let _ = writer.flush();
-                drop(writer);
+        // Serialise process replacement with ensure_started. No stdout locks here.
+        let mut child_guard = self.child.lock().unwrap();
+        if let Some(mut child) = child_guard.take() {
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &child.id().to_string()])
+                    .creation_flags(0x08000000).output();
             }
+            let _ = child.kill();
+            let _ = child.wait();
         }
-        *self.stdout_reader.lock().unwrap() = None;
-
-        // 2. Kill the process tree on Windows via taskkill /F /T immediately
-        #[cfg(target_os = "windows")]
-        if let Some(pid) = child_pid {
-            use std::os::windows::process::CommandExt;
-            let _ = Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .creation_flags(0x08000000)
-                .output();
-        }
-
-        // 3. Kill the direct child handle and reap
-        {
-            let mut child_guard = self.child.lock().unwrap();
-            if let Some(ref mut child) = *child_guard {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            *child_guard = None;
-        }
+        *self.stdin_writer.lock().unwrap() = None;
+        *self.responses.lock().unwrap() = None;
         *self.child_pid.lock().unwrap() = None;
-
-        // 4. Ensure all orphaned daemon processes are cleaned up
-        kill_all_daemons();
     }
+
 }
 
 impl Drop for DaemonManager {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_rejects_crossed_responses_and_malformed_results() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(json!({"jsonrpc":"2.0", "id":2, "result":{"bytes":[1]}}))).unwrap();
+        assert!(receive_response(&rx, 1, Duration::from_millis(20)).unwrap_err().contains("mismatch"));
+        tx.send(Ok(json!({"jsonrpc":"2.0", "id":1}))).unwrap();
+        assert!(receive_response(&rx, 1, Duration::from_millis(20)).is_err());
+        tx.send(Ok(json!({"jsonrpc":"2.0", "id":1, "result":{"bytes":[1]}}))).unwrap();
+        assert_eq!(receive_response(&rx, 1, Duration::from_millis(20)).unwrap()["result"]["bytes"][0], 1);
+    }
+
+    #[test]
+    fn rpc_wait_has_a_deadline_and_handles_eof() {
+        let (tx, rx) = mpsc::channel();
+        assert!(receive_response(&rx, 1, Duration::from_millis(10)).is_err());
+        drop(tx);
+        assert!(receive_response(&rx, 1, Duration::from_secs(5)).is_err());
     }
 }

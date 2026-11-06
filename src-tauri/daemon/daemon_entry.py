@@ -11,6 +11,7 @@ import json
 import logging
 import gc
 import traceback
+from pathlib import Path
 from collections import defaultdict
 from typing import Dict, Any, List, Optional
 
@@ -18,6 +19,16 @@ import threading
 import socket
 import time
 import struct
+import subprocess
+import shutil
+from probe_lease import LeasedSession, ProbeLease
+sys.modules.setdefault('daemon_entry', sys.modules[__name__])
+
+# Windows redirected stdio otherwise inherits the ANSI code page. CLI and MCP
+# have a fixed UTF-8 wire format, including Unicode paths and report labels.
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8', errors='strict')
 
 # Configure stderr logging (stdout is reserved strictly for JSON-RPC)
 logging.basicConfig(
@@ -61,6 +72,12 @@ try:
 except Exception as e:
     logger.warning(f"pyserial import warning: {e}")
     SERIAL_AVAILABLE = False
+
+try:
+    from hil.runner import HilRunner
+except Exception as e:
+    HilRunner = None
+    logger.warning(f"HIL runner import warning: {e}")
 
 try:
     from intelhex import IntelHex
@@ -370,15 +387,17 @@ class PyOCDController:
         if not probes:
             target_msg = f" matching ID '{probe_id}'" if probe_id else ""
             raise RuntimeError(f"No debug probe connected{target_msg}.")
+        if len(probes) != 1:
+            raise RuntimeError('Multiple probes are connected; select a unique probe_id explicitly')
         probe = probes[0]
-        options = {}
+        options = {'connect_mode': 'attach', 'resume_on_disconnect': False}
         if target_override:
             options["target_override"] = normalize_target(target_override)
         if pack:
             options["pack"] = pack
         if frequency:
             options["frequency"] = int(frequency)
-        return Session(probe, auto_open=auto_open, options=options)
+        return LeasedSession(Session(probe, auto_open=auto_open, options=options), probe.unique_id)
 
     @staticmethod
     def list_probes() -> List[Dict[str, Any]]:
@@ -428,54 +447,54 @@ class PyOCDController:
             if was_running:
                 target.halt()
 
-            # Standard ARM Cortex-M core registers
-            reg_names = [f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "xpsr", "msp", "psp"]
-            core_regs = {}
-            for name in reg_names:
-                try:
-                    val = target.read_core_register(name)
-                    core_regs[name.upper()] = f"0x{val:08X}"
-                except Exception:
-                    core_regs[name.upper()] = "N/A"
+            try:
+                # Standard ARM Cortex-M core registers
+                reg_names = [f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "xpsr", "msp", "psp"]
+                core_regs = {}
+                for name in reg_names:
+                    try:
+                        val = target.read_core_register(name)
+                        core_regs[name.upper()] = f"0x{val:08X}"
+                    except Exception:
+                        core_regs[name.upper()] = "N/A"
 
-            # SCB Fault Status Registers
-            SCB_CFSR  = 0xE000ED28
-            SCB_HFSR  = 0xE000ED2C
-            SCB_MMFAR = 0xE000ED34
-            SCB_BFAR  = 0xE000ED38
+                # SCB Fault Status Registers
+                SCB_CFSR  = 0xE000ED28
+                SCB_HFSR  = 0xE000ED2C
+                SCB_MMFAR = 0xE000ED34
+                SCB_BFAR  = 0xE000ED38
 
-            cfsr = target.read32(SCB_CFSR)
-            hfsr = target.read32(SCB_HFSR)
-            mmfar = target.read32(SCB_MMFAR)
-            bfar = target.read32(SCB_BFAR)
+                cfsr = target.read32(SCB_CFSR)
+                hfsr = target.read32(SCB_HFSR)
+                mmfar = target.read32(SCB_MMFAR)
+                bfar = target.read32(SCB_BFAR)
 
-            cfsr_decoded = decode_cfsr(cfsr, mmfar, bfar)
-            hfsr_decoded = decode_hfsr(hfsr)
+                cfsr_decoded = decode_cfsr(cfsr, mmfar, bfar)
+                hfsr_decoded = decode_hfsr(hfsr)
 
-            # Auto resume if it was originally running
-            if was_running:
-                try:
+                return {
+                    "target": target.part_number or "Cortex-M",
+                    "core_registers": core_regs,
+                    "fault_registers": {
+                        "CFSR": f"0x{cfsr:08X}",
+                        "HFSR": f"0x{hfsr:08X}",
+                        "MMFAR": f"0x{mmfar:08X}",
+                        "BFAR": f"0x{bfar:08X}",
+                    },
+                    "cfsr_decoded": cfsr_decoded,
+                    "hfsr_decoded": hfsr_decoded,
+                }
+            finally:
+                if was_running:
                     target.resume()
-                except Exception:
-                    pass
-
-            return {
-                "target": target.part_number or "Cortex-M",
-                "core_registers": core_regs,
-                "fault_registers": {
-                    "CFSR": f"0x{cfsr:08X}",
-                    "HFSR": f"0x{hfsr:08X}",
-                    "MMFAR": f"0x{mmfar:08X}",
-                    "BFAR": f"0x{bfar:08X}",
-                },
-                "cfsr_decoded": cfsr_decoded,
-                "hfsr_decoded": hfsr_decoded,
-            }
 
     @staticmethod
-    def read_memory(address: int, count: int, probe_id: Optional[str] = None, target_override: Optional[str] = None, frequency: Optional[int] = None) -> Dict[str, Any]:
-        count = min(count, 4096)  # Cap at 4KB
-        session = PyOCDController._create_session(probe_id, target_override, frequency=frequency)
+    def read_memory(address: int, count: int, probe_id: Optional[str] = None, target_override: Optional[str] = None, frequency: Optional[int] = None, pack_path: Optional[str] = None) -> Dict[str, Any]:
+        if count < 1 or count > 4096:
+            raise ValueError('read_memory count must be between 1 and 4096; use chunked reads for larger snapshots')
+        if address < 0 or address + count > 0x100000000:
+            raise ValueError('Memory range is outside the 32-bit address space')
+        session = PyOCDController._create_session(probe_id, target_override, frequency=frequency, pack=pack_path)
         with session:
             target = session.board.target
             data = target.read_memory_block8(address, count)
@@ -489,6 +508,8 @@ class PyOCDController:
 
     @staticmethod
     def write_memory(address: int, value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None, frequency: Optional[int] = None) -> Dict[str, Any]:
+        if not 0 <= address <= 0xFFFFFFFC or address % 4 or not 0 <= value <= 0xFFFFFFFF:
+            raise ValueError('32-bit write requires an aligned address and uint32 value')
         session = PyOCDController._create_session(probe_id, target_override, frequency=frequency)
         with session:
             target = session.board.target
@@ -497,6 +518,8 @@ class PyOCDController:
 
     @staticmethod
     def write_memory_byte(address: int, value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None, frequency: Optional[int] = None) -> Dict[str, Any]:
+        if not 0 <= address <= 0xFFFFFFFF or not 0 <= value <= 255:
+            raise ValueError('Byte write requires a 32-bit address and uint8 value')
         session = PyOCDController._create_session(probe_id, target_override, frequency=frequency)
         with session:
             target = session.board.target
@@ -547,8 +570,9 @@ class PyOCDController:
             }
 
     @staticmethod
-    def reset_target(halt: bool = False, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
-        session = PyOCDController._create_session(probe_id, target_override)
+    def reset_target(halt: bool = False, probe_id: Optional[str] = None, target_override: Optional[str] = None,
+                     frequency: Optional[int] = None, pack_path: Optional[str] = None) -> Dict[str, Any]:
+        session = PyOCDController._create_session(probe_id, target_override, frequency=frequency, pack=pack_path)
         with session:
             target = session.board.target
             if halt:
@@ -559,12 +583,71 @@ class PyOCDController:
 
     @staticmethod
     def flash_firmware(file_path: str, target_override: Optional[str] = None, probe_id: Optional[str] = None,
-                       pack_path: Optional[str] = None, frequency: Optional[int] = None) -> Dict[str, Any]:
+                        pack_path: Optional[str] = None, frequency: Optional[int] = None,
+                        after_flash: str = 'reset', control: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if after_flash not in ('reset', 'halt', 'none'):
+            raise ValueError('after_flash must be reset, halt or none')
+        from flash_control import require_recovered
+        require_recovered(probe_id)
+        def require_supported_target(name):
+            # Previous bench work reported corrupt ING20 programming with the
+            # bundled algorithm. Do not silently retry it or select a PATH CLI:
+            # that bypasses cancellation, probe ownership, pack and final state.
+            if isinstance(name, str) and name.strip().lower().replace('-', '').replace('_', '') in ('ing20', 'ing200', 'ing2000'):
+                raise RuntimeError(
+                    'ING20 SWD flashing is unsupported: the bundled flash algorithm '
+                    'requires validation; external pyocd CLI fallback cannot preserve '
+                    'cancellation, exclusive probe ownership, pack_path and after_flash. '
+                    'No erase/program/reset was requested.')
+
+        require_supported_target(target_override)
+        folder = None
+        if control is not None:
+            if not isinstance(control, dict) or not probe_id or not control.get('run_id'):
+                raise ValueError('Cancellable flash requires explicit run and probe IDs')
+            if not isinstance(control.get('run_dir'), str) or not control['run_dir']:
+                raise ValueError('Flash run directory missing')
+            folder = Path(control['run_dir']).resolve()
+            if not folder.is_dir():
+                raise ValueError('Flash run directory missing')
         session = PyOCDController._create_session(probe_id, target_override, pack=pack_path, frequency=frequency)
         with session:
-            programmer = FileProgrammer(session)
-            programmer.program(file_path)
-            session.board.target.reset()
+            # Explicitly avoid chip erase and an implicit post-program reset.
+            # The caller-selected after_flash state is applied below.
+            # PyOCD's default progress handler writes to stdout, which is the
+            # JSON-RPC channel for this worker. A no-op callback keeps the wire
+            # protocol clean while still allowing the flash operation to run.
+            require_supported_target(session.board.target.part_number)
+
+            def program():
+                # Attach does not halt a running core. Halt, never reset, before
+                # preparing flash; preserve bytes outside the supplied image.
+                session.board.target.halt()
+                programmer = FileProgrammer(session, progress=lambda _pct: None,
+                                            chip_erase='sector', keep_unwritten=True, no_reset=True)
+                programmer.program(file_path)
+
+            if control is not None:
+                from flash_control import FlashControl, FlashCancelled
+                with FlashControl(session,probe_id,folder/'cancel',folder/'flash-state.json',control['run_id']) as guard:
+                    try:
+                        if guard.cancelled():raise FlashCancelled('Cancelled before programming')
+                        program()
+                        if guard.cancelled():raise FlashCancelled('Cancelled after programming')
+                        guard.completed()
+                    except FlashCancelled:
+                        return guard.stop_confirmed()
+                # Check again before any post-flash target reset.
+                if (folder/'cancel').exists():
+                    session.board.target.halt()
+                    if session.board.target.get_state()!=Target.State.HALTED:raise RuntimeError('Post-flash halt unconfirmed')
+                    return {'state':'CANCELLED','erase_program_stopped':True,'target_halted':True,'firmware_complete':True}
+            else:
+                program()
+            if after_flash == 'reset':
+                session.board.target.reset()
+            elif after_flash == 'halt':
+                session.board.target.reset_and_halt()
             trim_process_memory()
             pack_desc = f" (using pack: {os.path.basename(pack_path)})" if pack_path else ""
             freq_desc = f" @ {frequency // 1_000_000}MHz" if frequency and frequency >= 1_000_000 else ""
@@ -572,7 +655,8 @@ class PyOCDController:
                 "status": "success",
                 "file_path": file_path,
                 "pack_path": pack_path,
-                "message": f"Flashing and reset completed successfully{pack_desc}{freq_desc}."
+                "after_flash": after_flash,
+                "message": f"Flashing completed successfully; after_flash={after_flash}{pack_desc}{freq_desc}."
             }
 
     @staticmethod
@@ -585,68 +669,66 @@ class PyOCDController:
             if was_running:
                 target.halt()
 
-            # Standard ARM Cortex-M core registers
-            reg_names = [f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "xpsr", "msp", "psp"]
-            core_regs = {}
-            for name in reg_names:
-                try:
-                    val = target.read_core_register(name)
-                    core_regs[name.upper()] = f"0x{val:08X}"
-                except Exception:
-                    core_regs[name.upper()] = "N/A"
-
-            # SCB Fault Status Registers
-            SCB_SHCSR = 0xE000ED24
-            SCB_CFSR  = 0xE000ED28
-            SCB_HFSR  = 0xE000ED2C
-            SCB_MMFAR = 0xE000ED34
-            SCB_BFAR  = 0xE000ED38
-
-            shcsr = target.read32(SCB_SHCSR)
-            cfsr = target.read32(SCB_CFSR)
-            hfsr = target.read32(SCB_HFSR)
-            mmfar = target.read32(SCB_MMFAR)
-            bfar = target.read32(SCB_BFAR)
-
-            shcsr_decoded = decode_shcsr(shcsr)
-            cfsr_decoded = decode_cfsr(cfsr, mmfar, bfar)
-            hfsr_decoded = decode_hfsr(hfsr)
-
-            regs_info = {
-                "target": target.part_number or "Cortex-M",
-                "core_registers": core_regs,
-                "fault_registers": {
-                    "SHCSR": f"0x{shcsr:08X}",
-                    "CFSR": f"0x{cfsr:08X}",
-                    "HFSR": f"0x{hfsr:08X}",
-                    "MMFAR": f"0x{mmfar:08X}",
-                    "BFAR": f"0x{bfar:08X}",
-                },
-                "shcsr_decoded": shcsr_decoded,
-                "cfsr_decoded": cfsr_decoded,
-                "hfsr_decoded": hfsr_decoded,
-            }
-
-            deep_analysis = None
             try:
-                from hardfault_analyzer import HardFaultAnalyzer
-                deep_analysis = HardFaultAnalyzer.diagnose_hardfault_deep(
-                    session=session,
-                    core_regs=core_regs,
-                    fault_regs=regs_info["fault_registers"],
-                    cfsr_decoded=cfsr_decoded,
-                    hfsr_decoded=hfsr_decoded,
-                    axf_path=axf_path
-                )
-            except Exception as ex:
-                logger.error(f"Error performing deep HardFault analysis: {ex}", exc_info=True)
-                deep_analysis = {"error": str(ex)}
+                # Standard ARM Cortex-M core registers
+                reg_names = [f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "xpsr", "msp", "psp"]
+                core_regs = {}
+                for name in reg_names:
+                    try:
+                        val = target.read_core_register(name)
+                        core_regs[name.upper()] = f"0x{val:08X}"
+                    except Exception:
+                        core_regs[name.upper()] = "N/A"
 
-            if was_running:
+                # SCB Fault Status Registers
+                SCB_SHCSR = 0xE000ED24
+                SCB_CFSR  = 0xE000ED28
+                SCB_HFSR  = 0xE000ED2C
+                SCB_MMFAR = 0xE000ED34
+                SCB_BFAR  = 0xE000ED38
+
+                shcsr = target.read32(SCB_SHCSR)
+                cfsr = target.read32(SCB_CFSR)
+                hfsr = target.read32(SCB_HFSR)
+                mmfar = target.read32(SCB_MMFAR)
+                bfar = target.read32(SCB_BFAR)
+
+                shcsr_decoded = decode_shcsr(shcsr)
+                cfsr_decoded = decode_cfsr(cfsr, mmfar, bfar)
+                hfsr_decoded = decode_hfsr(hfsr)
+
+                regs_info = {
+                    "target": target.part_number or "Cortex-M",
+                    "core_registers": core_regs,
+                    "fault_registers": {
+                        "SHCSR": f"0x{shcsr:08X}",
+                        "CFSR": f"0x{cfsr:08X}",
+                        "HFSR": f"0x{hfsr:08X}",
+                        "MMFAR": f"0x{mmfar:08X}",
+                        "BFAR": f"0x{bfar:08X}",
+                    },
+                    "shcsr_decoded": shcsr_decoded,
+                    "cfsr_decoded": cfsr_decoded,
+                    "hfsr_decoded": hfsr_decoded,
+                }
+
+                deep_analysis = None
                 try:
+                    from hardfault_analyzer import HardFaultAnalyzer
+                    deep_analysis = HardFaultAnalyzer.diagnose_hardfault_deep(
+                        session=session,
+                        core_regs=core_regs,
+                        fault_regs=regs_info["fault_registers"],
+                        cfsr_decoded=cfsr_decoded,
+                        hfsr_decoded=hfsr_decoded,
+                        axf_path=axf_path
+                    )
+                except Exception as ex:
+                    logger.error(f"Error performing deep HardFault analysis: {ex}", exc_info=True)
+                    deep_analysis = {"error": str(ex)}
+            finally:
+                if was_running:
                     target.resume()
-                except Exception:
-                    pass
 
         pc = core_regs.get("PC", "0x00000000")
         lr = core_regs.get("LR", "0x00000000")
@@ -723,25 +805,31 @@ class PyOCDController:
         Burst-samples CPU program counter (PC) and optionally link register (LR) via SWD.
         Provides high-speed statistical profiling for hotspot functions and spinlock detection.
         """
+        if trace_caller:
+            raise ValueError('Live LR sampling is not supported; halt the target for a register snapshot instead')
         session = PyOCDController._create_session(probe_id, target_override, frequency=frequency)
         samples = []
         start_t = time.time()
 
         with session:
             target = session.board.target
-            # Cortex-M DCRSR/DCRDR access via pyocd target.read_core_register
+            if not target.is_running():
+                raise RuntimeError('PC statistical sampling requires a running target')
+            # DWT_PCSR is the non-halting PC sample register. DCRSR core-register
+            # reads are not valid live profiling and must not be used here.
             for i in range(max(1, min(count, 5000))):
                 try:
-                    pc = target.read_core_register("pc")
-                    lr = target.read_core_register("lr") if trace_caller else None
+                    pc = target.read32(0xE000101C)
+                    if pc in (0, 0xFFFFFFFF):
+                        raise RuntimeError('Target does not expose a valid DWT_PCSR sample')
+                    lr = None
                     samples.append({
                         "i": i,
                         "pc": pc,
                         "lr": lr
                     })
                 except Exception as e:
-                    logger.debug(f"PC sample error at index {i}: {e}")
-                    break
+                    raise RuntimeError(f'PC sample failed at index {i}: {e}') from e
 
         duration_sec = time.time() - start_t
         rate = round(len(samples) / duration_sec, 1) if duration_sec > 0 else 0
@@ -786,6 +874,7 @@ class RTTController:
     _mode = None  # 'jlink' or 'pyocd'
     _jlink = None
     _session = None
+    _lease = None
 
     _ram_start = 0x20000000
     _ram_size = 0x20000
@@ -829,9 +918,7 @@ class RTTController:
                     cls._start_jlink(probe_id, target_override, block_address)
                     cls._mode = "jlink"
                 except Exception as e:
-                    logger.warning(f"J-Link RTT start failed, trying PyOCD fallback: {e}")
-                    cls._start_pyocd(probe_id, target_override, block_address)
-                    cls._mode = "pyocd"
+                    raise RuntimeError(f"J-Link RTT start failed: {e}") from e
             else:
                 cls._start_pyocd(probe_id, target_override, block_address)
                 cls._mode = "pyocd"
@@ -851,6 +938,7 @@ class RTTController:
 
     @classmethod
     def _start_jlink(cls, probe_id: Optional[str], target_override: Optional[str], block_address: Optional[int]):
+        cls._lease = ProbeLease(probe_id)
         cls._jlink = pylink.JLink()
         if probe_id and probe_id.isdigit():
             cls._jlink.open(int(probe_id))
@@ -1013,6 +1101,9 @@ class RTTController:
                     pass
                 cls._session = None
 
+            if cls._lease:
+                cls._lease.close()
+                cls._lease = None
             cls._tcp_port = 0
             cls._mode = None
             trim_process_memory()
@@ -2078,6 +2169,7 @@ class JScopeController:
     _mode = None
     _jlink = None
     _session = None
+    _lease = None
 
     @classmethod
     def start_sampling(cls, variables: List[Dict[str, Any]], interval_ms: int = 20,
@@ -2085,8 +2177,8 @@ class JScopeController:
                        probe_type: Optional[str] = None, interval_us: Optional[int] = None,
                        swd_frequency_hz: Optional[int] = None) -> Dict[str, Any]:
         with cls._lock:
-            if cls._running:
-                cls.stop_sampling()
+            if cls._running or (cls._thread and cls._thread.is_alive()):
+                raise RuntimeError('JScope sampling is already active or stopping; stop it before starting another session')
 
             if not variables:
                 raise ValueError("No variables specified for JScope sampling")
@@ -2117,10 +2209,9 @@ class JScopeController:
                         chosen_type = p.get("probe_type", "generic")
                         break
 
-            cls._running = True
-
             if chosen_type == "jlink" and PYLINK_AVAILABLE:
                 try:
+                    cls._lease = ProbeLease(probe_id)
                     cls._jlink = pylink.JLink()
                     if probe_id and probe_id.isdigit():
                         cls._jlink.open(int(probe_id))
@@ -2137,16 +2228,14 @@ class JScopeController:
                         logger.warning(f"Could not set J-Link speed: {e}")
                     cls._mode = "jlink"
                 except Exception as e:
-                    logger.warning(f"JScope JLink connect failed, fallback to PyOCD: {e}")
-                    cls._session = PyOCDController._create_session(probe_id, target_override, auto_open=True, frequency=cls._swd_frequency_hz)
-                    cls._session.open()
-                    cls._mode = "pyocd"
+                    raise RuntimeError(f"JScope J-Link start failed: {e}") from e
             else:
                 cls._session = PyOCDController._create_session(probe_id, target_override, auto_open=True, frequency=cls._swd_frequency_hz)
                 cls._session.open()
                 logger.info(f"JScope PyOCD SWD frequency set to {cls._swd_frequency_hz} Hz")
                 cls._mode = "pyocd"
 
+            cls._running = True
             cls._thread = threading.Thread(target=cls._sample_worker_loop, daemon=True)
             cls._thread.start()
 
@@ -2265,7 +2354,7 @@ class JScopeController:
                                 val = cls._unpack_val(raw_bytes, size, vtype)
                     except Exception as err:
                         logger.debug(f"Read var {name} failed: {err}")
-                        val = 0
+                        raise RuntimeError(f'Failed to sample {name}: {err}') from err
 
                     if isinstance(val, float):
                         line_parts.append(f"{name}:{val:.3f}")
@@ -2282,8 +2371,10 @@ class JScopeController:
                         out_data = "".join(buffer_chunks).encode("utf-8")
                         try:
                             client.sendall(out_data)
-                        except (BlockingIOError, socket.error):
+                        except BlockingIOError:
                             pass
+                        except socket.error:
+                            break
                         buffer_chunks.clear()
                     last_flush_time = now_perf
 
@@ -2349,6 +2440,9 @@ class JScopeController:
                     pass
                 cls._session = None
 
+            if cls._lease:
+                cls._lease.close()
+                cls._lease = None
             cls._tcp_port = 0
             cls._mode = None
             trim_process_memory()
@@ -2364,6 +2458,7 @@ class SerialController:
     _rx_buffers: Dict[str, bytearray] = {} # port_name -> bytearray
     _rx_threads: Dict[str, threading.Thread] = {}
     _running_flags: Dict[str, bool] = {}
+    _journals: Dict[str, Any] = {}
     _last_active_port: Optional[str] = None
 
     @classmethod
@@ -2391,6 +2486,8 @@ class SerialController:
         """后台持续读取线程，存入环形/定长缓存队列。"""
         while cls._running_flags.get(port_name, False):
             try:
+                if cls._ports.get(port_name) is not ser:
+                    break
                 if ser.in_waiting > 0:
                     data = ser.read(ser.in_waiting)
                     if data:
@@ -2400,10 +2497,17 @@ class SerialController:
                             # 保持最大 1MB 缓存，防止内存无限上涨
                             if len(buf) > 1024 * 1024:
                                 del buf[:len(buf) - 1024 * 1024]
+                        journal = cls._journals.get(port_name)
+                        if journal is not None:
+                            journal.append(data)
                 else:
                     time.sleep(0.01)
             except Exception as e:
                 logger.warning(f"Serial worker read error on {port_name}: {e}")
+                if cls._ports.get(port_name) is ser:
+                    journal = cls._journals.get(port_name)
+                    if journal is not None:
+                        journal.fail(e)
                 break
 
     @classmethod
@@ -2423,6 +2527,8 @@ class SerialController:
         port_name = port_name.strip().upper() if port_name.upper().startswith("COM") else port_name.strip()
         with cls._lock:
             if port_name in cls._ports and cls._ports[port_name].is_open:
+                if cls._ports[port_name].baudrate != baudrate:
+                    raise RuntimeError('Port already open at a different baud rate')
                 cls._last_active_port = port_name
                 return {
                     "status": "already_open",
@@ -2612,6 +2718,29 @@ class SerialController:
 
 # MCP Tools Definitions
 MCP_TOOLS = [
+    {"name":"acknowledge_flash_recovery","description":"Explicitly acknowledge verified board recovery after an UNKNOWN interrupted flash; never acknowledges an active writer","inputSchema":{"type":"object","properties":{"probe_id":{"type":"string"},"confirmation":{"type":"string","enum":["board_recovery_verified"]}},"required":["probe_id","confirmation"]}},
+    {"name":"get_debug_capabilities","description":"Query offline instrumentation capabilities and installed instrument drivers","inputSchema":{"type":"object","properties":{}}},
+    {"name":"analyze_power_capture","description":"Offline power JSONL integration; never current-board HIL proof","inputSchema":{"type":"object","properties":{"file_path":{"type":"string"},"start_ns":{"type":"string"},"end_ns":{"type":"string"},"max_gap_ns":{"type":"string"}},"required":["file_path","start_ns","end_ns"]}},
+    {"name":"start_debug_analysis","description":"Start an isolated offline analysis task","inputSchema":{"type":"object","properties":{"operation":{"type":"string"},"arguments":{"type":"object"},"timeout_ms":{"type":"integer"}},"required":["operation","arguments"]}},
+    {"name":"get_debug_analysis_status","description":"Query offline analysis status","inputSchema":{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}},
+    {"name":"stop_debug_analysis","description":"Cancel offline analysis without touching hardware","inputSchema":{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}},
+    {"name":"get_debug_analysis_result","description":"Read completed offline analysis result","inputSchema":{"type":"object","properties":{"job_id":{"type":"string"}},"required":["job_id"]}},
+    {"name":"analyze_instrumentation","description":"Analyze a HILI file or decoded events offline; use start_debug_analysis for large files","inputSchema":{"type":"object","properties":{"file_path":{"type":"string"},"mode":{"type":"string","enum":["binary","text"]},"events":{"type":"array"},"budgets":{"type":"object"},"device_id":{"type":"string"},"session_id":{"type":"string"}}}},
+    {"name":"analyze_crash_bundle","description":"Validate an offline crash bundle","inputSchema":{"type":"object","properties":{"directory":{"type":"string"},"elf_path":{"type":"string"},"build_id":{"type":"string"}},"required":["directory"]}},
+    {"name":"protocol_plugin_analyze","description":"Run a trusted local Python decoder on recorded data; no host device API is passed",
+     "inputSchema":{"type":"object","properties":{"plugin_path":{"type":"string"},"payload":{"type":"object"},"timeout_ms":{"type":"integer"}},"required":["plugin_path","payload"]}},
+    {"name": "get_hiltest_events", "description": "Read incremental HIL events without consuming other readers",
+     "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "after": {"type": "integer"}, "limit": {"type": "integer"}}, "required": ["run_id"]}},
+    {"name": "get_hiltest_report", "description": "Read the final HIL report and artifact directory",
+     "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]}},
+    {"name": "validate_hiltest", "description": "Validate a HIL test document or file without hardware access",
+     "inputSchema": {"type": "object", "properties": {"document": {"type": "object"}, "file": {"type": "string"}, "parameters": {"type": "object"}}}},
+    {"name": "run_hiltest", "description": "Start a headless HIL test and immediately return its run_id",
+     "inputSchema": {"type": "object", "properties": {"document": {"type": "object"}, "file": {"type": "string"}, "parameters": {"type": "object"}}}},
+    {"name": "get_hiltest_status", "description": "Read status and report location for a HIL test",
+     "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]}},
+    {"name": "stop_hiltest", "description": "Request cooperative cancellation of a HIL test",
+     "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]}},
     {
         "name": "list_probes",
         "description": "列出所有连接至宿主机的 DAPLink / CMSIS-DAP / JLink 硬件调试器探针",
@@ -3048,11 +3177,28 @@ MCP_TOOLS = [
 ]
 
 MCP_SERVER_NAME = "embedded-hil-debugger"
-MCP_SERVER_VERSION = "1.0.0"
+MCP_SERVER_VERSION = "1.7.1"
 MCP_DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
 # 兼容旧调用方式：直接以工具名作为 JSON-RPC method
 DIRECT_TOOL_METHODS = [
+    "get_debug_capabilities", "analyze_power_capture", "start_debug_analysis", "get_debug_analysis_status", "stop_debug_analysis", "get_debug_analysis_result",
+    "analyze_instrumentation",
+    "analyze_crash_bundle",
+    "begin_probe_scope",
+    "capture_hil_evidence",
+    "native_svd_assert",
+    "read_framebuffer_raw",
+    "resolve_symbol",
+    "acknowledge_flash_recovery",
+    "protocol_plugin_analyze",
+    "get_hiltest_events",
+    "get_hiltest_report",
+    "validate_hiltest",
+    "run_hiltest",
+    "get_hiltest_status",
+    "stop_hiltest",
+    "read_memory_image",
     "list_probes",
     "read_core_registers",
     "read_memory",
@@ -3104,11 +3250,167 @@ def wrap_tool_error(message: str) -> Dict[str, Any]:
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
 
+_HIL_RUNNER = None
+_NATIVE_PROBE_LEASES = []
+_HIL_RUNNER_LOCK = threading.Lock()
+
+
+def get_hil_runner() -> "HilRunner":
+    global _HIL_RUNNER
+    if HilRunner is None:
+        raise RuntimeError('HIL runner is unavailable in this daemon build')
+    with _HIL_RUNNER_LOCK:
+        if _HIL_RUNNER is None:
+            report_root = os.environ.get('HIL_REPORT_DIR') or str(Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'AI-HIL-Debugger' / 'reports')
+            _HIL_RUNNER = HilRunner({'pyocd': PyOCDController, 'serial': SerialController}, report_root)
+        return _HIL_RUNNER
+
+
+def hil_run(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    document = arguments.get('document')
+    file = arguments.get('file')
+    if not document and not file:
+        raise ValueError('run_hiltest requires document or file')
+    return get_hil_runner().start(document=document, file=file, parameters=arguments.get('parameters'))
+
+
 def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
     """Dispatch tool call to corresponding handler."""
+    if name=='acknowledge_flash_recovery':
+        from flash_control import acknowledge_recovery
+        return acknowledge_recovery(arguments['probe_id'],arguments.get('confirmation'))
+    if name in ('write_memory','write_memory_byte','load_file_to_memory','flash_firmware','reset_target','svd_write_register','svd_write_field'):
+        from flash_control import require_recovered
+        selected=arguments.get('probe_id')
+        if not selected:
+            probes=PyOCDController.list_probes()
+            if len(probes)==1:selected=probes[0]['unique_id']
+        if selected:require_recovered(selected)
+    if name in ('get_debug_capabilities','analyze_instrumentation','analyze_crash_bundle','analyze_power_capture','start_debug_analysis','get_debug_analysis_status','stop_debug_analysis','get_debug_analysis_result'):
+        from debug_service import dispatch
+        return dispatch(name,arguments)
+    if name == 'begin_probe_scope':
+        if os.environ.get('HIL_NATIVE_WORKER') != '1':
+            raise RuntimeError('Probe scope is internal to the native runner')
+        available = {p['unique_id'] for p in PyOCDController.list_probes()}
+        requested = arguments.get('probe_ids', [])
+        if any(p not in available for p in requested):
+            raise ValueError('Probe scope requires complete connected probe IDs')
+        leases = []
+        try:
+            for probe in requested:
+                leases.append(ProbeLease(probe, allow_nested=True))
+        except Exception:
+            for lease in leases: lease.close()
+            raise
+        _NATIVE_PROBE_LEASES.extend(leases)
+        return {'acquired': requested}
+    if name == 'resolve_symbol':
+        from elftools.elf.elffile import ELFFile
+        with open(arguments['axf_path'], 'rb') as source:
+            table = ELFFile(source).get_section_by_name('.symtab')
+            matches = table.get_symbol_by_name(arguments['symbol']) if table else []
+            if len(matches or []) != 1: raise ValueError('Symbol must resolve uniquely')
+            return {'address': int(matches[0]['st_value'])}
+    if name == 'read_framebuffer_raw':
+        p = arguments
+        width, height = int(p['width']), int(p['height'])
+        if not 1 <= width <= 4096 or not 1 <= height <= 4096: raise ValueError('Invalid framebuffer dimensions')
+        fmt = p.get('pixel_format', 'rgb565')
+        if fmt not in ('rgb565', 'rgb888', 'argb8888', 'mono', '1bit'): raise ValueError('Unsupported pixel format')
+        count = (width*height+7)//8 if fmt in ('mono', '1bit') else width*height*{'rgb565':2,'rgb888':3,'argb8888':4}[fmt]
+        if count > 16*1024*1024: raise ValueError('Framebuffer exceeds 16 MiB')
+        address = int(str(p['address']), 0) if isinstance(p['address'], str) else p['address']
+        if address < 0 or address + count > 2**32: raise ValueError('Framebuffer address overflow')
+        with PyOCDController._create_session(p.get('probe_id'), p.get('target_override'), frequency=p.get('frequency')) as session:
+            data = bytearray()
+            for offset in range(0, count, 4096):
+                size = min(4096, count-offset)
+                chunk = session.board.target.read_memory_block8(address+offset,size)
+                if len(chunk) != size: raise RuntimeError('Incomplete framebuffer read')
+                data.extend(chunk)
+        return {**p, 'data': data.hex(), 'pixel_format': fmt}
+    if name == 'native_svd_assert':
+        from svd_manager import SvdManager
+        p = arguments
+        regs = SvdManager.get_registers(p['target_device'], p['peripheral'])
+        reg = next((r for r in regs if r['name'] == p['register']), None)
+        if not reg: raise ValueError('SVD register missing')
+        address = int(reg['address'], 0)
+        value = SvdManager.read_register(address, p['probe_id'], p['target_device'])['value_uint']
+        if p.get('field_name'):
+            field = next((f for f in reg['fields'] if f['name'] == p['field_name']), None)
+            if field is None: raise ValueError('SVD field missing')
+            value = (value >> field['bit_offset']) & ((1 << field['bit_width']) - 1)
+        from hil.worker import compare
+        compare(value, p['expected_reg_val'], p.get('operator', '=='))
+        return {'actual': value}
+    if name == 'capture_hil_evidence':
+        p = arguments
+        with PyOCDController._create_session(p['probe_id'], p.get('target_device'), frequency=p.get('frequency'), pack=p.get('pack_path')) as session:
+            target = session.board.target
+            target.halt()
+            result = {'core': {}, 'fault': {}, 'errors': []}
+            for reg in ('pc', 'lr', 'sp', 'xpsr', 'msp', 'psp'):
+                try: result['core'][reg] = target.read_core_register(reg)
+                except Exception as exc: result['errors'].append(str(exc))
+            for reg, address in [('CFSR', 0xE000ED28), ('HFSR', 0xE000ED2C), ('MMFAR', 0xE000ED34), ('BFAR', 0xE000ED38)]:
+                try: result['fault'][reg] = target.read32(address)
+                except Exception as exc: result['errors'].append(str(exc))
+            settings = p.get('evidence', {})
+            if 'memory_addr' in settings:
+                count = int(settings.get('count', 256))
+                if not 1 <= count <= 4096: raise ValueError('Evidence count out of range')
+                raw = target.read_memory_block8(settings['memory_addr'], count)
+                if len(raw) != count: raise RuntimeError('Incomplete evidence memory read')
+                result['memory'] = {'address': settings['memory_addr'], 'bytes': list(raw)}
+            return result
+    if name == 'protocol_plugin_analyze':
+        from hil.plugins import analyze
+        return analyze(arguments['plugin_path'], arguments['payload'], arguments.get('timeout_ms', 2000))
+    if name == 'run_hiltest':
+        return hil_run(arguments)
+    if name == 'get_hiltest_status':
+        return get_hil_runner().get(arguments['run_id'])
+    if name == 'stop_hiltest':
+        return get_hil_runner().stop(arguments['run_id'])
+    if name == 'get_hiltest_events':
+        return get_hil_runner().events(arguments['run_id'], arguments.get('after', 0), arguments.get('limit', 200))
+    if name == 'get_hiltest_report':
+        return get_hil_runner().report(arguments['run_id'])
+    if name == 'validate_hiltest':
+        from hil.config import load_plan
+        plan = load_plan(arguments.get('document'), arguments.get('file'), arguments.get('parameters'))
+        return {'valid': True, 'plan': plan}
     probe_id = arguments.get("probe_id")
     target_override = arguments.get("target_override")
+    hardware_methods = {
+        'read_core_registers', 'read_memory', 'write_memory', 'write_memory_byte',
+        'dump_memory_to_file', 'load_file_to_memory', 'flash_firmware', 'reset_target',
+        'diagnose_hardfault', 'capture_lcd_framebuffer', 'sample_pc_trace',
+        'svd_read_register', 'svd_read_all_registers', 'svd_write_register', 'svd_write_field',
+        'start_rtt', 'start_jscope_sampling',
+    }
+    if name in hardware_methods:
+        for controller in (RTTController, JScopeController):
+            if controller._running or (controller._thread and controller._thread.is_alive()):
+                raise RuntimeError('Debug probe is occupied by RTT/JScope; stop the active stream before another SWD operation')
 
+    if name == 'read_memory_image':
+        address = int(str(arguments['address']), 0)
+        count = int(arguments['count'])
+        if not 0 < count <= 1024 * 1024 or address < 0 or address + count > 2**32:
+            raise ValueError('Invalid memory image range')
+        path = arguments['file_path']
+        if str(path).lower().endswith(('.hex', '.ihex')):
+            image = IntelHex(path)
+            if not any(start < address + count and end > address for start, end in image.segments()):
+                raise ValueError('HEX file has no data in the selected address range')
+            return list(image.tobinarray(start=address, size=count))
+        if not str(path).lower().endswith('.bin'):
+            raise ValueError('Memory image must be a BIN or Intel HEX file')
+        with open(path, 'rb') as image:
+            return list(image.read(count))
     if name == "list_probes":
         return PyOCDController.list_probes()
     elif name == "read_core_registers":
@@ -3118,7 +3420,7 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         if isinstance(address, str):
             address = int(address, 16 if address.startswith("0x") else 10)
         count = int(arguments.get("count", 64))
-        return PyOCDController.read_memory(address, count, probe_id, target_override)
+        return PyOCDController.read_memory(address, count, probe_id, target_override, frequency=arguments.get('frequency'))
     elif name == "write_memory":
         address = arguments["address"]
         if isinstance(address, str):
@@ -3126,7 +3428,7 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         value = arguments["value"]
         if isinstance(value, str):
             value = int(value, 16 if value.startswith("0x") else 10)
-        return PyOCDController.write_memory(address, value, probe_id, target_override)
+        return PyOCDController.write_memory(address, value, probe_id, target_override, frequency=arguments.get('frequency'))
     elif name == "write_memory_byte":
         address = arguments["address"]
         if isinstance(address, str):
@@ -3134,7 +3436,7 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         value = arguments["value"]
         if isinstance(value, str):
             value = int(value, 16 if value.startswith("0x") else 10)
-        return PyOCDController.write_memory_byte(address, value, probe_id, target_override)
+        return PyOCDController.write_memory_byte(address, value, probe_id, target_override, frequency=arguments.get('frequency'))
     elif name == "dump_memory_to_file":
         address = arguments["address"]
         if isinstance(address, str):
@@ -3157,10 +3459,10 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         freq = arguments.get("frequency")
         if isinstance(freq, str):
             freq = int(freq, 16 if freq.startswith("0x") else 10)
-        return PyOCDController.flash_firmware(file_path, target_override, probe_id, pack_path=pack_path, frequency=freq)
+        return PyOCDController.flash_firmware(file_path, target_override, probe_id, pack_path=pack_path, frequency=freq, after_flash=arguments.get('after_flash', 'reset'), control=arguments.get('control'))
     elif name == "reset_target":
         halt = bool(arguments.get("halt", False))
-        return PyOCDController.reset_target(halt, probe_id, target_override)
+        return PyOCDController.reset_target(halt, probe_id, target_override, frequency=arguments.get('frequency'), pack_path=arguments.get('pack_path'))
     elif name == "diagnose_hardfault":
         axf_path = arguments.get("axf_path")
         return PyOCDController.diagnose_hardfault(probe_id, target_override, axf_path)
@@ -3204,7 +3506,15 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         ram_size = arguments.get("ram_size")
         if isinstance(ram_size, str):
             ram_size = int(ram_size, 16 if ram_size.startswith("0x") else 10)
-        return RTTController.start_rtt(probe_id, target_override, block_addr, probe_type, ram_start=ram_start, ram_size=ram_size)
+        probes = [p for p in PyOCDController.list_probes() if (not probe_id or p['unique_id'] == probe_id) and (not probe_type or p['probe_type'] == probe_type)]
+        if len(probes) != 1:
+            raise ValueError('Select exactly one debug probe for RTT')
+        probe_id = probes[0]['unique_id']
+        try:
+            return RTTController.start_rtt(probe_id, target_override, block_addr, probe_type, ram_start=ram_start, ram_size=ram_size)
+        except Exception:
+            RTTController.stop_rtt()
+            raise
     elif name == "stop_rtt":
         return RTTController.stop_rtt()
     elif name == "parse_axf_symbols":
@@ -3222,8 +3532,16 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         if swd_freq is not None:
             swd_freq = int(swd_freq)
         probe_type = arguments.get("probe_type")
-        return JScopeController.start_sampling(variables, interval, probe_id, target_override, probe_type,
-                                              interval_us=interval_us, swd_frequency_hz=swd_freq)
+        probes = [p for p in PyOCDController.list_probes() if (not probe_id or p['unique_id'] == probe_id) and (not probe_type or p['probe_type'] == probe_type)]
+        if len(probes) != 1:
+            raise ValueError('Select exactly one debug probe for JScope')
+        probe_id = probes[0]['unique_id']
+        try:
+            return JScopeController.start_sampling(variables, interval, probe_id, target_override, probe_type,
+                                                  interval_us=interval_us, swd_frequency_hz=swd_freq)
+        except Exception:
+            JScopeController.stop_sampling()
+            raise
     elif name == "stop_jscope_sampling":
         return JScopeController.stop_sampling()
     elif name == "analyze_firmware_resources":
@@ -3525,4 +3843,60 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if '--debug-analysis-worker' in sys.argv:
+        from debug_service import worker
+        worker(sys.argv[sys.argv.index('--debug-analysis-worker')+1])
+    elif '--protocol-plugin-worker' in sys.argv:
+        from hil.plugins import worker
+        sys.exit(worker(sys.argv[sys.argv.index('--protocol-plugin-worker') + 1]))
+    elif '--hil-worker' in sys.argv:
+        from hil.worker import Worker, watch_supervisor
+        folder = Path(sys.argv[sys.argv.index('--hil-worker') + 1]).resolve()
+        if '--hil-supervisor' in sys.argv:
+            supervisor = int(sys.argv[sys.argv.index('--hil-supervisor') + 1])
+            threading.Thread(target=watch_supervisor, args=(folder, supervisor), daemon=True).start()
+        plan = json.loads((folder / 'plan.json').read_text(encoding='utf-8'))
+        result = Worker(plan, folder, {'pyocd': PyOCDController, 'serial': SerialController}).run()
+        sys.exit({'PASS': 0, 'FAIL': 1, 'ERROR': 2, 'CANCELLED': 3}.get(result, 2))
+    elif any(flag in sys.argv for flag in ('--mode', '--validate', '--file', '--replay-events', '--help')):
+        import argparse
+        from hil.config import load_plan
+        parser = argparse.ArgumentParser(description='Headless HIL test runner')
+        parser.add_argument('--mode', choices=['hiltest'], default='hiltest')
+        parser.add_argument('--file', required=True)
+        parser.add_argument('--report-dir', default='reports')
+        parser.add_argument('--validate', action='store_true')
+        parser.add_argument('--replay-events', help='Replay events.jsonl without accessing hardware')
+        parser.add_argument('--set', action='append', default=[], metavar='NAME=VALUE')
+        args = parser.parse_args()
+        try:
+            overrides = dict(item.split('=', 1) for item in args.set)
+            if args.validate:
+                print(json.dumps({'valid': True, 'plan': load_plan(file=args.file, parameters=overrides)}, ensure_ascii=False))
+                sys.exit(0)
+            if args.replay_events:
+                from hil.replay import replay
+                import uuid
+                report = replay(load_plan(file=args.file, parameters=overrides), args.replay_events,
+                    Path(args.report_dir) / ('replay-' + uuid.uuid4().hex[:12]))
+                print(json.dumps(report, ensure_ascii=False), flush=True)
+                sys.exit(0 if report['state'] == 'PASS' else 1)
+            runner = HilRunner(report_root=args.report_dir)
+            state = runner.start(file=args.file, parameters=overrides)
+            print(json.dumps(state, ensure_ascii=False), flush=True)
+            try:
+                while not state['done']:
+                    time.sleep(.1)
+                    state = runner.get(state['run_id'])
+            except KeyboardInterrupt:
+                runner.stop(state['run_id'])
+                while not state['done']:
+                    time.sleep(.1)
+                    state = runner.get(state['run_id'])
+            print(json.dumps(state, ensure_ascii=False), flush=True)
+            sys.exit({'PASS': 0, 'FAIL': 1, 'CANCELLED': 3}.get(state['state'], 2))
+        except Exception as exc:
+            print(json.dumps({'state': 'ERROR', 'error': str(exc)}, ensure_ascii=False), flush=True)
+            sys.exit(2)
+    else:
+        main()

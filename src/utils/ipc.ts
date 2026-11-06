@@ -62,6 +62,10 @@ export async function safeInvoke<T = any>(cmd: string, args: Record<string, any>
     } as any;
   }
 
+  if (cmd === 'trim_system_memory') {
+    return 25 * 1024 * 1024 as any;
+  }
+
   if (cmd === 'get_serial_status') {
     return [false, null, false, true, false] as any;
   }

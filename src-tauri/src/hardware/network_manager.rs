@@ -21,6 +21,38 @@ pub enum NetworkMode {
     UdpSocket,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn udp_reply_requires_peer_and_close_releases_session() {
+        let manager = NetworkManager::new(Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let name = "UDP:127.0.0.1:0";
+        let backend = Arc::new(Mutex::new(Some(ConnectionBackend::Udp(socket, None))));
+        let running = Arc::new(AtomicBool::new(true));
+        manager.sessions.lock().unwrap().insert(name.into(), Arc::new(NetworkSession {
+            name: name.into(), mode: NetworkMode::UdpSocket, host: "127.0.0.1".into(), port: 0,
+            backend: Arc::clone(&backend), is_running: Arc::clone(&running),
+        }));
+        assert!(manager.write_data(name, b"reply").is_err());
+        if let Some(ConnectionBackend::Udp(_, remote)) = backend.lock().unwrap().as_mut() {
+            *remote = Some(peer.local_addr().unwrap());
+        }
+        assert_eq!(manager.write_data(name, b"reply").unwrap(), 5);
+        let mut bytes = [0; 16];
+        let (count, _) = peer.recv_from(&mut bytes).unwrap();
+        assert_eq!(&bytes[..count], b"reply");
+        manager.stop_stream(name);
+        assert!(!running.load(Ordering::SeqCst));
+        assert!(manager.list_sessions().is_empty());
+        assert!(manager.write_data(name, b"reply").is_err());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkStreamInfo {
     pub name: String,
@@ -46,6 +78,7 @@ pub struct NetworkSession {
 }
 
 pub struct NetworkManager {
+    lifecycle: Mutex<()>,
     sessions: Arc<Mutex<HashMap<String, Arc<NetworkSession>>>>,
     protocol_engine: Arc<Mutex<Option<ProtocolEngine>>>,
     waveform_source: Arc<Mutex<Option<String>>>,
@@ -57,6 +90,7 @@ impl NetworkManager {
         waveform_source: Arc<Mutex<Option<String>>>,
     ) -> Self {
         Self {
+            lifecycle: Mutex::new(()),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             protocol_engine,
             waveform_source,
@@ -94,143 +128,102 @@ impl NetworkManager {
 
     /// Connect or listen to a network stream
     pub fn start_stream(
-        &self,
-        app: AppHandle,
-        name: String,
-        mode: NetworkMode,
-        host: String,
-        port: u16,
+        &self, app: AppHandle, name: String, mode: NetworkMode, host: String, port: u16,
     ) -> Result<(), String> {
-        self.stop_stream(&name);
-
-        let is_running = Arc::new(AtomicBool::new(true));
-        let backend = Arc::new(Mutex::new(None));
-
-        let session = Arc::new(NetworkSession {
-            name: name.clone(),
-            mode: mode.clone(),
-            host: host.clone(),
-            port,
-            backend: Arc::clone(&backend),
-            is_running: Arc::clone(&is_running),
-        });
-
-        {
-            let mut map = self.sessions.lock().unwrap();
-            map.insert(name.clone(), Arc::clone(&session));
-            // Auto bind to waveform source if not configured
-            let mut wf_guard = self.waveform_source.lock().unwrap();
-            if wf_guard.is_none() {
-                *wf_guard = Some(name.clone());
-            }
+        let _lifecycle = self.lifecycle.lock().unwrap();
+        use std::net::ToSocketAddrs;
+        if self.sessions.lock().unwrap().contains_key(&name) {
+            return Err("网络会话已存在，请先关闭".into());
         }
-
-        let stream_name = name.clone();
-        let engine_clone = Arc::clone(&self.protocol_engine);
-        let wf_source_clone = Arc::clone(&self.waveform_source);
-
-        std::thread::spawn(move || {
-            match mode {
-                NetworkMode::TcpClient => {
-                    let addr = format!("{}:{}", host, port);
-                    println!("[NetworkManager] Connecting to TCP server {}...", addr);
-                    match TcpStream::connect(&addr) {
-                        Ok(stream) => {
-                            let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
-                            let _ = stream.set_nodelay(true);
-                            if let Ok(reader_clone) = stream.try_clone() {
-                                {
-                                    let mut b_guard = backend.lock().unwrap();
-                                    *b_guard = Some(ConnectionBackend::Tcp(stream));
-                                }
-                                Self::run_tcp_read_loop(
-                                    app,
-                                    reader_clone,
-                                    stream_name,
-                                    is_running,
-                                    engine_clone,
-                                    wf_source_clone,
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[NetworkManager] Failed to connect to {}: {}", addr, e);
-                            is_running.store(false, Ordering::SeqCst);
-                        }
-                    }
-                }
-                NetworkMode::TcpServer => {
-                    let bind_addr = format!("{}:{}", host, port);
-                    println!("[NetworkManager] Starting TCP Server on {}...", bind_addr);
-                    match TcpListener::bind(&bind_addr) {
-                        Ok(listener) => {
-                            let _ = listener.set_nonblocking(true);
-                            while is_running.load(Ordering::Relaxed) {
-                                match listener.accept() {
-                                    Ok((client_stream, peer)) => {
-                                        println!("[NetworkManager] TCP Client connected: {}", peer);
-                                        let _ = client_stream.set_read_timeout(Some(Duration::from_millis(50)));
-                                        let _ = client_stream.set_nodelay(true);
-                                        if let Ok(reader_clone) = client_stream.try_clone() {
-                                            {
-                                                let mut b_guard = backend.lock().unwrap();
-                                                *b_guard = Some(ConnectionBackend::Tcp(client_stream));
-                                            }
-                                            Self::run_tcp_read_loop(
-                                                app.clone(),
-                                                reader_clone,
-                                                stream_name.clone(),
-                                                Arc::clone(&is_running),
-                                                Arc::clone(&engine_clone),
-                                                Arc::clone(&wf_source_clone),
-                                            );
-                                        }
-                                        break;
-                                    }
-                                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                        std::thread::sleep(Duration::from_millis(100));
-                                    }
-                                    Err(_) => {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[NetworkManager] Failed to bind TCP server on {}: {}", bind_addr, e);
-                            is_running.store(false, Ordering::SeqCst);
-                        }
-                    }
-                }
-                NetworkMode::UdpSocket => {
-                    let bind_addr = format!("{}:{}", host, port);
-                    println!("[NetworkManager] Binding UDP Socket on {}...", bind_addr);
-                    match UdpSocket::bind(&bind_addr) {
-                        Ok(socket) => {
-                            let _ = socket.set_read_timeout(Some(Duration::from_millis(50)));
-                            let socket_clone = socket.try_clone().unwrap_or_else(|_| socket.try_clone().unwrap());
-                            {
-                                let mut b_guard = backend.lock().unwrap();
-                                *b_guard = Some(ConnectionBackend::Udp(socket, None));
-                            }
-                            Self::run_udp_read_loop(
-                                app,
-                                socket_clone,
-                                stream_name,
-                                is_running,
-                                engine_clone,
-                                wf_source_clone,
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("[NetworkManager] Failed to bind UDP on {}: {}", bind_addr, e);
-                            is_running.store(false, Ordering::SeqCst);
-                        }
-                    }
-                }
+        let addr = format!("{}:{}", host, port);
+        // Establish/bind first. A successful invoke never hides a connection failure.
+        let mut listener = None;
+        let initial = match mode {
+            NetworkMode::TcpClient => {
+                let peer = addr.to_socket_addrs().map_err(|e| e.to_string())?.next().ok_or("无效网络地址")?;
+                let stream = TcpStream::connect_timeout(&peer, Duration::from_secs(3)).map_err(|e| e.to_string())?;
+                stream.set_read_timeout(Some(Duration::from_millis(50))).map_err(|e| e.to_string())?;
+                stream.set_write_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
+                Some(ConnectionBackend::Tcp(stream))
             }
+            NetworkMode::TcpServer => {
+                let tcp = TcpListener::bind(&addr).map_err(|e| e.to_string())?;
+                tcp.set_nonblocking(true).map_err(|e| e.to_string())?;
+                listener = Some(tcp);
+                None
+            }
+            NetworkMode::UdpSocket => {
+                let socket = UdpSocket::bind(&addr).map_err(|e| e.to_string())?;
+                socket.set_read_timeout(Some(Duration::from_millis(50))).map_err(|e| e.to_string())?;
+                socket.set_write_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
+                Some(ConnectionBackend::Udp(socket, None))
+            }
+        };
+        let is_running = Arc::new(AtomicBool::new(true));
+        let backend = Arc::new(Mutex::new(initial));
+        let session = Arc::new(NetworkSession {
+            name: name.clone(), mode: mode.clone(), host, port,
+            backend: Arc::clone(&backend), is_running: Arc::clone(&is_running),
         });
-
+        self.sessions.lock().unwrap().insert(name.clone(), session);
+        {
+            let mut source = self.waveform_source.lock().unwrap();
+            if source.is_none() { *source = Some(name.clone()); }
+        }
+        let engine = Arc::clone(&self.protocol_engine);
+        let source = Arc::clone(&self.waveform_source);
+        let sessions = Arc::clone(&self.sessions);
+        std::thread::spawn(move || {
+            let result: Result<(), String> = (|| {
+                if let Some(listener) = listener {
+                    while is_running.load(Ordering::SeqCst) {
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                stream.set_read_timeout(Some(Duration::from_millis(50))).map_err(|e| e.to_string())?;
+                                stream.set_write_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
+                                let reader = stream.try_clone().map_err(|e| e.to_string())?;
+                                *backend.lock().unwrap() = Some(ConnectionBackend::Tcp(stream));
+                                let _ = app.emit("network-state", &name);
+                                Self::run_tcp_read_loop(app.clone(), reader, name.clone(), Arc::clone(&is_running), Arc::clone(&engine), Arc::clone(&source), true);
+                                *backend.lock().unwrap() = None;
+                                let _ = app.emit("network-state", &name);
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(50)),
+                            Err(e) => return Err(e.to_string()),
+                        }
+                    }
+                } else {
+                    let cloned = {
+                        let guard = backend.lock().unwrap();
+                        match guard.as_ref() {
+                            Some(ConnectionBackend::Tcp(stream)) => Some((Some(stream.try_clone().map_err(|e| e.to_string())?), None)),
+                            Some(ConnectionBackend::Udp(socket, _)) => Some((None, Some(socket.try_clone().map_err(|e| e.to_string())?))),
+                            None => None,
+                        }
+                    };
+                    if let Some((tcp, udp)) = cloned {
+                        if let Some(stream) = tcp {
+                            Self::run_tcp_read_loop(app.clone(), stream, name.clone(), Arc::clone(&is_running), engine, source, false);
+                        } else if let Some(socket) = udp {
+                            Self::run_udp_read_loop(app.clone(), socket, name.clone(), Arc::clone(&is_running), engine, source, Arc::clone(&backend));
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            is_running.store(false, Ordering::SeqCst);
+            *backend.lock().unwrap() = None;
+            // An old worker must not remove a replacement session with the same name.
+            let mut map = sessions.lock().unwrap();
+            if map.get(&name).map(|s| Arc::ptr_eq(&s.is_running, &is_running)).unwrap_or(false) {
+                map.remove(&name);
+            }
+            drop(map);
+            let _ = app.emit("serial-disconnected", super::serial_manager::SerialDisconnectPayload {
+                port: name.clone(), reason: result.err().unwrap_or_else(|| "网络连接已关闭".into()),
+            });
+            let _ = app.emit("network-state", &name);
+        });
         Ok(())
     }
 
@@ -242,6 +235,7 @@ impl NetworkManager {
         is_running: Arc<AtomicBool>,
         engine_arc: Arc<Mutex<Option<ProtocolEngine>>>,
         waveform_source_arc: Arc<Mutex<Option<String>>>,
+        keep_listening: bool,
     ) {
         let mut read_buf = [0u8; 4096];
         let mut batch_buffer: Vec<u8> = Vec::with_capacity(4096);
@@ -304,6 +298,7 @@ impl NetworkManager {
                     .as_millis() as u64;
 
                 let payload = SerialRxPayload {
+                    session_id: None,
                     port: stream_name.clone(),
                     data: std::mem::take(&mut batch_buffer),
                     timestamp_ms: now_ms,
@@ -316,7 +311,14 @@ impl NetworkManager {
             std::thread::sleep(Duration::from_millis(2));
         }
 
-        is_running.store(false, Ordering::SeqCst);
+        if !batch_buffer.is_empty() {
+            let _ = app.emit("serial-rx", SerialRxPayload {
+                session_id: None,
+                port: stream_name, data: batch_buffer,
+                timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+            });
+        }
+        if !keep_listening { is_running.store(false, Ordering::SeqCst); }
     }
 
     /// Read loop for UDP socket
@@ -327,6 +329,7 @@ impl NetworkManager {
         is_running: Arc<AtomicBool>,
         engine_arc: Arc<Mutex<Option<ProtocolEngine>>>,
         waveform_source_arc: Arc<Mutex<Option<String>>>,
+        backend: Arc<Mutex<Option<ConnectionBackend>>>,
     ) {
         let mut read_buf = [0u8; 4096];
         let mut batch_buffer: Vec<u8> = Vec::with_capacity(4096);
@@ -334,7 +337,8 @@ impl NetworkManager {
 
         while is_running.load(Ordering::Relaxed) {
             match socket.recv_from(&mut read_buf) {
-                Ok((n, _src)) if n > 0 => {
+                Ok((n, src)) if n > 0 => {
+                    if let Some(ConnectionBackend::Udp(_, peer)) = backend.lock().unwrap().as_mut() { *peer = Some(src); }
                     let incoming = &read_buf[..n];
 
                     let is_active_wf_source = {
@@ -384,6 +388,7 @@ impl NetworkManager {
                     .as_millis() as u64;
 
                 let payload = SerialRxPayload {
+                    session_id: None,
                     port: stream_name.clone(),
                     data: std::mem::take(&mut batch_buffer),
                     timestamp_ms: now_ms,
@@ -415,7 +420,7 @@ impl NetworkManager {
                 if let Some(target) = remote_opt {
                     socket.send_to(data, *target).map_err(|e| format!("UDP Send failed: {}", e))
                 } else {
-                    Err("UDP 未配置目标发送地址".to_string())
+                    Err("UDP 尚未收到对端数据；请先让对端向本地监听地址发送一个数据报，再回复该对端".to_string())
                 }
             }
             None => Err(format!("网络连接 {} 未建立", name)),
@@ -424,11 +429,14 @@ impl NetworkManager {
 
     /// Stop and close a network stream
     pub fn stop_stream(&self, name: &str) {
+        let _lifecycle = self.lifecycle.lock().unwrap();
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(s) = sessions.remove(name) {
             s.is_running.store(false, Ordering::SeqCst);
             let mut b_guard = s.backend.lock().unwrap();
             *b_guard = None;
         }
+        let mut source = self.waveform_source.lock().unwrap();
+        if source.as_deref() == Some(name) { *source = None; }
     }
 }

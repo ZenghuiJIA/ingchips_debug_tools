@@ -1,12 +1,17 @@
 {
   "name": "ai-hil-debugger",
-  "version": "1.3.0",
+  "version": "1.7.1",
   "description": "AI-Driven Embedded Hardware-in-the-Loop (HIL) Testing & Debugging Desktop Tool",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "test:logic": "node scripts/test_logic_regression.cjs",
+    "test:abc": "node scripts/test_abc_logic.cjs",
+    "test:serial": "node scripts/test_serial_appearance.cjs",
+    "test:hil": "node scripts/test_hil_frontend.cjs",
+    "test:regression": "node scripts/verify_features_regression.js",
     "preview": "vite preview",
     "tauri": "tauri"
   },

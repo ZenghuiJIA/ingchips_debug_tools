@@ -1,0 +1,44 @@
+schema_version: 2
+name: firmware_flash_stress
+bench: ./bench.example.yaml
+parameters:
+  firmware: ./app.hex
+  timeout: 30m
+  heartbeat: 15s
+loop_count: 1
+timeout_ms: 40m
+stop:
+  # port/baud inherit the bench. Firmware must stop scheduling erase/program,
+  # finish the in-flight operation, then emit this acknowledgement.
+  send_data: STOP
+  send_ending: crlf
+  ack_pattern: "HILv1 STOPPED"
+  timeout_ms: 5s
+evidence:
+  enabled: true
+  timeout_ms: 10s
+  # Fill in the linked noinit location; never guess an address.
+  # memory_addr: "0x20000000"
+  # count: 256
+steps:
+  - id: capture
+    action: serial_open
+  - id: flash
+    action: flash_firmware
+    timeout_ms: 5m
+    params:
+      file_path: "${firmware}"
+      after_flash: halt
+  - id: reset
+    action: reset_target
+    timeout_ms: 10s
+    params:
+      reset_method: swd_soft_reset
+  - id: observe
+    action: hil_observe
+    timeout_ms: "${timeout}"
+    params:
+      boot_timeout_ms: 10s
+      idle_timeout_ms: "${heartbeat}"
+      boot_count: 1
+      continue_on_failure: true

@@ -4,7 +4,7 @@ use crate::hardware::serial_manager::{PortInfo, SerialManager};
 use crate::system_metrics::{collect_metrics, SystemMetrics};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, State, Emitter};
 
 pub struct AppState {
     pub serial: Arc<SerialManager>,
@@ -12,12 +12,110 @@ pub struct AppState {
     pub daemon: Arc<DaemonManager>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
+pub fn embedded_debug_command(app: AppHandle,state:State<'_,AppState>,operation:String,arguments:Value)->Result<Value,String>{
+    if !["get_debug_capabilities","analyze_instrumentation","analyze_crash_bundle","analyze_power_capture","start_debug_analysis","get_debug_analysis_status","stop_debug_analysis","get_debug_analysis_result"].contains(&operation.as_str()){return Err("Unsupported embedded debug operation".into());}
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc(&operation,arguments)
+}
+
+/// The HIL service owns the task. This command only submits/queries short RPCs.
+#[tauri::command(async)]
+pub fn hil_command(app: AppHandle, state: State<'_, AppState>, operation: String, arguments: Value) -> Result<Value, String> {
+    let allowed = ["validate_hiltest", "run_hiltest", "get_hiltest_status", "stop_hiltest", "get_hiltest_events", "get_hiltest_report"];
+    if !allowed.contains(&operation.as_str()) {
+        return Err("Unsupported HIL operation".into());
+    }
+    let jobs = hil_runtime::runner::Jobs::new(hil_runtime::runner::report_root());
+    if operation == "run_hiltest" {
+        // Reserve atomically before releasing any terminal. The validated plan
+        // is the exact snapshot executed; duplicate requests cannot steal ports.
+        // Stable desktop rejection contract: emitted only before any worker is started.
+        let prepared = jobs.prepare(&arguments).map_err(|e| format!("HIL_NOT_STARTED: {e}"))?;
+        if let Some(ports) = prepared.plan().pointer("/_resources/ports").and_then(Value::as_object) {
+            for port in ports.keys() {
+                if state.serial.list_active_sessions().contains(port) {
+                    state.serial.close(Some(port)).map_err(|e|
+                        format!("HIL_NOT_STARTED: 串口交接失败（此前已关闭端口需手动重连）: {e}"))?;
+                    let _ = app.emit("serial-disconnected", crate::hardware::serial_manager::SerialDisconnectPayload {
+                        port: port.clone(), reason: "串口已交给 HIL 后台任务；日志见测试运行窗口".into(),
+                    });
+                }
+            }
+        }
+        return jobs.start_prepared(prepared).map_err(|error|
+            format!("HIL 启动失败（已交接的串口保持关闭，请在终端手动重连）: {error}"));
+    }
+    let id=arguments["run_id"].as_str().unwrap_or("");
+    match operation.as_str(){
+        "validate_hiltest"=>Ok(json!({"valid":true,"plan":hil_runtime::config::load_plan(&arguments)?})),
+        "run_hiltest"=>jobs.start(&arguments),"get_hiltest_status"=>jobs.status(id),"get_hiltest_report"=>jobs.report(id),"stop_hiltest"=>jobs.stop(id),
+        "get_hiltest_events"=>jobs.events(id,arguments["after"].as_u64().unwrap_or(0),arguments["limit"].as_u64().unwrap_or(200)as usize),_=>Err("Unsupported operation".into())
+    }
+}
+
+#[tauri::command(async)]
 pub fn list_serial_ports() -> Vec<PortInfo> {
     SerialManager::list_ports()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
+pub fn serial_capture_read(state: State<'_, AppState>, port_name: String, after: u64, limit: Option<usize>) -> Result<Value, String> {
+    serde_json::to_value(state.serial.capture_page(&port_name, after, limit.unwrap_or(200))?).map_err(|e|e.to_string())
+}
+#[tauri::command(async)]
+pub fn serial_capture_record(state: State<'_, AppState>, port_name: String, start: bool) -> Result<Value, String> {
+    let root = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into())).join("AI-HIL-Debugger").join("captures");
+    serde_json::to_value(state.serial.capture_record(&port_name, start, &root)?).map_err(|e|e.to_string())
+}
+#[tauri::command(async)]
+pub fn serial_send_guarded(state: State<'_, AppState>, port_name: String, session_id: String, data: Vec<u8>) -> Result<usize, String> {
+    state.serial.write_guarded(&data, Some(&port_name), Some(&session_id))
+}
+#[tauri::command(async)]
+pub fn capture_read_file(path: String, after: usize, limit: Option<usize>) -> Result<Value, String> {
+    hil_debug_core::capture::read_recording(std::path::Path::new(&path), after, limit.unwrap_or(500))
+}
+#[tauri::command(async)]
+pub async fn capture_pick_file() -> Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new().set_title("打开记录 JSONL / CSV").add_filter("数据记录", &["jsonl", "csv"]).pick_file().await
+        .map(|p|p.path().to_string_lossy().into_owned()))
+}
+
+#[tauri::command(async)]
+pub fn protocol_encode(protocol: Value, values: Value) -> Result<Value,String> {
+    let protocol:hil_debug_core::protocol::Protocol=serde_json::from_value(protocol).map_err(|e|e.to_string())?;
+    let bytes=protocol.encode(values.as_object().ok_or("values must be an object")?)?;
+    Ok(json!({"bytes":bytes,"hex":hil_debug_core::capture::hex(&bytes)}))
+}
+#[tauri::command(async)]
+pub fn protocol_replay(protocol:Value,events:Vec<Value>)->Result<Value,String>{
+    hil_debug_core::analysis::replay(serde_json::from_value(protocol).map_err(|e|e.to_string())?,&events)
+}
+#[tauri::command(async)]
+pub fn capture_read_csv(path:String)->Result<String,String>{
+    let metadata=std::fs::metadata(&path).map_err(|e|e.to_string())?;
+    if metadata.len()>32*1024*1024{return Err("CSV preview limit is 32 MiB".into());}
+    std::fs::read_to_string(path).map_err(|e|e.to_string())
+}
+#[tauri::command(async)]
+pub fn protocol_plugin_analyze(app:AppHandle,state:State<'_,AppState>,plugin_path:String,payload:Value,timeout_ms:Option<u64>)->Result<Value,String>{
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc("protocol_plugin_analyze",json!({"plugin_path":plugin_path,"payload":payload,"timeout_ms":timeout_ms.unwrap_or(5000)}))
+}
+#[tauri::command(async)]
+pub fn protocol_configure(state:State<'_,AppState>,port_name:String,protocol:Value)->Result<(),String>{
+    state.serial.configure_protocol(&port_name,serde_json::from_value(protocol).map_err(|e|e.to_string())?)
+}
+#[tauri::command(async)]
+pub fn protocol_request(state:State<'_,AppState>,port_name:String,session_id:String,request_id:String,protocol:Value,values:Value,expected:Value,timeout_ms:u64)->Result<Value,String>{
+    state.serial.protocol_request(&port_name,&session_id,&request_id,serde_json::from_value(protocol).map_err(|e|e.to_string())?,
+        values.as_object().ok_or("values must be an object")?.clone(),expected.as_object().ok_or("expected must be an object")?.clone(),timeout_ms)
+}
+#[tauri::command(async)]
+pub fn protocol_cancel(state:State<'_,AppState>,port_name:String,session_id:String,request_id:String)->Result<(),String>{state.serial.protocol_cancel(&port_name,&session_id,&request_id)}
+
+#[tauri::command(async)]
 pub fn open_serial_port(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -54,13 +152,14 @@ pub fn open_serial_port(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn close_serial_port(
+    app: AppHandle,
     state: State<'_, AppState>,
     port_name: Option<String>,
 ) -> Result<(), String> {
     if let Some(ref name) = port_name {
-        if name.starts_with("TCP:") || name.starts_with("UDP:") {
+        if name.starts_with("TCP:") || name.starts_with("TCP-Client:") || name.starts_with("TCP-Server:") || name.starts_with("UDP:") {
             state.network.stop_stream(name);
             return Ok(());
         }
@@ -70,17 +169,21 @@ pub fn close_serial_port(
     } else {
         let _ = state.daemon.call_rpc("stop_rtt", json!({}));
     }
-    state.serial.close(port_name.as_deref())
+    state.serial.close(port_name.as_deref())?;
+    if let Some(port) = port_name {
+        let _ = app.emit("serial-disconnected", crate::hardware::serial_manager::SerialDisconnectPayload { port, reason: "连接已关闭".into() });
+    }
+    Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn send_serial_data(
     state: State<'_, AppState>,
     data: Vec<u8>,
     port_name: Option<String>,
 ) -> Result<usize, String> {
     if let Some(ref name) = port_name {
-        if name.starts_with("TCP:") || name.starts_with("UDP:") {
+        if name.starts_with("TCP:") || name.starts_with("TCP-Client:") || name.starts_with("TCP-Server:") || name.starts_with("UDP:") {
             return state.network.write_data(name, &data);
         }
     }
@@ -98,7 +201,7 @@ pub fn send_serial_data(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_dtr(
     state: State<'_, AppState>,
     level: bool,
@@ -107,7 +210,7 @@ pub fn set_dtr(
     state.serial.set_dtr(level, port_name.as_deref())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_rts(
     state: State<'_, AppState>,
     level: bool,
@@ -126,7 +229,7 @@ pub async fn execute_reset_sequence(
     state.serial.execute_reset(is_bootloader, port_name.as_deref()).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_serial_status(
     state: State<'_, AppState>,
     port_name: Option<String>,
@@ -134,7 +237,7 @@ pub fn get_serial_status(
     state.serial.get_status(port_name.as_deref())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_active_serial_sessions(state: State<'_, AppState>) -> Vec<String> {
     let mut list = state.serial.list_active_sessions();
     let net_list = state.network.list_sessions();
@@ -146,17 +249,17 @@ pub fn list_active_serial_sessions(state: State<'_, AppState>) -> Vec<String> {
     list
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_waveform_source(state: State<'_, AppState>, port_name: Option<String>) {
     state.serial.set_waveform_source(port_name);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_waveform_source(state: State<'_, AppState>) -> Option<String> {
     state.serial.get_waveform_source()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_list_probes(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -165,7 +268,7 @@ pub fn pyocd_list_probes(
     state.daemon.call_rpc("list_probes", json!({}))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_read_registers(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -182,7 +285,7 @@ pub fn pyocd_read_registers(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_read_memory(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -205,7 +308,7 @@ pub fn pyocd_read_memory(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_write_memory(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -228,7 +331,7 @@ pub fn pyocd_write_memory(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_write_memory_byte(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -251,7 +354,7 @@ pub fn pyocd_write_memory_byte(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_dump_memory_to_file(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -276,7 +379,7 @@ pub fn pyocd_dump_memory_to_file(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_load_file_to_memory(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -297,7 +400,7 @@ pub fn pyocd_load_file_to_memory(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_flash_firmware(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -320,7 +423,7 @@ pub fn pyocd_flash_firmware(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_reset_target(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -339,7 +442,7 @@ pub fn pyocd_reset_target(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_diagnose_hardfault(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -358,7 +461,7 @@ pub fn pyocd_diagnose_hardfault(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn call_mcp_tool(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -369,13 +472,13 @@ pub fn call_mcp_tool(
     state.daemon.call_mcp_tool(&tool_name, arguments)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_system_metrics(state: State<'_, AppState>) -> SystemMetrics {
     let daemon_pid = *state.daemon.child_pid.lock().unwrap();
     collect_metrics(daemon_pid)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn jscope_parse_axf(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -394,7 +497,7 @@ pub fn jscope_parse_axf(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn jscope_start_sampling(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -433,13 +536,13 @@ pub fn jscope_start_sampling(
     Ok(res)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn jscope_stop_sampling(state: State<'_, AppState>) -> Result<Value, String> {
-    let _ = state.serial.close(None);
+    let _ = state.serial.close(Some("JScope 变量采样"));
     state.daemon.call_rpc("stop_jscope_sampling", json!({}))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn analyze_firmware_resources(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -534,7 +637,7 @@ pub async fn pick_pack_file(title: Option<String>) -> Result<Option<String>, Str
     Ok(file.map(|f| f.path().to_string_lossy().to_string()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn inspect_firmware_file(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -553,7 +656,7 @@ pub fn inspect_firmware_file(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn merge_hex_files(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -576,7 +679,7 @@ pub fn merge_hex_files(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn merge_bin_files(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -599,7 +702,7 @@ pub fn merge_bin_files(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn svd_import_pack(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -614,7 +717,7 @@ pub fn svd_import_pack(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn svd_get_devices(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -623,7 +726,7 @@ pub fn svd_get_devices(
     state.daemon.call_rpc("svd_get_devices", json!({}))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn svd_get_peripherals(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -640,7 +743,7 @@ pub fn svd_get_peripherals(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn svd_get_registers(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -659,7 +762,7 @@ pub fn svd_get_registers(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn svd_read_register(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -678,7 +781,7 @@ pub fn svd_read_register(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn svd_read_all_registers(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -697,7 +800,7 @@ pub fn svd_read_all_registers(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn svd_write_register(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -718,7 +821,7 @@ pub fn svd_write_register(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn svd_write_field(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -743,7 +846,7 @@ pub fn svd_write_field(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_waveform_protocol(
     state: State<'_, AppState>,
     config_json: String,
@@ -751,7 +854,7 @@ pub fn set_waveform_protocol(
     state.serial.set_protocol_config(&config_json)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_waveform_protocol(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
@@ -759,7 +862,7 @@ pub fn clear_waveform_protocol(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn compute_checksum(
     data: Vec<u8>,
     algo: String,
@@ -767,7 +870,7 @@ pub fn compute_checksum(
     Ok(crate::hardware::checksum::append_checksum_by_algo(&data, &algo))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn modbus_build_request(
     slave_id: u8,
     func_code: u8,
@@ -784,7 +887,7 @@ pub fn modbus_build_request(
     ))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn modbus_parse_response(
     port: String,
     start_addr: u16,
@@ -793,7 +896,7 @@ pub fn modbus_parse_response(
     crate::hardware::modbus::parse_modbus_response(&port, start_addr, &frame)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dsp_measure_waveform(
     samples: Vec<f64>,
     sample_rate_hz: f64,
@@ -801,7 +904,7 @@ pub fn dsp_measure_waveform(
     Ok(crate::hardware::dsp::measure_waveform(&samples, sample_rate_hz))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dsp_compute_fft(
     samples: Vec<f64>,
     sample_rate_hz: f64,
@@ -811,7 +914,7 @@ pub fn dsp_compute_fft(
     Ok(crate::hardware::dsp::compute_fft_spectrum(&samples, sample_rate_hz, fft_size, &window_type))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn start_network_stream(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -829,7 +932,7 @@ pub fn start_network_stream(
     state.network.start_stream(app, name, net_mode, host, port)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stop_network_stream(
     state: State<'_, AppState>,
     name: String,
@@ -838,14 +941,14 @@ pub fn stop_network_stream(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_network_streams(
     state: State<'_, AppState>,
 ) -> Result<Vec<NetworkStreamInfo>, String> {
     Ok(state.network.list_sessions())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn send_network_data(
     state: State<'_, AppState>,
     name: String,
@@ -854,7 +957,7 @@ pub fn send_network_data(
     state.network.write_data(&name, &data)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_detect_rtos(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -869,7 +972,7 @@ pub fn pyocd_detect_rtos(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_capture_framebuffer(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -896,7 +999,7 @@ pub fn pyocd_capture_framebuffer(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn parse_firmware_functions(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -915,7 +1018,7 @@ pub fn parse_firmware_functions(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn detect_lcd_framebuffer_symbol(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -930,7 +1033,7 @@ pub fn detect_lcd_framebuffer_symbol(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pyocd_sample_pc_trace(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -953,7 +1056,7 @@ pub fn pyocd_sample_pc_trace(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn modbus_build_ascii_request(
     slave_id: u8,
     func_code: u8,
@@ -968,6 +1071,107 @@ pub fn modbus_build_ascii_request(
         count_or_val,
         extra_values.as_deref(),
     ))
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModbusSlaveProcessResult {
+    pub response_bytes: Option<Vec<u8>>,
+    pub updated_holding_registers: std::collections::HashMap<u16, u16>,
+    pub updated_coils: std::collections::HashMap<u16, bool>,
+    pub handled_func: Option<u8>,
+    pub log_desc: Option<String>,
+}
+
+#[tauri::command(async)]
+pub fn modbus_slave_handle_request(
+    slave_id: u8,
+    frame: Vec<u8>,
+    holding_registers: std::collections::HashMap<u16, u16>,
+    input_registers: std::collections::HashMap<u16, u16>,
+    coils: std::collections::HashMap<u16, bool>,
+    discrete_inputs: std::collections::HashMap<u16, bool>,
+) -> Result<ModbusSlaveProcessResult, String> {
+    if frame.is_empty() {
+        return Ok(ModbusSlaveProcessResult {
+            response_bytes: None,
+            updated_holding_registers: holding_registers,
+            updated_coils: coils,
+            handled_func: None,
+            log_desc: None,
+        });
+    }
+
+    let is_ascii = frame[0] == b':';
+    let pdu = if is_ascii {
+        crate::hardware::modbus::decode_modbus_ascii(&frame)?
+    } else {
+        if frame.len() < 3 {
+            return Err("帧长度不足 3 字节".to_string());
+        }
+        if !crate::hardware::checksum::validate_modbus_crc(&frame) {
+            return Err("Modbus CRC16 校验失败".to_string());
+        }
+        frame[..frame.len() - 2].to_vec()
+    };
+
+    if pdu.len() < 2 {
+        return Ok(ModbusSlaveProcessResult {
+            response_bytes: None,
+            updated_holding_registers: holding_registers,
+            updated_coils: coils,
+            handled_func: None,
+            log_desc: None,
+        });
+    }
+
+    let dev_id = pdu[0];
+    if dev_id != slave_id && dev_id != 0 {
+        // Not addressed to this slave
+        return Ok(ModbusSlaveProcessResult {
+            response_bytes: None,
+            updated_holding_registers: holding_registers,
+            updated_coils: coils,
+            handled_func: None,
+            log_desc: None,
+        });
+    }
+
+    let func = pdu[1];
+    let slave = crate::hardware::modbus::ModbusSlaveStorage::new(slave_id);
+    {
+        let mut hr = slave.holding_registers.lock().unwrap();
+        *hr = holding_registers;
+        let mut ir = slave.input_registers.lock().unwrap();
+        *ir = input_registers;
+        let mut cl = slave.coils.lock().unwrap();
+        *cl = coils;
+        let mut di = slave.discrete_inputs.lock().unwrap();
+        *di = discrete_inputs;
+    }
+
+    let resp = slave.handle_request(&pdu, is_ascii);
+    let updated_holding = slave.holding_registers.lock().unwrap().clone();
+    let updated_coils = slave.coils.lock().unwrap().clone();
+
+    let desc = match func {
+        0x01 => "从机响应 0x01: 读取线圈 (Coils)".to_string(),
+        0x02 => "从机响应 0x02: 读取离散输入 (Discrete Inputs)".to_string(),
+        0x03 => "从机响应 0x03: 读取保持寄存器 (Holding Regs)".to_string(),
+        0x04 => "从机响应 0x04: 读取输入寄存器 (Input Regs)".to_string(),
+        0x05 => "从机执行 0x05: 写入单线圈并应答".to_string(),
+        0x06 => "从机执行 0x06: 写入单寄存器并应答".to_string(),
+        0x0F => "从机执行 0x0F: 批量写入线圈并应答".to_string(),
+        0x10 => "从机执行 0x10: 批量写入寄存器并应答".to_string(),
+        _ => format!("从机返回 0x{:02X} 异常 (非法功能码)", func),
+    };
+
+    Ok(ModbusSlaveProcessResult {
+        response_bytes: resp,
+        updated_holding_registers: updated_holding,
+        updated_coils: updated_coils,
+        handled_func: Some(func),
+        log_desc: Some(desc),
+    })
 }
 
 #[tauri::command]
@@ -1006,47 +1210,66 @@ pub async fn ing_pick_firmware_file(starting_dir: Option<String>) -> Result<Opti
     Ok(file.map(|f| f.path().to_string_lossy().to_string()))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ing_parse_ini(ini_path: String) -> Result<crate::hardware::ing_flasher::IngIniConfig, String> {
     crate::hardware::ing_flasher::parse_ini_file(&ini_path)
 }
 
 #[tauri::command]
-pub fn ing_start_flash(
+pub async fn ing_start_flash(
     app: AppHandle,
     state: State<'_, AppState>,
     request: crate::hardware::ing_flasher::IngFlashRequest,
 ) -> Result<(), String> {
+    use crate::hardware::ing_flasher::{FLASH_BUSY, FLASH_CANCEL, FlashPermit};
+    use std::sync::atomic::Ordering;
+    if FLASH_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Err("已有烧录任务在运行，请等待完成或取消".into());
+    }
+    let permit = FlashPermit;
+    *crate::hardware::ing_flasher::FLASH_JOB.lock().unwrap() = Some(request.job_id.clone());
+    *crate::hardware::ing_flasher::FLASH_PORT.lock().unwrap() = Some(request.port_name.clone());
+    FLASH_CANCEL.store(false, Ordering::SeqCst);
     // Check if the port was actively opened in the serial terminal; if so, pause it and record its baud rate
     let previous_baud = state.serial.pause_for_flashing(&app, &request.port_name);
     let serial_manager = Arc::clone(&state.serial);
 
     // Spawn background flashing thread
     let app_clone = app.clone();
-    std::thread::spawn(move || {
-        crate::hardware::ing_flasher::run_flash_task(app_clone, request, serial_manager, previous_baud);
-    });
-
-    Ok(())
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        crate::hardware::ing_flasher::run_flash_task(app_clone, request, serial_manager, previous_baud)
+    }).await.map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub fn ing_cancel_flash() -> Result<(), String> {
+#[tauri::command(async)]
+pub fn ing_cancel_flash(job_id: String) -> Result<(), String> {
+    let active_job = crate::hardware::ing_flasher::FLASH_JOB.lock().unwrap();
+    if active_job.as_deref() != Some(job_id.as_str()) {
+        return Err("烧录任务已结束或不属于当前操作".into());
+    }
     crate::hardware::ing_flasher::FLASH_CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+    drop(active_job);
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_local_binary_file(file_path: String) -> Result<Vec<u8>, String> {
     std::fs::read(&file_path).map_err(|e| format!("读取文件失败 ({}): {}", file_path, e))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
+pub fn read_memory_image(app: AppHandle, state: State<'_, AppState>, file_path: String, address: String, count: u32) -> Result<Value, String> {
+    state.daemon.ensure_started(&app)?;
+    state.daemon.call_rpc("read_memory_image", json!({"file_path": file_path, "address": address, "count": count}))
+}
+
+#[tauri::command(async)]
 pub fn save_bytes_to_file(file_path: String, data: Vec<u8>) -> Result<(), String> {
     std::fs::write(&file_path, &data).map_err(|e| format!("写入文件失败 ({}): {}", file_path, e))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn append_bytes_to_file(file_path: String, data: Vec<u8>) -> Result<u64, String> {
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -1088,6 +1311,60 @@ pub async fn pick_open_trace_file() -> Result<Option<String>, String> {
         .pick_file()
         .await;
     Ok(file.map(|f| f.path().to_string_lossy().to_string()))
+}
+
+#[cfg(target_os = "windows")]
+mod win_mem {
+    pub type HANDLE = *mut std::ffi::c_void;
+    pub type BOOL = i32;
+
+    #[link(name = "psapi")]
+    extern "system" {
+        pub fn EmptyWorkingSet(hProcess: HANDLE) -> BOOL;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn GetCurrentProcess() -> HANDLE;
+        pub fn GetCurrentProcessId() -> u32;
+        pub fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> HANDLE;
+        pub fn CloseHandle(hObject: HANDLE) -> BOOL;
+    }
+}
+
+/// Trims unused working set memory of host process and all child WebView2 processes.
+#[tauri::command(async)]
+pub fn trim_system_memory() -> Result<u64, String> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use win_mem::*;
+        // 1. Trim current host process working set
+        let cur = GetCurrentProcess();
+        EmptyWorkingSet(cur);
+
+        // 2. Also trim WebView2 and helper child processes
+        let my_pid = GetCurrentProcessId();
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        for (pid, proc_) in sys.processes() {
+            if let Some(ppid) = proc_.parent() {
+                if ppid.as_u32() == my_pid {
+                    // PROCESS_SET_QUOTA (0x0100) | PROCESS_QUERY_INFORMATION (0x0400) = 0x0500
+                    let h = OpenProcess(0x0500, 0, pid.as_u32());
+                    if !h.is_null() {
+                        EmptyWorkingSet(h);
+                        CloseHandle(h);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let my_pid = sysinfo::Pid::from_u32(std::process::id());
+    let mem = sys.process(my_pid).map(|p| p.memory()).unwrap_or(0);
+    Ok(mem)
 }
 
 

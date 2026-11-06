@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import { readMemoryRange } from '../utils/memorySnapshot';
+import { parseHexUint } from '../utils/hardwareContracts';
 import type { ProbeInfo } from '../types';
 import {
   Download,
@@ -59,6 +61,7 @@ const snapshotAName = ref<string>('快照 A (基准)');
 const snapshotBName = ref<string>('快照 B (当前)');
 const bufferA = ref<number[]>([]);
 const bufferB = ref<number[]>([]);
+const snapshotTarget = ref<{ address: number; count: number; probeId: string } | null>(null);
 const localFilePath = ref<string>('');
 
 // Quick length presets
@@ -85,7 +88,7 @@ const diffRows = computed<DiffRow[]>(() => {
   if (maxLen === 0) return [];
 
   const rows: DiffRow[] = [];
-  const baseAddr = parseInt(dumpAddressHex.value, 16) || 0;
+  const baseAddr = snapshotTarget.value?.address ?? 0;
 
   for (let i = 0; i < maxLen; i += 16) {
     const chunkA = bufferA.value.slice(i, i + 16);
@@ -97,7 +100,7 @@ const diffRows = computed<DiffRow[]>(() => {
 
     let diffCount = 0;
     for (let b = 0; b < 16; b++) {
-      if (chunkA[b] !== chunkB[b]) diffCount++;
+      if (i + b < maxLen && (i + b >= bufferA.value.length || i + b >= bufferB.value.length || chunkA[b] !== chunkB[b])) diffCount++;
     }
 
     rows.push({
@@ -149,17 +152,16 @@ function navigateDiff(direction: 'prev' | 'next') {
 
 // 1. Capture Snapshot A
 async function captureSnapshotA() {
+  if (isLoading.value) return;
   isLoading.value = true;
   statusMsg.value = '正在从芯片读取快照 A...';
   statusType.value = 'info';
   try {
-    const res: any = await safeInvoke('pyocd_read_memory', {
-      address: dumpAddressHex.value,
-      count: dumpLengthBytes.value,
-      probeId: selectedProbeId.value || null,
-      targetOverride: null
-    });
-    bufferA.value = res.bytes || [];
+    const target = { address: parseHexUint(dumpAddressHex.value), count: Number(dumpLengthBytes.value), probeId: selectedProbeId.value };
+    const bytes = await readMemoryRange(safeInvoke, target.address, target.count, target.probeId);
+    snapshotTarget.value = target;
+    bufferA.value = bytes;
+    bufferB.value = [];
     snapshotAName.value = `快照 A (${new Date().toLocaleTimeString()}, ${bufferA.value.length} B)`;
     statusMsg.value = `成功捕获快照 A (${bufferA.value.length} 字节)`;
     statusType.value = 'success';
@@ -173,17 +175,16 @@ async function captureSnapshotA() {
 
 // 2. Capture Snapshot B
 async function captureSnapshotB() {
+  if (isLoading.value) return;
   isLoading.value = true;
   statusMsg.value = '正在从芯片读取快照 B...';
   statusType.value = 'info';
   try {
-    const res: any = await safeInvoke('pyocd_read_memory', {
-      address: dumpAddressHex.value,
-      count: dumpLengthBytes.value,
-      probeId: selectedProbeId.value || null,
-      targetOverride: null
-    });
-    bufferB.value = res.bytes || [];
+    const target = snapshotTarget.value;
+    if (!target || target.address !== parseHexUint(dumpAddressHex.value) || target.count !== Number(dumpLengthBytes.value) || target.probeId !== selectedProbeId.value) {
+      throw new Error('地址、长度或探针已改变，请先重新捕获快照 A');
+    }
+    bufferB.value = await readMemoryRange(safeInvoke, target.address, target.count, target.probeId);
     snapshotBName.value = `快照 B (${new Date().toLocaleTimeString()}, ${bufferB.value.length} B)`;
     statusMsg.value = `成功捕获快照 B (${bufferB.value.length} 字节)，差异比对已就绪`;
     statusType.value = 'success';
@@ -197,21 +198,27 @@ async function captureSnapshotB() {
 
 // 3. Load Local File for Source B
 async function pickLocalFile() {
+  if (isLoading.value) return;
+  isLoading.value = true;
   try {
+    const target = snapshotTarget.value;
+    if (!target) throw new Error('请先捕获快照 A');
     const selected: string | null = await safeInvoke('pick_firmware_file', {
       title: '选择本地固件或内存镜像文件 (.bin / .hex)'
     });
     if (!selected) return;
     localFilePath.value = selected;
     statusMsg.value = `正在加载本地文件: ${selected}...`;
-    const bytes: number[] = await safeInvoke('read_local_binary_file', { filePath: selected });
-    bufferB.value = bytes.slice(0, dumpLengthBytes.value);
+    const bytes: number[] = await safeInvoke('read_memory_image', { filePath: selected, address: '0x' + target.address.toString(16), count: target.count });
+    bufferB.value = bytes;
     snapshotBName.value = `本地文件: ${selected.split(/[\\/]/).pop()} (${bufferB.value.length} B)`;
     statusMsg.value = `本地文件加载完成 (${bufferB.value.length} 字节)`;
     statusType.value = 'success';
   } catch (err: any) {
     statusMsg.value = `加载本地文件失败: ${err}`;
     statusType.value = 'error';
+  } finally {
+    isLoading.value = false;
   }
 }
 

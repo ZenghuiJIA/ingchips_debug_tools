@@ -27,6 +27,8 @@ const metrics = ref<SystemMetrics>({
   target_arch: 'x86_64'
 });
 
+const isTrimming = ref(false);
+const trimNotice = ref('');
 let metricsTimer: any = null;
 
 async function refreshMetrics() {
@@ -35,6 +37,21 @@ async function refreshMetrics() {
     metrics.value = m;
   } catch (err) {
     console.error('Failed to fetch metrics:', err);
+  }
+}
+
+async function handleTrimMemory() {
+  if (isTrimming.value) return;
+  isTrimming.value = true;
+  try {
+    await safeInvoke('trim_system_memory');
+    await refreshMetrics();
+    trimNotice.value = t('mem_trim_success');
+    setTimeout(() => { trimNotice.value = ''; }, 2500);
+  } catch (err) {
+    console.error('Failed to trim memory:', err);
+  } finally {
+    isTrimming.value = false;
   }
 }
 
@@ -71,18 +88,31 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Live Memory Budget Monitor (< 100MB constraint) -->
+      <!-- Live Memory Budget Monitor (< 100MB constraint) with One-Click Trim -->
       <div class="hidden lg:flex items-center gap-2 pl-3 border-l border-zinc-800">
-        <div class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800 text-xs font-mono">
-          <Activity class="w-3.5 h-3.5" :class="metrics.is_under_budget ? 'text-emerald-400' : 'text-amber-400'" />
+        <button
+          type="button"
+          @click="handleTrimMemory"
+          :disabled="isTrimming"
+          :title="t('mem_trim_tooltip')"
+          class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-xs font-mono transition-colors group cursor-pointer"
+        >
+          <Activity
+            class="w-3.5 h-3.5 group-hover:scale-110 transition-transform"
+            :class="[
+              metrics.is_under_budget ? 'text-emerald-400' : 'text-amber-400',
+              isTrimming ? 'animate-spin text-cyan-400' : ''
+            ]"
+          />
           <span class="text-zinc-400">{{ t('ram_usage') }}:</span>
           <span :class="metrics.is_under_budget ? 'text-emerald-300 font-semibold' : 'text-amber-300 font-semibold'">
             {{ metrics.total_rss_mb }} MB
           </span>
           <span class="text-zinc-500 text-[10px]">/ 100MB</span>
-          <CheckCircle2 v-if="metrics.is_under_budget" class="w-3 h-3 text-emerald-500" />
-          <AlertCircle v-else class="w-3 h-3 text-amber-500" />
-        </div>
+          <span v-if="trimNotice" class="text-[10px] text-cyan-400 font-sans ml-0.5">({{ trimNotice }})</span>
+          <CheckCircle2 v-else-if="metrics.is_under_budget" class="w-3 h-3 text-emerald-500 ml-0.5" />
+          <AlertCircle v-else class="w-3 h-3 text-amber-500 ml-0.5" />
+        </button>
       </div>
     </div>
 

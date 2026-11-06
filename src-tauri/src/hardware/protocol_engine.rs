@@ -59,6 +59,20 @@ pub struct ProtocolEngine {
 }
 
 impl ProtocolEngine {
+    pub fn validate(config: &ProtocolConfig) -> Result<(), String> {
+        if !["binary", "firewater", "justfloat", "raw"].contains(&config.protocol_type.as_str()) { return Err("Unknown protocol type".into()); }
+        if !["little", "big"].contains(&config.endian.as_str()) { return Err("Unknown endian".into()); }
+        for channel in &config.channels {
+            if !["float32","float64","int16","uint16","int32","uint32","int8","uint8"].contains(&channel.data_type.as_str()) || channel.offset > 65536 || !channel.scale.is_finite() || !channel.bias.is_finite() { return Err("Invalid channel definition".into()); }
+        }
+        if config.protocol_type == "binary" {
+            let frame=config.frame.as_ref().ok_or("Binary protocol needs framing")?;
+            if frame.tail.as_ref().map_or(false,|tail|tail.is_empty()) || frame.header.as_ref().map_or(false,|h|h.len()>65536) {return Err("Invalid frame delimiter".into());}
+            if frame.fixed_length.map_or(false,|size|size==0||size>65536){return Err("Invalid fixed length".into());}
+            if let Some(checksum)=&frame.checksum {if !["none","sum8","xor8","modbus_crc16","modbus","crc16_ccitt","ccitt"].contains(&checksum.check_type.as_str()){return Err("Unknown checksum algorithm".into());}}
+        }
+        Ok(())
+    }
     pub fn new(config: ProtocolConfig) -> Self {
         Self {
             config,
@@ -78,6 +92,7 @@ impl ProtocolEngine {
     /// Parse incoming chunk of raw bytes, returning extracted points
     pub fn parse_chunk(&mut self, raw: &[u8]) -> Vec<HashMap<String, f64>> {
         let mut results = Vec::new();
+        if self.buffer.len().saturating_add(raw.len()) > 1024*1024 { self.buffer.clear(); return results; }
 
         match self.config.protocol_type.as_str() {
             "justfloat" => {
@@ -324,7 +339,7 @@ fn extract_channel_value(bytes: &[u8], ch: &ChannelDef, is_little: bool) -> Opti
         }
         "int8" => slice[0] as i8 as f64,
         "uint8" => slice[0] as f64,
-        _ => 0.0,
+        _ => return None,
     };
 
     if raw_val.is_nan() || !raw_val.is_finite() {
@@ -339,6 +354,7 @@ fn validate_checksum(bytes: &[u8], chk: &ChecksumConfig) -> bool {
         return false;
     }
     match chk.check_type.to_lowercase().as_str() {
+        "none" => true,
         "sum8" => {
             let expected = bytes[chk.offset];
             let mut sum: u8 = 0;
@@ -379,7 +395,7 @@ fn validate_checksum(bytes: &[u8], chk: &ChecksumConfig) -> bool {
             let expected_low = (computed & 0xFF) as u8;
             bytes[chk.offset] == expected_high && bytes[chk.offset + 1] == expected_low
         }
-        _ => true,
+        _ => false,
     }
 }
 

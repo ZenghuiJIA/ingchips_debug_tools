@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { ref, shallowRef, watch, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, shallowRef, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
+import { appendBoundedLog, filterLogs, highlightParts } from '../utils/serialLog';
+import { DEFAULT_SERIAL_APPEARANCE, loadSerialAppearance, saveSerialAppearance, normalizeSerialAppearance, serialLogStyle, serialLogColor, type SerialAppearance } from '../utils/serialAppearance';
+import { serialIdentity, guardedSend, type CaptureStatus, type CapturePage, type RawEvent } from '../utils/serialSession';
 import { safeInvoke, isTauri } from '../utils/ipc';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SerialRxPayload, SerialLogItem } from '../types';
@@ -23,6 +26,7 @@ import {
   Cpu
 } from '@lucide/vue';
 import CommandGroupPanel from './CommandGroupPanel.vue';
+import CaptureAnalysis from './CaptureAnalysis.vue';
 import TriggerPanel from './TriggerPanel.vue';
 import SerialXtermView from './SerialXtermView.vue';
 import ModbusDrawer from './ModbusDrawer.vue';
@@ -40,6 +44,7 @@ const props = defineProps<{
   portName: string;
   baudRate: number;
   isConnected: boolean;
+  isListening?: boolean;
   isDaplink: boolean;
   availablePorts?: PortInfo[];
 }>();
@@ -156,6 +161,23 @@ watch(sessionMode, (m) => {
   }
 });
 
+const loadedAppearance = loadSerialAppearance(() => localStorage);
+const appearance = ref<SerialAppearance>(loadedAppearance.appearance);
+const appearanceError = ref(loadedAppearance.error);
+const appearanceOpen = ref(false);
+const logAppearanceStyle = computed(() => serialLogStyle(appearance.value));
+function appearanceLabel(key: string, fallback: string): string {
+  const text = t(key);
+  return text === key ? fallback : text;
+}
+function updateAppearance(key: keyof SerialAppearance, event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (!input.reportValidity()) return;
+  appearance.value = normalizeSerialAppearance({ ...appearance.value, [key]: key === 'fontSize' ? Number(input.value) : input.value });
+}
+function resetAppearance() { appearance.value = { ...DEFAULT_SERIAL_APPEARANCE }; }
+watch(appearance, value => { appearanceError.value = saveSerialAppearance(() => localStorage, value); }, { deep: true });
+
 const checksumAlgo = ref<ChecksumAlgorithm>('none');
 
 function handleSendSingleGroupCommand(cmd: CommandItem) {
@@ -164,7 +186,12 @@ function handleSendSingleGroupCommand(cmd: CommandItem) {
   }
 }
 
-async function executeTriggerResponse(rule: TriggerRule) {
+async function executeTriggerResponse(rule: TriggerRule, sourceSession?: string | null) {
+  if (!isTauri()) return;
+  const targetPort = props.portName;
+  const identity = await serialIdentity(targetPort);
+  if (sourceSession && identity !== sourceSession) throw new Error('旧连接触发事件已拒绝');
+  if (triggerTimers.size >= 100) throw new Error('自动应答待发送队列已满，请降低触发频率');
   const encoded = encodeCommand({
     id: rule.id,
     label: rule.name,
@@ -175,12 +202,11 @@ async function executeTriggerResponse(rule: TriggerRule) {
     enabled: true
   });
 
-  setTimeout(async () => {
+  const timer = setTimeout(async () => {
+    triggerTimers.delete(timer);
+    if (!props.isConnected || props.portName !== targetPort) return;
     try {
-      const sentCount: number = await safeInvoke('send_serial_data', { 
-        data: encoded.bytes,
-        portName: props.portName
-      });
+      const sentCount = await guardedSend(targetPort, identity, encoded.bytes);
       txBytesCount.value += sentCount;
       emit('update-stats', { rx: rxBytesCount.value, tx: txBytesCount.value });
       appendLog(t('term_log_trigger_hit', { name: rule.name, text: encoded.textDisplay }), 'tx');
@@ -188,22 +214,97 @@ async function executeTriggerResponse(rule: TriggerRule) {
       appendLog(t('term_log_trigger_fail', { name: rule.name, err: String(err) }), 'error');
     }
   }, rule.delayMs);
+  triggerTimers.add(timer);
 }
 
-function handleIncomingRxText(text: string) {
+const triggerTimers = new Set<ReturnType<typeof setTimeout>>();
+const rxDecoder = new TextDecoder('utf-8', { fatal: false });
+function handleIncomingRxText(text: string, sourceSession?: string | null) {
   if (triggerPanelRef.value) {
-    const matched = triggerPanelRef.value.checkAndMatchTriggers(text);
-    for (const rule of matched) {
-      executeTriggerResponse(rule);
-    }
+    try {
+      for (const rule of triggerPanelRef.value.checkAndMatchTriggers(text))
+        executeTriggerResponse(rule, sourceSession).catch(error => appendLog(String(error), 'error'));
+    } catch (error) { appendLog(String(error), 'error'); }
   }
 }
 
 const logContainer = ref<HTMLElement | null>(null);
 const logs = shallowRef<SerialLogItem[]>([]);
 let nextLogId = 1;
+let pendingLogQueue: SerialLogItem[] = [];
+let logFlushRafId: number | null = null;
 // Optimized: Limit to 1200 lines per tab to keep DOM node count < 2000 and prevent Renderer memory bloat
-const MAX_LOG_LINES = 1200;
+const includeText = ref('');
+const excludeText = ref('');
+const regexFilter = ref(false);
+const bookmarkOnly = ref(false);
+const bookmarks = ref<SerialLogItem[]>([]);
+const filterError = ref('');
+const visibleLogs = computed(() => {
+  try { filterError.value = ''; return filterLogs(bookmarkOnly.value ? bookmarks.value : logs.value, includeText.value, excludeText.value, regexFilter.value); }
+  catch (error) { filterError.value = String(error); return []; }
+});
+function bookmark(item: SerialLogItem) {
+  bookmarks.value = bookmarks.value.some(x => x.id === item.id) ? bookmarks.value.filter(x => x.id !== item.id) : [...bookmarks.value, { ...item }].slice(-200);
+}
+const captureStatus = ref<CaptureStatus | null>(null);
+const analysisOpen = ref(false);
+const backendJournal = computed(() => isTauri() && !/^(TCP|UDP)/.test(props.portName));
+let captureCursor = 0;
+let captureSession = '';
+let capturePolling = false;
+const retainedRaw = shallowRef<RawEvent[]>([]);
+let captureDecoder = new TextDecoder();
+function renderCaptured(event: RawEvent) {
+  const data = Uint8Array.from(event.data.match(/.{2}/g) || [], b => parseInt(b, 16));
+  const text = event.message || (viewMode.value === 'hex' ? (event.data.match(/.{2}/g)?.join(' ').toUpperCase() || '') + ' ' : event.direction === 'RX' ? captureDecoder.decode(data, { stream: true }) : new TextDecoder().decode(data));
+  pendingLogQueue.push({ id: nextLogId++, timestamp: new Date(event.wall_time_ms).toLocaleTimeString(), text,
+    type: event.direction === 'RX' ? 'rx' : event.direction === 'TX' ? 'tx' : event.direction === 'ERROR' ? 'error' : 'info' });
+}
+function redrawCaptured() {
+  if (!backendJournal.value) return;
+  pendingLogQueue = [];
+  logs.value = []; captureDecoder = new TextDecoder();
+  for (const event of retainedRaw.value) renderCaptured(event);
+  flushLogQueue(false);
+}
+let captureTimer: ReturnType<typeof setInterval> | undefined;
+async function refreshCapture() {
+  if (!backendJournal.value || capturePolling) return;
+  capturePolling = true; const port = props.portName;
+  try {
+    let page = await safeInvoke<CapturePage>('serial_capture_read', { portName: port, after: captureCursor, limit: 500 });
+    if (props.portName !== port) return;
+    if (captureSession !== page.status.session_id) {
+      captureSession = page.status.session_id; captureCursor = 0; retainedRaw.value = []; logs.value = []; captureDecoder = new TextDecoder();
+      page = await safeInvoke<CapturePage>('serial_capture_read', { portName: port, after: 0, limit: 500 });
+      if (props.portName !== port) return;
+    }
+    captureStatus.value = page.status;
+    if (page.gap) appendLog('后台环形窗口已覆盖部分历史；完整内容请读取录制文件', 'error');
+    captureCursor = page.cursor;
+    const retained = [...retainedRaw.value, ...page.events];
+    let size = retained.reduce((n,e) => n + e.data.length + 256, 0); let cut = 0;
+    while (size > 2*1024*1024 && cut < retained.length) { size -= retained[cut]!.data.length + 256; cut++; }
+    retainedRaw.value = retained.slice(cut);
+    if (sessionMode.value === 'log') {
+      for (const event of page.events) renderCaptured(event);
+      flushLogQueue();
+    }
+    // Empty journal polls must not pull the user away from scrollback.
+  } catch { captureStatus.value = null; }
+  finally { capturePolling = false; }
+}
+async function toggleRecording() {
+  try { captureStatus.value = await safeInvoke<CaptureStatus>('serial_capture_record', { portName: props.portName, start: !captureStatus.value?.recording }); }
+  catch (error) { appendLog(String(error), 'error'); }
+}
+const sendHistory = ref<{ text: string; format: 'string' | 'hex'; ending: string }[]>([]);
+try { sendHistory.value = JSON.parse(localStorage.getItem('hil.send_history.v1') || '[]').slice(0, 100); } catch { /* damaged preferences */ }
+function recallHistory(index: string) {
+  const item = sendHistory.value[Number(index)]; if (!item) return;
+  inputMessage.value = item.text; inputMode.value = item.format; lineEnding.value = item.ending;
+}
 
 // Preferences persistence keys
 const PREF_KEY_TIMESTAMPS = 'ai_hil_pref_timestamps';
@@ -215,6 +316,8 @@ const PREF_KEY_LINE_ENDING = 'ai_hil_pref_line_ending';
 const viewMode = ref<'string' | 'hex'>(
   (localStorage.getItem(PREF_KEY_VIEWMODE) as 'string' | 'hex') || 'string'
 );
+watch(viewMode, redrawCaptured);
+watch(sessionMode, redrawCaptured);
 const showTimestamps = ref<boolean>(
   localStorage.getItem(PREF_KEY_TIMESTAMPS) !== null
     ? localStorage.getItem(PREF_KEY_TIMESTAMPS) === 'true'
@@ -278,53 +381,53 @@ function formatTimestamp(): string {
 function scrollToBottom() {
   if (!autoScroll.value || !logContainer.value) return;
   nextTick(() => {
-    if (logContainer.value) {
+    if (autoScroll.value && sessionMode.value === 'log' && logContainer.value) {
       logContainer.value.scrollTop = logContainer.value.scrollHeight;
     }
   });
 }
 
 function appendLog(text: string, type: 'rx' | 'tx' | 'info' | 'error', customTime?: string) {
-  // If receiving RX stream chunk and the previous log item is also RX:
-  // If showTimestamps is disabled, merge continuous RX chunks seamlessly into the last item
-  // unless user or incoming data explicitly contains newlines, or in line-mode.
-  // Even if showTimestamps is enabled, if the previous RX didn't end with newline,
-  // append in-place so buffer slicing never creates separate rows or broken words!
-  if (type === 'rx' && logs.value.length > 0) {
-    const lastItem = logs.value[logs.value.length - 1];
-    if (lastItem.type === 'rx') {
-      if (!showTimestamps.value) {
-        // Without timestamps, continuous RX is one continuous terminal output stream
-        lastItem.text += text;
-        logs.value = [...logs.value];
-        scrollToBottom();
-        return;
-      } else if (!lastItem.text.endsWith('\n') && !lastItem.text.endsWith('\r')) {
-        // With timestamps, if the line hasn't finished yet, append in-place
-        lastItem.text += text;
-        logs.value = [...logs.value];
-        scrollToBottom();
-        return;
-      }
-    }
+  if (type === 'tx' && backendJournal.value) return;
+  pendingLogQueue.push({ id: nextLogId++, timestamp: customTime || formatTimestamp(), text, type });
+  if (pendingLogQueue.length >= 40) {
+    flushLogQueue();
+  } else {
+    scheduleLogFlush();
   }
+}
 
-  const newItem: SerialLogItem = {
-    id: nextLogId++,
-    timestamp: customTime || formatTimestamp(),
-    text,
-    type
-  };
-
-  let current = [...logs.value, newItem];
-  if (current.length > MAX_LOG_LINES) {
-    current = current.slice(current.length - MAX_LOG_LINES);
+function flushLogQueue(followNewMessages = true) {
+  if (logFlushRafId !== null) {
+    cancelAnimationFrame(logFlushRafId);
+    logFlushRafId = null;
   }
-  logs.value = current;
-  scrollToBottom();
+  if (pendingLogQueue.length === 0) return;
+  let cur = logs.value;
+  for (const item of pendingLogQueue) {
+    cur = appendBoundedLog(cur, item);
+  }
+  pendingLogQueue = [];
+  logs.value = cur;
+  if (followNewMessages) scrollToBottom();
+}
+
+function scheduleLogFlush() {
+  if (logFlushRafId === null) {
+    logFlushRafId = requestAnimationFrame(() => {
+      logFlushRafId = null;
+      flushLogQueue();
+    });
+  }
 }
 
 function clearLogs() {
+  pendingLogQueue = [];
+  if (logFlushRafId !== null) {
+    cancelAnimationFrame(logFlushRafId);
+    logFlushRafId = null;
+  }
+  retainedRaw.value = [];
   logs.value = [];
   rxBytesCount.value = 0;
   txBytesCount.value = 0;
@@ -338,6 +441,7 @@ function clearLogs() {
     } catch (_) {}
   }
   emit('update-stats', { rx: 0, tx: 0 });
+  safeInvoke('trim_system_memory').catch(() => {});
 }
 
 function exportLogs() {
@@ -358,6 +462,9 @@ function exportLogs() {
 }
 
 async function handleSendMessage(customText?: string) {
+  const targetPort = props.portName;
+  let identity: string | null;
+  try { identity = await serialIdentity(targetPort); } catch (error) { appendLog(String(error), 'error'); return; }
   const textToSend = customText !== undefined ? customText : inputMessage.value;
   if (!textToSend || !props.isConnected) return;
 
@@ -365,7 +472,7 @@ async function handleSendMessage(customText?: string) {
 
   if (inputMode.value === 'hex' && customText === undefined) {
     const cleanHex = textToSend.replace(/\s+/g, '');
-    if (!/^[0-9a-fA-F]*$/.test(cleanHex)) {
+    if (!/^[0-9a-fA-F]*$/.test(cleanHex) || cleanHex.length % 2) {
       appendLog(t('term_log_invalid_hex'), 'error');
       return;
     }
@@ -387,10 +494,9 @@ async function handleSendMessage(customText?: string) {
   }
 
   try {
-    const sentCount: number = await safeInvoke('send_serial_data', { 
-      data: bytes,
-      portName: props.portName
-    });
+    const sentCount = await guardedSend(targetPort, identity, bytes);
+    sendHistory.value = [{ text: textToSend, format: inputMode.value, ending: lineEnding.value }, ...sendHistory.value.filter(x => x.text !== textToSend)].slice(0, 100);
+    localStorage.setItem('hil.send_history.v1', JSON.stringify(sendHistory.value));
     txBytesCount.value += sentCount;
     emit('update-stats', { rx: rxBytesCount.value, tx: txBytesCount.value });
     
@@ -415,6 +521,8 @@ function handleBytesSent(count: number) {
 }
 
 onMounted(async () => {
+  await refreshCapture();
+  captureTimer = setInterval(refreshCapture, 150);
   // Initialize Web Worker
   try {
     worker = new Worker(new URL('../workers/serialParser.worker.ts', import.meta.url), { type: 'module' });
@@ -423,7 +531,6 @@ onMounted(async () => {
         rxBytesCount.value += e.data.rawLength;
         emit('update-stats', { rx: rxBytesCount.value, tx: txBytesCount.value });
         appendLog(e.data.text, 'rx', e.data.timestamp);
-        handleIncomingRxText(e.data.text);
       }
     };
   } catch (err) {
@@ -439,6 +546,8 @@ onMounted(async () => {
         }
         const raw = new Uint8Array(event.payload.data);
         const ts = formatTimestamp();
+        const decodedRx = rxDecoder.decode(raw, { stream: true });
+        handleIncomingRxText(decodedRx, event.payload.session_id);
 
         // 1. Dispatch to Modbus Drawer if open
         if (isModbusDrawerOpen.value && modbusDrawerRef.value) {
@@ -456,6 +565,11 @@ onMounted(async () => {
         }
 
         // 3. Normal Log Stream mode
+        if (backendJournal.value) {
+          rxBytesCount.value += raw.length;
+          emit('update-stats', { rx: rxBytesCount.value, tx: txBytesCount.value });
+          return;
+        }
         if (worker) {
           worker.postMessage({
             rawBytes: raw,
@@ -463,20 +577,18 @@ onMounted(async () => {
             timestamp: ts
           });
         } else {
-          const text = new TextDecoder('utf-8', { fatal: false }).decode(raw);
+          const text = viewMode.value === 'hex'
+            ? Array.from(raw, byte => byte.toString(16).padStart(2, '0').toUpperCase()).join(' ') + ' '
+            : decodedRx;
           rxBytesCount.value += raw.length;
           emit('update-stats', { rx: rxBytesCount.value, tx: txBytesCount.value });
           appendLog(text, 'rx', ts);
-          handleIncomingRxText(text);
         }
       });
 
       unlistenDisconnect = await listen<{ port: string; reason: string }>('serial-disconnected', (event) => {
         if (event.payload.port && event.payload.port === props.portName) {
           appendLog(t('term_log_disconnected', { port: props.portName }), 'error');
-          if (props.isConnected) {
-            emit('toggle-connection');
-          }
         }
       });
 
@@ -510,12 +622,24 @@ watch(() => props.isConnected, (connected: boolean) => {
   if (connected) {
     refreshPinStates();
   } else {
+    for (const timer of triggerTimers) clearTimeout(timer);
+    triggerTimers.clear();
+    triggerPanelRef.value?.suspendMatcher();
+    rxDecoder.decode();
     dtrState.value = false;
     rtsState.value = false;
   }
 });
+watch(() => props.portName, () => {
+  for (const timer of triggerTimers) clearTimeout(timer);
+  triggerTimers.clear(); triggerPanelRef.value?.suspendMatcher(); rxDecoder.decode();
+  refreshCapture();
+});
 
 onUnmounted(() => {
+  if (captureTimer) clearInterval(captureTimer);
+  for (const timer of triggerTimers) clearTimeout(timer);
+  triggerTimers.clear();
   if (unlistenRx) unlistenRx();
   if (unlistenDisconnect) unlistenDisconnect();
   if (unlistenFlashActive) unlistenFlashActive();
@@ -524,6 +648,11 @@ onUnmounted(() => {
     worker.terminate();
     worker = null;
   }
+  if (logFlushRafId !== null) {
+    cancelAnimationFrame(logFlushRafId);
+    logFlushRafId = null;
+  }
+  pendingLogQueue = [];
   // Thorough GC release: clear retained log arrays to free DOM and string heap
   logs.value = [];
 });
@@ -531,6 +660,7 @@ onUnmounted(() => {
 
 <template>
   <div class="h-full flex flex-col bg-zinc-950 text-zinc-100 font-mono text-xs">
+    <CaptureAnalysis v-if="analysisOpen" :initial-path="captureStatus?.directory || ''" @close="analysisOpen = false" />
     <!-- Terminal Header Toolbar -->
     <div class="bg-zinc-900 border-b border-zinc-800 px-3 py-1.5 flex items-center justify-between gap-3 select-none">
       <!-- Left: Title, Port & Baud Selectors, Connect Toggle & Hardware Pin Controls -->
@@ -573,7 +703,7 @@ onUnmounted(() => {
             :title="isFlashingActive ? t('term_flash_running_tip') : (isConnected ? t('term_close_port_tip') : t('term_open_port_tip'))"
           >
             <Power class="w-3 h-3" />
-            <span>{{ isFlashingActive ? t('term_flashing') : (isConnected ? t('term_close') : t('term_open')) }}</span>
+            <span>{{ isFlashingActive ? t('term_flashing') : (isListening ? '停止监听' : (isConnected ? t('term_close') : t('term_open'))) }}</span>
           </button>
         </div>
 
@@ -674,17 +804,20 @@ onUnmounted(() => {
           </label>
 
           <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer">
-            <input type="checkbox" v-model="autoScroll" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
-            <ArrowDown class="w-3 h-3" />
-            <span>{{ t('term_autoscroll') }}</span>
-          </label>
-
-          <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer">
             <input type="checkbox" v-model="autoWrap" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
             <WrapText class="w-3 h-3" />
             <span>{{ t('term_autowrap') }}</span>
           </label>
         </template>
+
+        <label class="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer" :title="appearanceLabel('term_autoscroll_new_message_tip', '仅新消息到达时滚动到底部；空闲时可向上阅读历史')">
+          <input type="checkbox" v-model="autoScroll" class="rounded bg-zinc-800 border-zinc-700 text-emerald-500 focus:ring-0">
+          <ArrowDown class="w-3 h-3" />
+          <span>{{ t('term_autoscroll') }}</span>
+        </label>
+        <button @click="appearanceOpen = !appearanceOpen" :aria-expanded="appearanceOpen" class="px-2 py-0.5 rounded text-[11px] bg-zinc-800 text-zinc-300 border border-zinc-700 hover:bg-zinc-700">
+          {{ appearanceLabel('term_appearance', '外观') }}
+        </button>
 
         <!-- Protocol Dashboard Toggle Button -->
         <button
@@ -798,7 +931,35 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <div v-if="appearanceOpen" class="px-3 py-2 flex flex-wrap items-center gap-3 border-b border-zinc-800 bg-zinc-900 text-[11px]">
+      <label class="flex items-center gap-1">{{ appearanceLabel('term_font_family', '字体') }}
+        <input :value="appearance.fontFamily" @change="updateAppearance('fontFamily', $event)" required maxlength="200" class="w-56 bg-zinc-950 border border-zinc-700 rounded px-2 py-1" />
+      </label>
+      <label class="flex items-center gap-1">{{ appearanceLabel('term_font_size', '字号') }}
+        <input type="number" :value="appearance.fontSize" @change="updateAppearance('fontSize', $event)" min="8" max="32" step="0.5" required class="w-16 bg-zinc-950 border border-zinc-700 rounded px-2 py-1" /> px
+      </label>
+      <label class="flex items-center gap-1">{{ appearanceLabel('term_text_color', '文字 / RX') }}<input type="color" :value="appearance.foreground" @input="updateAppearance('foreground', $event)" class="w-7 h-6" /></label>
+      <label class="flex items-center gap-1">{{ appearanceLabel('term_background_color', '背景') }}<input type="color" :value="appearance.background" @input="updateAppearance('background', $event)" class="w-7 h-6" /></label>
+      <label class="flex items-center gap-1">TX<input type="color" :value="appearance.txColor" @input="updateAppearance('txColor', $event)" class="w-7 h-6" /></label>
+      <label class="flex items-center gap-1">{{ appearanceLabel('term_info_color', '提示') }}<input type="color" :value="appearance.infoColor" @input="updateAppearance('infoColor', $event)" class="w-7 h-6" /></label>
+      <label class="flex items-center gap-1">{{ appearanceLabel('term_error_color', '错误') }}<input type="color" :value="appearance.errorColor" @input="updateAppearance('errorColor', $event)" class="w-7 h-6" /></label>
+      <button @click="resetAppearance" class="px-2 py-1 bg-zinc-800 rounded">{{ appearanceLabel('term_reset_appearance', '恢复默认外观') }}</button>
+      <span class="text-zinc-400">{{ appearanceLabel('term_appearance_scope', '文本 / HEX / VT100 共用；VT100 保留设备 ANSI 颜色') }}</span>
+    </div>
+    <p v-if="appearanceError" role="alert" class="px-3 py-1 text-amber-300">{{ appearanceLabel('term_appearance_storage_error', '外观偏好无法读取或保存，本次设置仍可使用：') }} {{ appearanceError }}</p>
+
     <!-- Main Center Viewport: Split Terminal Logs / VT100 & Drawers -->
+    <div class="px-3 py-1.5 flex flex-wrap items-center gap-2 border-b border-zinc-800 bg-zinc-900 text-[11px]">
+      <input v-model="includeText" placeholder="搜索 / 高亮" class="bg-zinc-950 border border-zinc-700 px-2 py-1 rounded w-36" />
+      <input v-model="excludeText" placeholder="排除内容" class="bg-zinc-950 border border-zinc-700 px-2 py-1 rounded w-28" />
+      <label><input type="checkbox" v-model="regexFilter" /> 正则</label>
+      <label><input type="checkbox" v-model="bookmarkOnly" /> 书签 {{ bookmarks.length }}</label>
+      <button @click="toggleRecording" :disabled="!captureStatus" class="px-2 py-1 rounded bg-zinc-800 disabled:opacity-40">{{ captureStatus?.recording ? '停止后台录制' : '后台录制 RX/TX' }}</button>
+      <button @click="analysisOpen = true" class="px-2 py-1 rounded bg-sky-900">查看记录 / 回放</button>
+      <select @change="recallHistory(($event.target as HTMLSelectElement).value)" class="bg-zinc-950 border border-zinc-700 rounded max-w-44"><option value="">发送历史（选择仅填入）</option><option v-for="(entry, index) in sendHistory" :key="index" :value="index">{{ entry.text.slice(0, 60) }}</option></select>
+      <span v-if="filterError || captureStatus?.error" class="text-rose-400">{{ filterError || captureStatus?.error }}</span>
+      <span v-if="captureStatus?.directory" class="select-text text-zinc-400 break-all">{{ captureStatus.directory }}</span>
+    </div>
     <div class="flex-1 flex overflow-hidden min-h-0">
       <!-- Left: Terminal Log Viewport or VT100 Terminal View -->
       <div
@@ -808,6 +969,8 @@ onUnmounted(() => {
       >
         <SerialXtermView
           ref="xtermRef"
+          :appearance="appearance"
+          :auto-scroll="autoScroll"
           :port-name="portName"
           :is-connected="isConnected"
           @bytes-sent="handleBytesSent"
@@ -819,7 +982,8 @@ onUnmounted(() => {
         v-show="sessionMode === 'log'"
         ref="logContainer"
         @contextmenu="handleContextMenu"
-        class="flex-1 overflow-auto p-3 space-y-0.5 select-text bg-zinc-950 font-mono text-[11.5px] leading-relaxed"
+        class="flex-1 overflow-auto p-3 space-y-0.5 select-text leading-relaxed"
+        :style="logAppearanceStyle"
       >
         <div v-if="logs.length === 0" class="h-full flex flex-col items-center justify-center text-zinc-600 select-none">
           <Terminal class="w-10 h-10 mb-2 stroke-1 opacity-40" />
@@ -828,11 +992,12 @@ onUnmounted(() => {
         </div>
 
         <div
-          v-for="item in logs"
+          v-for="item in visibleLogs"
           :key="item.id"
           class="flex items-start gap-1.5 hover:bg-zinc-900/50 rounded px-1 -mx-1"
         >
           <!-- Timestamp -->
+          <button @click="bookmark(item)" title="保存 / 移除书签" class="text-amber-400 shrink-0">{{ bookmarks.some(b => b.id === item.id) ? '★' : '☆' }}</button>
           <span v-if="showTimestamps" class="text-zinc-600 text-[10px] shrink-0 select-none">
             [{{ item.timestamp }}]
           </span>
@@ -854,16 +1019,9 @@ onUnmounted(() => {
           <!-- Content: switch between whitespace-pre-wrap (wrapping) and whitespace-pre (no-wrap horizontal scroll) -->
           <span
             class="flex-1"
-            :class="[
-              autoWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre overflow-x-visible',
-              {
-                'text-emerald-300': item.type === 'rx',
-                'text-sky-300 font-medium': item.type === 'tx',
-                'text-amber-300': item.type === 'info',
-                'text-rose-400 font-semibold': item.type === 'error',
-              }
-            ]"
-          >{{ item.text }}</span>
+            :style="{ color: serialLogColor(appearance, item.type) }"
+            :class="[autoWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre overflow-x-visible', { 'font-medium': item.type === 'tx', 'font-semibold': item.type === 'error' }]"
+          ><span v-for="(part, index) in highlightParts(item.text, regexFilter ? '' : includeText)" :key="index" :class="part.mark ? 'bg-amber-500/30 text-amber-100' : ''">{{ part.text }}</span></span>
         </div>
       </div>
 
@@ -878,6 +1036,7 @@ onUnmounted(() => {
       >
         <ProtocolDashboard
           :port-name="portName"
+          :baud-rate="baudRate"
           :is-connected="isConnected"
           @close="isDashboardOpen = false"
           @log="appendLog"

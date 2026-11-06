@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { serialIdentity, guardedSend } from '../utils/serialSession';
 import { ref, computed, watch, onUnmounted } from 'vue';
 import type { CommandGroup, CommandItem } from '../types';
 import {
@@ -6,7 +7,6 @@ import {
   saveCommandGroups,
   encodeCommand,
 } from '../utils/commandEncoder';
-import { safeInvoke } from '../utils/ipc';
 import {
   Play,
   Square,
@@ -65,22 +65,23 @@ const loopCounter = ref<number>(0);
 /**
  * Send a single command immediately (满足：支持一个命令的单独发送)
  */
-async function sendSingleCommand(cmd: CommandItem) {
+async function sendSingleCommand(cmd: CommandItem, target?: { port: string; identity: string | null }) {
   if (!props.isConnected) {
     emit('log', t('cmd_send_err_no_conn', { label: cmd.label }), 'error');
     return;
   }
 
   try {
+    const port = target?.port || props.portName;
+    if (!port) throw new Error('必须明确选择串口');
+    const identity = target ? target.identity : await serialIdentity(port);
     const { bytes, textDisplay } = encodeCommand(cmd);
-    const count: number = await safeInvoke('send_serial_data', { 
-      data: bytes,
-      portName: props.portName
-    });
+    const count = await guardedSend(port, identity, bytes);
     emit('bytesSent', count);
     emit('log', `[TX] ${textDisplay}`, 'tx');
   } catch (err: any) {
     emit('log', t('cmd_send_err', { label: cmd.label, err: err.message || err }), 'error');
+    if (target) throw err;
   }
 }
 
@@ -88,6 +89,8 @@ async function sendSingleCommand(cmd: CommandItem) {
  * Execute all enabled commands in the group sequentially with delay
  */
 async function startBatchExecution() {
+  if (isBatchRunning.value) return;
+  if (!props.portName) { emit('log', '必须明确选择串口', 'error'); return; }
   if (!activeGroup.value || !props.isConnected) return;
   const enabledCmds = activeGroup.value.commands.filter(c => c.enabled);
   if (enabledCmds.length === 0) {
@@ -98,33 +101,39 @@ async function startBatchExecution() {
   isBatchRunning.value = true;
   abortController.value = false;
   loopCounter.value = 0;
+  const snapshot: CommandGroup = JSON.parse(JSON.stringify(activeGroup.value));
+  const port = props.portName;
 
   emit('log', t('cmd_run_start', { name: activeGroup.value.name, count: enabledCmds.length }), 'info');
 
+  try {
+  const identity = await serialIdentity(port);
   do {
     loopCounter.value++;
-    for (let i = 0; i < activeGroup.value.commands.length; i++) {
+    for (let i = 0; i < snapshot.commands.length; i++) {
       if (abortController.value) break;
 
-      const cmd = activeGroup.value.commands[i];
+      const cmd = snapshot.commands[i];
       if (!cmd.enabled) continue;
 
       currentRunningIndex.value = i;
 
       // Send current command
-      await sendSingleCommand(cmd);
+      if (!props.isConnected || props.portName !== port) throw new Error('连接已改变，命令循环停止');
+      await sendSingleCommand(cmd, { port, identity });
 
       // Wait delayAfterMs before next command
       if (cmd.delayAfterMs > 0 && !abortController.value) {
-        await new Promise(resolve => setTimeout(resolve, cmd.delayAfterMs));
+        await cancellableDelay(cmd.delayAfterMs);
       }
     }
 
-    if (activeGroup.value.loop && !abortController.value) {
-      const waitMs = activeGroup.value.loopIntervalMs || 1000;
-      await new Promise(resolve => setTimeout(resolve, waitMs));
+    if (snapshot.loop && !abortController.value) {
+      const waitMs = snapshot.loopIntervalMs || 1000;
+      await cancellableDelay(waitMs);
     }
-  } while (activeGroup.value.loop && !abortController.value);
+  } while (snapshot.loop && !abortController.value);
+  } catch (err) { emit('log', String(err), 'error'); }
 
   isBatchRunning.value = false;
   currentRunningIndex.value = -1;
@@ -134,14 +143,17 @@ async function startBatchExecution() {
 
 function stopBatchExecution() {
   abortController.value = true;
-  isBatchRunning.value = false;
-  currentRunningIndex.value = -1;
   emit('log', t('cmd_run_user_stop'), 'info');
+}
+async function cancellableDelay(ms: number) {
+  const end = performance.now() + ms;
+  while (!abortController.value && performance.now() < end) await new Promise(resolve => setTimeout(resolve, Math.min(50, end - performance.now())));
 }
 
 onUnmounted(() => {
   stopBatchExecution();
 });
+watch(() => [props.isConnected, props.portName], () => { if (isBatchRunning.value) stopBatchExecution(); });
 
 // Modals / Editors state
 const isEditModalOpen = ref(false);

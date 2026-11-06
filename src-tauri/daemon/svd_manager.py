@@ -79,6 +79,7 @@ class SvdManager:
     """
     _pack_instances = {}
     _svd_root_cache = {}
+    _register_policies = {}
 
     @classmethod
     def get_loaded_packs(cls) -> List[Any]:
@@ -343,12 +344,19 @@ class SvdManager:
             # Handle register-level derivedFrom
             derived_name = r.get("derivedFrom")
             base_r = reg_by_name.get(derived_name.strip()) if derived_name else None
+            def inherited(tag, default):
+                for node in (r, base_r, target_p, source_p, root):
+                    if node is not None and node.findtext(tag) is not None:
+                        return node.findtext(tag)
+                return default
 
             name_tmpl = r.findtext("name", getattr(base_r, "findtext", lambda *a: "")("name", "")).strip()
             desc = r.findtext("description", getattr(base_r, "findtext", lambda *a: "")("description", "")).strip()
             offset_str = r.findtext("addressOffset", "0")
-            size_str = r.findtext("size", getattr(base_r, "findtext", lambda *a: "")("size", "32"))
-            access = r.findtext("access", getattr(base_r, "findtext", lambda *a: "")("access", "read-write"))
+            size_str = inherited('size', '32')
+            access = inherited('access', 'read-write')
+            read_action = inherited('readAction', None)
+            modified_write = inherited('modifiedWriteValues', None)
             reset_str = r.findtext("resetValue", getattr(base_r, "findtext", lambda *a: "")("resetValue", "0x00000000"))
 
             try:
@@ -372,6 +380,8 @@ class SvdManager:
                 fname = f.findtext("name", "").strip()
                 fdesc = f.findtext("description", "").strip()
                 faccess = f.findtext("access", access)
+                read_action = read_action or f.findtext('readAction')
+                modified_write = modified_write or f.findtext('modifiedWriteValues')
 
                 bit_offset = 0
                 bit_width = 1
@@ -442,6 +452,8 @@ class SvdManager:
                         "raw_address": reg_abs,
                         "size": size,
                         "access": access,
+                        "read_action": read_action,
+                        "modified_write": modified_write,
                         "reset_value": reset_str,
                         "fields": fields
                     })
@@ -457,6 +469,8 @@ class SvdManager:
                 "raw_address": abs_addr,
                 "size": size,
                 "access": access,
+                "read_action": read_action,
+                "modified_write": modified_write,
                 "reset_value": reset_str,
                 "fields": fields
             }]
@@ -480,15 +494,35 @@ class SvdManager:
                 registers.extend(parse_register_element(r, 0))
 
         registers.sort(key=lambda x: x["raw_address"])
+        for register in registers:
+            cls._register_policies[(device_name, register['raw_address'])] = register
         return registers
 
     @classmethod
+    def _policy(cls, device, address, write=False, field=False):
+        policy = cls._register_policies.get((device, address))
+        if policy is None:
+            raise ValueError('Load the SVD register definitions for this device before accessing registers')
+        size = policy['size']
+        if size not in (8, 16, 32) or address % (size // 8):
+            raise ValueError('Unsupported or unaligned register width')
+        if not write and (policy['access'] == 'write-only' or policy.get('read_action')):
+            raise ValueError('Register is write-only or has read side effects; automatic read refused')
+        if write:
+            if policy['access'] not in ('read-write', 'write-only') or policy.get('modified_write'):
+                raise ValueError('Register has restricted/special write semantics')
+            if field and (policy['access'] != 'read-write' or policy.get('read_action') or any(f['access'] != 'read-write' for f in policy['fields'])):
+                raise ValueError('Read-modify-write is unsafe for this register')
+        return policy
+
+    @classmethod
     def read_register(cls, address: int, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
+        policy = cls._policy(target_override, address)
         from daemon_entry import PyOCDController
         session = PyOCDController._create_session(probe_id, target_override)
         with session:
             target = session.board.target
-            val = target.read32(address)
+            val = target.read_memory(address, transfer_size=policy['size'])
             return {
                 "address": f"0x{address:08X}",
                 "value": f"0x{val:08X}",
@@ -506,7 +540,8 @@ class SvdManager:
             target = session.board.target
             for addr in addresses:
                 try:
-                    val = target.read32(addr)
+                    policy = cls._policy(target_override, addr)
+                    val = target.read_memory(addr, transfer_size=policy['size'])
                     results[f"0x{addr:08X}"] = {
                         "value": f"0x{val:08X}",
                         "value_uint": val,
@@ -518,11 +553,14 @@ class SvdManager:
 
     @classmethod
     def write_register(cls, address: int, value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
+        policy = cls._policy(target_override, address, write=True)
+        if not 0 <= value < (1 << policy['size']):
+            raise ValueError('Value exceeds register width')
         from daemon_entry import PyOCDController
         session = PyOCDController._create_session(probe_id, target_override)
         with session:
             target = session.board.target
-            target.write32(address, value)
+            target.write_memory(address, value, transfer_size=policy['size'])
             return {
                 "address": f"0x{address:08X}",
                 "value": f"0x{value:08X}",
@@ -531,14 +569,17 @@ class SvdManager:
 
     @classmethod
     def write_field(cls, address: int, bit_offset: int, bit_width: int, field_value: int, probe_id: Optional[str] = None, target_override: Optional[str] = None) -> Dict[str, Any]:
+        policy = cls._policy(target_override, address, write=True, field=True)
+        if not (0 <= bit_offset < policy['size'] and 1 <= bit_width <= policy['size'] - bit_offset and 0 <= field_value < (1 << bit_width)):
+            raise ValueError('Invalid bit-field range or value')
         from daemon_entry import PyOCDController
         session = PyOCDController._create_session(probe_id, target_override)
         with session:
             target = session.board.target
-            current_val = target.read32(address)
+            current_val = target.read_memory(address, transfer_size=policy['size'])
             mask = ((1 << bit_width) - 1) << bit_offset
             new_val = (current_val & ~mask) | ((field_value << bit_offset) & mask)
-            target.write32(address, new_val)
+            target.write_memory(address, new_val, transfer_size=policy['size'])
             return {
                 "address": f"0x{address:08X}",
                 "old_value": f"0x{current_val:08X}",

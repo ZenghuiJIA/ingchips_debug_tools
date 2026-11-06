@@ -1,0 +1,11 @@
+{
+  "event_type": 3,
+  "major": 1,
+  "minor": 0,
+  "flags": 0,
+  "boot_id": "7",
+  "sequence": 0,
+  "ticks": "9007199254740993",
+  "payload_hex": "2a00000001000000",
+  "offset": 0
+}

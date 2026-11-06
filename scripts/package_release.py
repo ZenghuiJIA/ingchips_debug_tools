@@ -78,7 +78,7 @@ def get_release_paths(ver: str):
     zip_path = RELEASE_DIR / f"{pkg_name}.zip"
     return pkg_name, target_dir, zip_path
 
-def package(custom_version: str = None):
+def package(custom_version: str = None, daemon_source=None):
     version = custom_version or get_release_version()
     pkg_name, target_dir, zip_path = get_release_paths(version)
 
@@ -86,31 +86,29 @@ def package(custom_version: str = None):
     print(f" Packaging Release: {pkg_name} (Version: {version})")
     print("=" * 60)
 
-    # Stop any running instances locking files in release directory
-    if sys.platform == "win32":
-        try:
-            import subprocess
-            subprocess.run(["taskkill", "/f", "/im", "AI-HIL-Debugger.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["taskkill", "/f", "/im", "hil-daemon-x86_64-pc-windows-msvc.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            import time
-            time.sleep(0.5)
-        except Exception:
-            pass
-
     # Optional build check: Ensure release exe is built with latest frontend
     auto_build = os.environ.get("SKIP_BUILD") != "1"
     if auto_build:
+        from build_daemon_windows import build_native_codec, build_executable, build_native_runtime
+        build_native_codec()
+        if not (ROOT_DIR / 'build_dist/hil-python-worker.exe').is_file():
+            build_executable()
+        build_native_runtime()
         print("[0/5] Building latest frontend and Tauri release executable...")
         try:
             subprocess.run(
-                ["pnpm", "tauri", "build", "--no-bundle"],
+                ["node", str(ROOT_DIR / "node_modules" / "@tauri-apps" / "cli" / "tauri.js"), "build", "--no-bundle"],
                 cwd=str(ROOT_DIR),
                 check=True,
-                shell=True
+                shell=False
             )
             print("  [OK] Build completed successfully.")
         except Exception as e:
-            print(f"  [WARN] Tauri build returned non-zero or failed: {e}. Will attempt to use existing binary.")
+            raise RuntimeError(f"Tauri build failed; refusing to package stale binaries: {e}") from e
+
+    # Resolve and verify all cleanup paths before replacing this release only.
+    if target_dir.resolve().parent != RELEASE_DIR.resolve() or zip_path.resolve().parent != RELEASE_DIR.resolve():
+        raise ValueError("Invalid release path")
 
     # Clean previous output
     if target_dir.exists():
@@ -133,17 +131,29 @@ def package(custom_version: str = None):
     main_exe_candidates = [
         ROOT_DIR / "src-tauri" / "target" / "release" / "ai-hil-debugger.exe",
         ROOT_DIR / "src-tauri" / "target" / "release" / "AI-HIL-Debugger.exe",
-        ROOT_DIR / "bin" / "AI-HIL-Debugger.exe",
+
     ]
     main_exe = next((p for p in main_exe_candidates if p.exists()), None)
+    if main_exe is None:
+        raise FileNotFoundError("Build the desktop release executable before packaging")
     if main_exe:
         shutil.copy2(main_exe, target_dir / "AI-HIL-Debugger.exe")
         print(f"  [OK] Copied {main_exe.name} -> AI-HIL-Debugger.exe ({main_exe.stat().st_size / 1024 / 1024:.1f} MB)")
 
-    daemon_exe = ROOT_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe"
+    daemon_exe = Path(daemon_source) if daemon_source else ROOT_DIR / 'build_dist/hil-native.exe'
+    if not daemon_exe.is_file():
+        raise FileNotFoundError("Build the daemon before packaging")
     if daemon_exe.exists():
         shutil.copy2(daemon_exe, target_dir / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe")
         print(f"  [OK] Copied {daemon_exe.name} ({daemon_exe.stat().st_size / 1024 / 1024:.1f} MB)")
+    codec = ROOT_DIR / 'src-tauri/target/release/hil-protocol.exe'
+    if not codec.is_file():
+        raise FileNotFoundError('Build hil-protocol before packaging')
+    shutil.copy2(codec, target_dir / 'bin' / codec.name)
+    for filename in ['hil-python-worker.exe', 'hil-native.exe', 'mcp-tools.json']:
+        source = ROOT_DIR / 'build_dist' / filename
+        if not source.is_file(): raise FileNotFoundError(f'Missing native runtime dependency: {filename}')
+        shutil.copy2(source, target_dir / 'bin' / filename)
 
     # Copy batch scripts
     print("[2/5] Copying batch launchers and installers...")
@@ -176,6 +186,30 @@ def package(custom_version: str = None):
         print(f"  [OK] Copied mcp/README.md")
 
     root_readme = ROOT_DIR / "README.md"
+    hil_examples = ROOT_DIR / "examples" / "hil"
+    instrumentation_examples = ROOT_DIR / 'examples' / 'instrumentation'
+    if instrumentation_examples.exists():
+        shutil.copytree(instrumentation_examples, target_dir / 'examples' / 'instrumentation')
+    sdk = ROOT_DIR / 'firmware' / 'hil-instrumentation'
+    if sdk.exists():
+        shutil.copytree(sdk, target_dir / 'firmware' / 'hil-instrumentation')
+    for guide in ('EMBEDDED_DEBUG_STATUS.md', 'EMBEDDED_DEBUG_IMPLEMENTATION_PLAN.md', 'HIL_RESET_CANCEL.md'):
+        (target_dir / 'docs').mkdir(exist_ok=True)
+        shutil.copy2(ROOT_DIR / 'docs' / guide, target_dir / 'docs' / guide)
+    if hil_examples.exists():
+        shutil.copytree(hil_examples, target_dir / "examples" / "hil")
+    hil_guide = ROOT_DIR / "docs" / "HIL_RUNNER.md"
+    abc_guide = ROOT_DIR / 'docs/ABC_DEBUGGING.md'
+    migration_guide = ROOT_DIR / 'docs/RUST_MIGRATION.md'
+    if migration_guide.exists():
+        (target_dir / 'docs').mkdir(exist_ok=True)
+        shutil.copy2(migration_guide, target_dir / 'docs' / migration_guide.name)
+    if abc_guide.exists():
+        (target_dir / 'docs').mkdir(exist_ok=True)
+        shutil.copy2(abc_guide, target_dir / 'docs' / abc_guide.name)
+    if hil_guide.exists():
+        (target_dir / "docs").mkdir(exist_ok=True)
+        shutil.copy2(hil_guide, target_dir / "docs" / hil_guide.name)
     if root_readme.exists():
         shutil.copy2(root_readme, target_dir / "README.md")
         print(f"  [OK] Copied README.md")
@@ -184,6 +218,17 @@ def package(custom_version: str = None):
     if license_file.exists():
         shutil.copy2(license_file, target_dir / "LICENSE")
         print(f"  [OK] Copied LICENSE")
+
+    notes = ROOT_DIR / "docs" / f"RELEASE_NOTES_{version}.md"
+    if notes.exists():
+        shutil.copy2(notes, target_dir / "RELEASE_NOTES.md")
+        (target_dir / "docs").mkdir(exist_ok=True)
+        shutil.copy2(notes, target_dir / "docs" / notes.name)
+
+    review = ROOT_DIR / "docs" / f"REVIEW_{version}.md"
+    if review.is_file():
+        (target_dir / "docs").mkdir(exist_ok=True)
+        shutil.copy2(review, target_dir / "docs" / review.name)
 
     # Copy packs: only include the official default pack to keep release clean and free of testing debris
     default_pack_name = "INGChips.INGCHIPS_DeviceFamilyPack.1.0.1.pack"
@@ -197,6 +242,12 @@ def package(custom_version: str = None):
         if ing_packs:
             shutil.copy2(ing_packs[0], target_dir / "packs" / ing_packs[0].name)
             print(f"  [OK] Copied pack: {ing_packs[0].name}")
+
+    import hashlib
+    import json
+    hashes = {str(p.relative_to(target_dir)): hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in target_dir.rglob("*") if p.is_file()}
+    (target_dir / "SHA256SUMS.json").write_text(json.dumps(hashes, indent=2), encoding="utf-8")
 
     # Compress into zip
     print(f"[5/5] Compressing package into {zip_path.name}...")

@@ -5,6 +5,7 @@ import { usePersistentState } from '../composables/usePersistentState';
 import ProbeSelect from './common/ProbeSelect.vue';
 import SwdClockSelect from './common/SwdClockSelect.vue';
 import CpuFreqSelect from './common/CpuFreqSelect.vue';
+import EmbeddedDebugPanel from './EmbeddedDebugPanel.vue';
 
 import {
   Play,
@@ -41,6 +42,7 @@ export interface FunctionProfileItem {
 const cpuFreqMhz = usePersistentState<number>('hil_mcu_profiler_cpu_freq', 64);
 const isProfiling = ref<boolean>(false);
 const alertThresholdUs = usePersistentState<number>('hil_mcu_profiler_alert_us', 200);
+const embeddedDebugOpen = ref(false);
 
 
 // Firmware ELF / AXF Symbol Parsing State
@@ -82,22 +84,21 @@ async function parseSymbolsFromFile(path: string) {
 
       // Replace with real parsed functions from firmware
       functionsList.value = res.functions.map((fn: any, idx: number) => {
-        // Approximate mock duration baseline based on function size
-        const baseUs = Number(Math.max(0.5, (fn.size / 32) * (64 / cpuFreqMhz.value)).toFixed(1));
+        const baseUs = 0;
         return {
           id: idx + 1,
           name: fn.name,
           category: fn.category || 'App Code',
           address: fn.address,
           size: fn.size,
-          callCount: Math.floor(Math.random() * 200) + 10,
+          callCount: 0,
           lastUs: baseUs,
           minUs: Number((baseUs * 0.7).toFixed(1)),
           maxUs: Number((baseUs * 3.5).toFixed(1)),
           avgUs: baseUs,
           p95Us: Number((baseUs * 1.8).toFixed(1)),
-          cpuPercent: Number((Math.random() * 4.5 + 0.5).toFixed(1)),
-          histogram: [100, 300, 500, 80, 20, 5, 2, 1, 0, 0]
+          cpuPercent: 0,
+          histogram: []
         };
       });
       parseStatusMsg.value = `成功解析导入 ${res.functions.length} 个函数符号 (${path.split(/[\/\\]/).pop()})`;
@@ -112,86 +113,7 @@ async function parseSymbolsFromFile(path: string) {
 }
 
 // Profiling functions list
-const functionsList = ref<FunctionProfileItem[]>([
-  {
-    id: 1,
-    name: 'ble_ll_event_poll',
-    category: 'BLE Stack',
-    callCount: 1420,
-    lastUs: 24.5,
-    minUs: 8.2,
-    maxUs: 185.0,
-    avgUs: 22.4,
-    p95Us: 45.1,
-    cpuPercent: 14.8,
-    histogram: [120, 450, 600, 180, 45, 15, 6, 2, 1, 1]
-  },
-  {
-    id: 2,
-    name: 'SysTick_Handler',
-    category: 'ISR',
-    callCount: 10000,
-    lastUs: 1.8,
-    minUs: 1.2,
-    maxUs: 12.5,
-    avgUs: 1.6,
-    p95Us: 2.8,
-    cpuPercent: 3.2,
-    histogram: [3200, 5800, 900, 80, 15, 3, 1, 1, 0, 0]
-  },
-  {
-    id: 3,
-    name: 'sensor_adc_dma_isr',
-    category: 'ISR',
-    callCount: 2500,
-    lastUs: 8.4,
-    minUs: 6.0,
-    maxUs: 38.0,
-    avgUs: 7.9,
-    p95Us: 14.2,
-    cpuPercent: 5.6,
-    histogram: [800, 1400, 250, 40, 7, 2, 1, 0, 0, 0]
-  },
-  {
-    id: 4,
-    name: 'aes_ccm_encrypt',
-    category: 'Security',
-    callCount: 340,
-    lastUs: 82.0,
-    minUs: 76.5,
-    maxUs: 245.0,
-    avgUs: 84.1,
-    p95Us: 110.0,
-    cpuPercent: 8.4,
-    histogram: [10, 40, 220, 55, 10, 2, 1, 1, 1, 0]
-  },
-  {
-    id: 5,
-    name: 'vTaskSwitchContext',
-    category: 'RTOS',
-    callCount: 6500,
-    lastUs: 3.2,
-    minUs: 2.1,
-    maxUs: 18.4,
-    avgUs: 3.1,
-    p95Us: 5.8,
-    cpuPercent: 4.1,
-    histogram: [1800, 3900, 700, 80, 15, 3, 1, 1, 0, 0]
-  },
-  {
-    id: 6,
-    name: 'os_idle_task',
-    category: 'RTOS',
-    callCount: 890,
-    lastUs: 450.0,
-    minUs: 100.0,
-    maxUs: 1200.0,
-    avgUs: 680.0,
-    p95Us: 950.0,
-    cpuPercent: 63.9,
-    histogram: [20, 80, 150, 280, 220, 90, 35, 10, 4, 1]
-  }
-]);
+const functionsList = ref<FunctionProfileItem[]>([]);
 
 // Sub-view: 'profiler' (DWT Execution Time Table) vs 'pc_trace' (PC Statistical Trace Stream)
 const activeSubView = ref<'profiler' | 'pc_trace'>('pc_trace');
@@ -203,6 +125,7 @@ const maxBufferLimit = usePersistentState<number>('hil_mcu_profiler_max_buffer',
 const isCustomBufferLimit = ref<boolean>(false);
 const customBufferInput = ref<number>(maxBufferLimit.value);
 const traceCaller = usePersistentState<boolean>('hil_mcu_profiler_trace_caller', false);
+traceCaller.value = false;
 
 
 const isSamplingPc = ref<boolean>(false);
@@ -393,6 +316,7 @@ const diskTraceFilePath = usePersistentState<string>('hil_mcu_profiler_disk_file
 const diskWrittenBytes = ref<number>(0);
 const diskWriteError = ref<string>('');
 const isAutoFreezeOnException = usePersistentState<boolean>('hil_mcu_profiler_auto_freeze', true);
+isAutoFreezeOnException.value = false;
 const isReplayMode = ref<boolean>(false); // 是否处于查看离线回放状态
 const replayFileName = ref<string>('');
 
@@ -560,6 +484,9 @@ async function fetchContinuousBatch() {
     }
   } catch (err: any) {
     pcSamplingError.value = `连续采集异常: ${err}`;
+    isContinuousRunning.value = false;
+    if (continuousTimer) clearInterval(continuousTimer);
+    continuousTimer = null;
   } finally {
     continuousSamplingInFlight = false;
   }
@@ -638,49 +565,13 @@ const selectedFunction = computed(() => {
 });
 
 // Overall CPU Load
-const totalCpuLoad = computed<number>(() => {
-  const nonIdle = functionsList.value.filter(f => !f.name.toLowerCase().includes('idle'));
-  const sum = nonIdle.reduce((acc, cur) => acc + cur.cpuPercent, 0);
-  return Number(Math.min(100, sum).toFixed(1));
-});
+
 
 let timer: any = null;
 
 // Start / Stop Hardware DWT Profiling
 async function toggleProfiling() {
-  isProfiling.value = !isProfiling.value;
-  if (isProfiling.value) {
-    // Enable DWT CYCCNT via SWD
-    try {
-      // 0xE000EDFC (DEMCR) bit 24 = 1
-      await safeInvoke('pyocd_write_memory', {
-        address: '0xE000EDFC',
-        value: '0x01000000',
-        probeId: selectedProbeId.value || null,
-        targetOverride: null
-      });
-      // 0xE0001000 (DWT_CTRL) bit 0 = 1 (CYCCNTENA)
-      await safeInvoke('pyocd_write_memory', {
-        address: '0xE0001000',
-        value: '0x00000001',
-        probeId: selectedProbeId.value || null,
-        targetOverride: null
-      });
-    } catch (_) {}
-
-    timer = setInterval(() => {
-      // Refresh simulated/live jitter
-      for (const item of functionsList.value) {
-        item.callCount += Math.floor(Math.random() * 20);
-        const jitter = (Math.random() - 0.48) * 4;
-        item.lastUs = Math.max(item.minUs, Number((item.lastUs + jitter).toFixed(1)));
-        if (item.lastUs > item.maxUs) item.maxUs = item.lastUs;
-      }
-    }, 500);
-  } else {
-    if (timer) clearInterval(timer);
-    timer = null;
-  }
+  parseStatusMsg.value = '尚未接入函数入口/出口追踪，不能测量函数耗时与调用次数。请使用 PC 采样查看统计分布。';
 }
 
 function resetStatistics() {
@@ -698,9 +589,11 @@ onUnmounted(() => {
 </script>
 
 <template>
+  <EmbeddedDebugPanel v-if="embeddedDebugOpen" @close="embeddedDebugOpen = false" />
   <div class="h-full flex flex-col bg-zinc-950 text-zinc-100 font-sans select-none overflow-hidden">
     <!-- Header Controls Toolbar -->
     <div class="bg-zinc-900 border-b border-zinc-800 p-3 flex items-center justify-between gap-3 shrink-0">
+      <button @click="embeddedDebugOpen = true" class="px-2 py-1 bg-sky-900 rounded text-xs">嵌入式离线分析</button>
       <div class="flex items-center gap-2.5">
         <div class="p-1.5 rounded bg-amber-950/60 border border-amber-800/40 text-amber-400">
           <Activity class="w-4 h-4" />
@@ -708,7 +601,7 @@ onUnmounted(() => {
         <div>
           <span class="font-bold text-xs text-zinc-100 font-sans">MCU 实时性能与耗时统计分析器 (DWT Runtime Profiler)</span>
           <p class="text-[10.5px] text-zinc-400 font-sans">
-            利用 Cortex-M 内核 DWT 硬件周期计数器 (CYCCNT)，纳秒/微秒级免侵入分析关键函数与中断耗时分布及 CPU 负载。
+            PC 统计采样需要目标支持 DWT_PCSR；函数耗时、调用次数和 CPU 负载采集尚未接入。
           </p>
         </div>
       </div>
@@ -758,11 +651,13 @@ onUnmounted(() => {
 
         <button
           @click="toggleProfiling"
+          :disabled="true"
+          title="尚未接入函数入口/出口追踪"
           class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold shadow-sm transition-all"
           :class="isProfiling ? 'bg-rose-600 hover:bg-rose-500 text-zinc-100 animate-pulse' : 'bg-emerald-600 hover:bg-emerald-500 text-zinc-950'"
         >
           <component :is="isProfiling ? Square : Play" class="w-3.5 h-3.5 fill-current" />
-          <span>{{ isProfiling ? '停止性能采样' : '启动 DWT 实时性能采样' }}</span>
+          <span>函数耗时采集未接入</span>
         </button>
       </div>
     </div>
@@ -782,9 +677,9 @@ onUnmounted(() => {
     <!-- Live Performance Dashboard Cards -->
     <div class="bg-zinc-900/40 border-b border-zinc-800 p-3 grid grid-cols-4 gap-3 shrink-0">
       <div class="p-3 bg-zinc-900 border border-zinc-800 rounded-lg">
-        <div class="text-[11px] text-zinc-400">综合 CPU 负载率 (Load %)</div>
+        <div class="text-[11px] text-zinc-400">综合 CPU 负载率（未接入）</div>
         <div class="text-xl font-bold font-mono text-emerald-400 mt-1 flex items-baseline gap-2">
-          <span>{{ totalCpuLoad }}%</span>
+          <span>未测量</span>
           <span class="text-[10px] text-zinc-500 font-normal">基于 {{ cpuFreqMhz }}MHz</span>
         </div>
       </div>
@@ -806,7 +701,7 @@ onUnmounted(() => {
       <div class="p-3 bg-zinc-900 border border-zinc-800 rounded-lg">
         <div class="text-[11px] text-zinc-400">超限抖动事件 (Jitter)</div>
         <div class="text-xl font-bold font-mono text-rose-400 mt-1 flex items-baseline gap-1.5">
-          <span>{{ functionsList.filter(f => f.maxUs > alertThresholdUs).length }} 处</span>
+          <span>未测量</span>
           <span class="text-[10px] text-zinc-500 font-normal">&gt;{{ alertThresholdUs }}µs</span>
         </div>
       </div>
@@ -894,7 +789,7 @@ onUnmounted(() => {
 
         <!-- Fast PC Only vs PC + Caller -->
         <label class="flex items-center gap-1.5 text-zinc-300 cursor-pointer text-xs" title="勾选后同时抓取 LR 寄存器推导上级调用者；不勾选则只抓 PC，速度翻倍">
-          <input type="checkbox" v-model="traceCaller" :disabled="isContinuousRunning" class="accent-amber-500 rounded cursor-pointer" />
+          <input type="checkbox" v-model="traceCaller" disabled title="运行中不能通过核心寄存器读取可靠的 LR" class="accent-amber-500 rounded cursor-pointer" />
           <span>捕获 LR 调用者</span>
         </label>
 
@@ -917,7 +812,7 @@ onUnmounted(() => {
 
         <!-- Auto-Freeze on Exception Toggle -->
         <label class="flex items-center gap-1.5 text-xs text-rose-300 cursor-pointer" title="当检测到 HardFault / 异常中断 / 跑飞时，自动停止采样并冻结当前黑匣子执行轨迹">
-          <input type="checkbox" v-model="isAutoFreezeOnException" class="accent-rose-500 rounded cursor-pointer" />
+          <input type="checkbox" v-model="isAutoFreezeOnException" disabled title="需要可靠的异常追踪数据，当前未接入" class="accent-rose-500 rounded cursor-pointer" />
           <span>⚡ 异常自动冻结</span>
         </label>
 
@@ -1136,20 +1031,20 @@ onUnmounted(() => {
                     {{ item.category }}
                   </span>
                 </td>
-                <td class="p-2 text-right text-zinc-400">{{ item.callCount }}</td>
-                <td class="p-2 text-right text-cyan-400">{{ item.lastUs }}</td>
-                <td class="p-2 text-right text-zinc-500">{{ item.minUs }}</td>
+                <td class="p-2 text-right text-zinc-400">—</td>
+                <td class="p-2 text-right text-cyan-400">—</td>
+                <td class="p-2 text-right text-zinc-500">—</td>
                 <td class="p-2 text-right" :class="item.maxUs > alertThresholdUs ? 'text-rose-400 font-bold' : 'text-zinc-200'">
-                  {{ item.maxUs }}
+                  —
                 </td>
-                <td class="p-2 text-right text-zinc-300">{{ item.avgUs }}</td>
-                <td class="p-2 text-right text-amber-400">{{ item.p95Us }}</td>
+                <td class="p-2 text-right text-zinc-300">—</td>
+                <td class="p-2 text-right text-amber-400">—</td>
                 <td class="p-2 text-right">
                   <div class="flex items-center justify-end gap-1.5">
                     <div class="w-12 bg-zinc-800 h-1.5 rounded-full overflow-hidden">
                       <div class="bg-emerald-500 h-full" :style="{ width: `${Math.min(100, item.cpuPercent)}%` }"></div>
                     </div>
-                    <span class="text-zinc-400 text-[10.5px] w-8 text-right">{{ item.cpuPercent }}%</span>
+                    <span class="text-zinc-400 text-[10.5px] w-8 text-right">—%</span>
                   </div>
                 </td>
               </tr>
@@ -1159,7 +1054,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Right: Detailed Histogram & Distribution Panel -->
-      <div class="w-80 border-l border-zinc-800 bg-zinc-900/40 p-4 flex flex-col shrink-0 text-xs overflow-y-auto">
+      <div v-if="selectedFunction" class="w-80 border-l border-zinc-800 bg-zinc-900/40 p-4 flex flex-col shrink-0 text-xs overflow-y-auto">
         <div class="font-bold text-xs text-zinc-200 pb-2 border-b border-zinc-800 flex items-center justify-between">
           <span>耗时分布直方图 (Histogram)</span>
           <span class="text-amber-400 font-mono">{{ selectedFunction.name }}</span>
@@ -1169,19 +1064,19 @@ onUnmounted(() => {
         <div class="grid grid-cols-2 gap-2 my-3 font-mono text-[11px]">
           <div class="p-2 bg-zinc-900 border border-zinc-800 rounded">
             <span class="text-zinc-500 block text-[10px]">Min 耗时</span>
-            <span class="text-emerald-400 font-bold text-sm">{{ selectedFunction.minUs }} µs</span>
+            <span class="text-emerald-400 font-bold text-sm">— µs</span>
           </div>
           <div class="p-2 bg-zinc-900 border border-zinc-800 rounded">
             <span class="text-zinc-500 block text-[10px]">Max 耗时</span>
-            <span class="text-rose-400 font-bold text-sm">{{ selectedFunction.maxUs }} µs</span>
+            <span class="text-rose-400 font-bold text-sm">— µs</span>
           </div>
           <div class="p-2 bg-zinc-900 border border-zinc-800 rounded">
             <span class="text-zinc-500 block text-[10px]">Avg 耗时</span>
-            <span class="text-cyan-400 font-bold text-sm">{{ selectedFunction.avgUs }} µs</span>
+            <span class="text-cyan-400 font-bold text-sm">— µs</span>
           </div>
           <div class="p-2 bg-zinc-900 border border-zinc-800 rounded">
             <span class="text-zinc-500 block text-[10px]">P95 耗时</span>
-            <span class="text-amber-400 font-bold text-sm">{{ selectedFunction.p95Us }} µs</span>
+            <span class="text-amber-400 font-bold text-sm">— µs</span>
           </div>
         </div>
 
@@ -1212,9 +1107,9 @@ onUnmounted(() => {
           </div>
 
           <div class="flex justify-between text-[10px] font-mono text-zinc-500 mt-1">
-            <span>{{ selectedFunction.minUs }}µs</span>
-            <span>{{ selectedFunction.avgUs }}µs</span>
-            <span>{{ selectedFunction.maxUs }}µs</span>
+            <span>—µs</span>
+            <span>—µs</span>
+            <span>—µs</span>
           </div>
         </div>
 
@@ -1225,7 +1120,7 @@ onUnmounted(() => {
             函数最大耗时已超过 {{ alertThresholdUs }}µs 阈值，需排查其内部是否存在死循环、阻塞等待外设标志位或长中断嵌套。
           </span>
           <span v-else>
-            该函数执行耗时均在安全合理区间内，无严重抖动风险。
+            尚无实测耗时数据，无法判断该函数的耗时或抖动。
           </span>
         </div>
       </div>

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
+import EmbeddedDebugPanel from './EmbeddedDebugPanel.vue';
+const embeddedDebugOpen=ref(false);
 import { safeInvoke } from '../utils/ipc';
 import { t } from '../utils/i18n';
 import type {
@@ -239,6 +241,8 @@ function formatHexGrid(bytes: number[], startAddr: number) {
 
 <template>
   <div class="h-full flex flex-col p-4 bg-zinc-950 text-zinc-100 text-xs overflow-y-auto space-y-4">
+    <button @click="embeddedDebugOpen=true" class="bg-sky-900 rounded p-2 self-start">历史崩溃证据包 / 离线分析</button>
+    <EmbeddedDebugPanel v-if="embeddedDebugOpen" @close="embeddedDebugOpen=false" />
     <!-- Top Action Bar -->
     <div class="bg-zinc-900 border border-zinc-800 rounded-lg p-3.5 flex flex-col md:flex-row md:items-center justify-between gap-3">
       <div class="flex items-center gap-2">

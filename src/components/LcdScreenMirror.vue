@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onUnmounted } from 'vue';
+import { ref, onUnmounted, onDeactivated } from 'vue';
 import { safeInvoke } from '../utils/ipc';
 import { t } from '../utils/i18n';
 import { usePersistentState } from '../composables/usePersistentState';
@@ -130,6 +130,7 @@ function downloadImage() {
   a.click();
 }
 
+onDeactivated(stopAutoRefresh);
 onUnmounted(() => {
   stopAutoRefresh();
 });

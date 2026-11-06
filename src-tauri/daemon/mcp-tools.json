@@ -1,0 +1,1154 @@
+{
+  "tools": [
+    {
+      "name": "acknowledge_flash_recovery",
+      "description": "Explicitly acknowledge verified board recovery after an UNKNOWN interrupted flash; never acknowledges an active writer",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "probe_id": {
+            "type": "string"
+          },
+          "confirmation": {
+            "type": "string",
+            "enum": [
+              "board_recovery_verified"
+            ]
+          }
+        },
+        "required": [
+          "probe_id",
+          "confirmation"
+        ]
+      }
+    },
+    {
+      "name": "get_debug_capabilities",
+      "description": "Query offline instrumentation capabilities and installed instrument drivers",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "analyze_power_capture",
+      "description": "Offline power JSONL integration; never current-board HIL proof",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string"
+          },
+          "start_ns": {
+            "type": "string"
+          },
+          "end_ns": {
+            "type": "string"
+          },
+          "max_gap_ns": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_path",
+          "start_ns",
+          "end_ns"
+        ]
+      }
+    },
+    {
+      "name": "start_debug_analysis",
+      "description": "Start an isolated offline analysis task",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string"
+          },
+          "arguments": {
+            "type": "object"
+          },
+          "timeout_ms": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operation",
+          "arguments"
+        ]
+      }
+    },
+    {
+      "name": "get_debug_analysis_status",
+      "description": "Query offline analysis status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ]
+      }
+    },
+    {
+      "name": "stop_debug_analysis",
+      "description": "Cancel offline analysis without touching hardware",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ]
+      }
+    },
+    {
+      "name": "get_debug_analysis_result",
+      "description": "Read completed offline analysis result",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id"
+        ]
+      }
+    },
+    {
+      "name": "analyze_instrumentation",
+      "description": "Analyze a HILI file or decoded events offline; use start_debug_analysis for large files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "binary",
+              "text"
+            ]
+          },
+          "events": {
+            "type": "array"
+          },
+          "budgets": {
+            "type": "object"
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "analyze_crash_bundle",
+      "description": "Validate an offline crash bundle",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "directory": {
+            "type": "string"
+          },
+          "elf_path": {
+            "type": "string"
+          },
+          "build_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "directory"
+        ]
+      }
+    },
+    {
+      "name": "protocol_plugin_analyze",
+      "description": "Run a trusted local Python decoder on recorded data; no host device API is passed",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "plugin_path": {
+            "type": "string"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "timeout_ms": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plugin_path",
+          "payload"
+        ]
+      }
+    },
+    {
+      "name": "get_hiltest_events",
+      "description": "Read incremental HIL events without consuming other readers",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "after": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id"
+        ]
+      }
+    },
+    {
+      "name": "get_hiltest_report",
+      "description": "Read the final HIL report and artifact directory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id"
+        ]
+      }
+    },
+    {
+      "name": "validate_hiltest",
+      "description": "Validate a HIL test document or file without hardware access",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "type": "object"
+          },
+          "file": {
+            "type": "string"
+          },
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "name": "run_hiltest",
+      "description": "Start a headless HIL test and immediately return its run_id",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document": {
+            "type": "object"
+          },
+          "file": {
+            "type": "string"
+          },
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "name": "get_hiltest_status",
+      "description": "Read status and report location for a HIL test",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id"
+        ]
+      }
+    },
+    {
+      "name": "stop_hiltest",
+      "description": "Request cooperative cancellation of a HIL test",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id"
+        ]
+      }
+    },
+    {
+      "name": "list_probes",
+      "description": "列出所有连接至宿主机的 DAPLink / CMSIS-DAP / JLink 硬件调试器探针",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "read_core_registers",
+      "description": "读取 ARM Cortex-M 核心寄存器与 SCB 故障寄存器 (CFSR/HFSR/BFAR/MMFAR)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "probe_id": {
+            "type": "string",
+            "description": "调试器探针 Unique ID (可选)"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号 (如 stm32f407vg)"
+          }
+        }
+      }
+    },
+    {
+      "name": "read_memory",
+      "description": "读取目标单片机内存地址空间数据 (返回 HEX Dump 与字节数据)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "integer",
+            "description": "起始内存地址，例如 0x20000000"
+          },
+          "count": {
+            "type": "integer",
+            "description": "读取字节数，最大 4096",
+            "default": 64
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          }
+        },
+        "required": [
+          "address"
+        ]
+      }
+    },
+    {
+      "name": "write_memory",
+      "description": "写入 32 位值到目标单片机指定内存地址",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "integer",
+            "description": "内存地址"
+          },
+          "value": {
+            "type": "integer",
+            "description": "32位无符号数值"
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          }
+        },
+        "required": [
+          "address",
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "flash_firmware",
+      "description": "通过 SWD 协议将本地固件文件 (.bin/.hex/.elf) 烧录至目标芯片 Flash (支持外部 CMSIS-Pack 下载算法)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "本地固件文件的绝对物理路径"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标单片机芯片型号 (如 gd32f403rc / stm32f103c8)"
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "pack_path": {
+            "type": "string",
+            "description": "CMSIS-Pack (.pack) 文件绝对物理路径 (用于加载芯片专有 Flash 下载算法)"
+          },
+          "frequency": {
+            "type": "integer",
+            "description": "SWD 烧录工作时钟频率 (Hz，如 10000000)"
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "reset_target",
+      "description": "通过 SWD 硬件/软件复位目标单片机",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "halt": {
+            "type": "boolean",
+            "description": "复位后是否保持挂起 (Halt)",
+            "default": false
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          }
+        }
+      }
+    },
+    {
+      "name": "diagnose_hardfault",
+      "description": "自动化全流程分析 Cortex-M 硬件硬故障 (HardFault)，提取崩溃现场、回溯双栈调用链、解析源文件行并输出 AI 诊断建议",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          },
+          "axf_path": {
+            "type": "string",
+            "description": "固件 ELF/AXF 文件绝对路径 (用于反汇编、解析调用栈符号与源码行)"
+          }
+        }
+      }
+    },
+    {
+      "name": "detect_rtos_kernel",
+      "description": "深度探测固件中的嵌入式操作系统 (FreeRTOS, RTX5, ThreadX, uCOS-II, uCOS-III, RT-Thread) 并分析内核控制块符号地址",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "elf_path": {
+            "type": "string",
+            "description": "固件 ELF/AXF/OUT 文件的绝对物理路径"
+          }
+        },
+        "required": [
+          "elf_path"
+        ]
+      }
+    },
+    {
+      "name": "start_rtt",
+      "description": "启动 SEGGER RTT 实时数据传输引擎 (支持 J-Link 及 DAPLink 探针)，建立本地高速双向流通信",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "probe_id": {
+            "type": "string",
+            "description": "探针 Unique ID (可选)"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号 (如 Cortex-M4)"
+          },
+          "probe_type": {
+            "type": "string",
+            "description": "探针驱动类型: 'jlink' 或 'daplink'"
+          },
+          "block_address": {
+            "type": "integer",
+            "description": "SEGGER RTT 控制块在 RAM 中的起始物理地址 (可选)"
+          },
+          "ram_start": {
+            "type": "integer",
+            "description": "目标芯片 RAM 内存扫描起始地址 (如 0x20000000，可选)"
+          },
+          "ram_size": {
+            "type": "integer",
+            "description": "目标芯片 RAM 内存扫描范围大小 (如 0x10000 表示 64KB，可选)"
+          }
+        }
+      }
+    },
+    {
+      "name": "stop_rtt",
+      "description": "停止 SEGGER RTT 传输并释放调试探针句柄与网络端口",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "parse_axf_symbols",
+      "description": "解析 Keil MDK .axf 或 GCC .elf 固件，提取 SRAM 全局变量符号 (名称/地址/大小/类型)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": ".axf 或 .elf 绝对物理路径"
+          },
+          "filter_keyword": {
+            "type": "string",
+            "description": "变量名过滤关键字 (可选)"
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "最大提取符号数",
+            "default": 200
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "start_jscope_sampling",
+      "description": "启动后台 SWD 高速无侵入周期变量采样 (类似 J-Scope)，支持微秒至毫秒级周期 (最高1MHz)，通过本地 TCP 桥接输出波形数据",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "variables": {
+            "type": "array",
+            "description": "待监视变量列表"
+          },
+          "interval_ms": {
+            "type": "integer",
+            "description": "采样周期毫秒 (如 20)",
+            "default": 20
+          },
+          "interval_us": {
+            "type": "integer",
+            "description": "微秒级采样周期 (1 至 1000000 µs，优先于 interval_ms)"
+          },
+          "swd_frequency_hz": {
+            "type": "integer",
+            "description": "SWD 接口时钟频率 (Hz，如 10000000 代表 10MHz)",
+            "default": 10000000
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          },
+          "probe_type": {
+            "type": "string",
+            "description": "探针类型: 'jlink' 或 'daplink'"
+          }
+        },
+        "required": [
+          "variables"
+        ]
+      }
+    },
+    {
+      "name": "stop_jscope_sampling",
+      "description": "停止 J-Scope 变量采样",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "write_memory_byte",
+      "description": "写入单个字节 (8位数值) 到目标单片机指定内存地址",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "integer",
+            "description": "内存物理地址"
+          },
+          "value": {
+            "type": "integer",
+            "description": "8位无符号数值 (0-255)"
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          }
+        },
+        "required": [
+          "address",
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "dump_memory_to_file",
+      "description": "将目标单片机指定内存地址范围 (Flash 或 RAM) 转储导出为本地 .bin 文件",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "integer",
+            "description": "起始内存地址，例如 0x08000000 或 0x20000000"
+          },
+          "count": {
+            "type": "integer",
+            "description": "导出的总字节数"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "输出 .bin 文件的绝对物理路径"
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          }
+        },
+        "required": [
+          "address",
+          "count",
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "load_file_to_memory",
+      "description": "将本地二进制文件 (.bin) 加载写入至单片机指定 RAM 地址",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "integer",
+            "description": "目标 RAM 起始物理地址"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "本地 .bin 文件物理路径"
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          }
+        },
+        "required": [
+          "address",
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "analyze_firmware_resources",
+      "description": "深度分析嵌入式固件 (.axf/.elf) 的 Flash/ROM 与 SRAM 资源占用情况。根据 GCC、ARMCC、ARMClang 等不同编译器输出规则，提取总 Code/RO/RW/ZI 内存、各模块源文件及函数的资源占用与占比，并支持目标芯片容量评估与优化诊断",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "本地 .axf 或 .elf 固件文件的绝对物理路径"
+          },
+          "chip_flash_size": {
+            "type": "integer",
+            "description": "目标芯片 Flash 容量 (可选，字节数，如 524288 表示 512KB)"
+          },
+          "chip_ram_size": {
+            "type": "integer",
+            "description": "目标芯片 SRAM 容量 (可选，字节数，如 65536 表示 64KB)"
+          },
+          "max_symbols_per_module": {
+            "type": "integer",
+            "description": "每个模块返回的最大符号数 (默认 25)",
+            "default": 25
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "svd_get_devices",
+      "description": "获取已加载 CMSIS-Pack 中定义的所有芯片型号 (ING91800, ING91600, ING2000 等) 及其内存基地址与容量",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "svd_get_peripherals",
+      "description": "解析并返回指定芯片的 SVD 外设列表 (外设名称、基地址、描述、组名)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "device_name": {
+            "type": "string",
+            "description": "芯片型号，如 ING91800"
+          },
+          "custom_svd_path": {
+            "type": "string",
+            "description": "自定义外部 .svd 物理路径 (可选)"
+          }
+        },
+        "required": [
+          "device_name"
+        ]
+      }
+    },
+    {
+      "name": "svd_get_registers",
+      "description": "获取指定外设的全部寄存器定义，包含偏移、绝对地址、访问权限 (RO/RW/WO)、复位值及 32 位位域 (Fields)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "device_name": {
+            "type": "string",
+            "description": "芯片型号"
+          },
+          "peripheral_name": {
+            "type": "string",
+            "description": "外设名称，如 UART0"
+          },
+          "custom_svd_path": {
+            "type": "string",
+            "description": "自定义外部 .svd 物理路径 (可选)"
+          }
+        },
+        "required": [
+          "device_name",
+          "peripheral_name"
+        ]
+      }
+    },
+    {
+      "name": "svd_read_register",
+      "description": "通过 SWD 硬件读取目标单片机指定 SVD 寄存器 32 位值",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "integer",
+            "description": "寄存器物理绝对地址"
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          }
+        },
+        "required": [
+          "address"
+        ]
+      }
+    },
+    {
+      "name": "svd_read_all_registers",
+      "description": "批量读取外设的一组寄存器 32 位值",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "description": "寄存器绝对地址列表"
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          }
+        },
+        "required": [
+          "addresses"
+        ]
+      }
+    },
+    {
+      "name": "svd_write_register",
+      "description": "通过 SWD 硬件向目标单片机指定 SVD 寄存器写入 32 位值",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "integer",
+            "description": "寄存器物理绝对地址"
+          },
+          "value": {
+            "type": "integer",
+            "description": "32位无符号数值"
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          }
+        },
+        "required": [
+          "address",
+          "value"
+        ]
+      }
+    },
+    {
+      "name": "svd_write_field",
+      "description": "按位域 (Bitfield) 安全修改硬件寄存器并回写 (Read-Modify-Write)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "integer",
+            "description": "寄存器物理绝对地址"
+          },
+          "bit_offset": {
+            "type": "integer",
+            "description": "位域起始偏移 (0-31)"
+          },
+          "bit_width": {
+            "type": "integer",
+            "description": "位域宽度 (1-32)"
+          },
+          "field_value": {
+            "type": "integer",
+            "description": "欲写入的位域数值"
+          },
+          "probe_id": {
+            "type": "string",
+            "description": "探针 ID"
+          },
+          "target_override": {
+            "type": "string",
+            "description": "目标芯片型号"
+          }
+        },
+        "required": [
+          "address",
+          "bit_offset",
+          "bit_width",
+          "field_value"
+        ]
+      }
+    },
+    {
+      "name": "svd_import_pack",
+      "description": "动态导入 CMSIS-Pack (.pack) 文件并解析其内置的芯片、Flash 算法与 SVD 外设定义",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pack_path": {
+            "type": "string",
+            "description": "CMSIS-Pack 文件完整物理路径 (.pack)"
+          }
+        },
+        "required": [
+          "pack_path"
+        ]
+      }
+    },
+    {
+      "name": "list_serial_ports",
+      "description": "列出系统当前所有可用的物理与虚拟串口设备及其打开状态和默认/活跃标识",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "open_serial_port",
+      "description": "打开指定的串口进行通信（支持波特率、数据位、停止位、校验位配置，支持多串口并行会话）",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "port_name": {
+            "type": "string",
+            "description": "串口端口号（如 COM3 或 /dev/ttyUSB0）"
+          },
+          "baudrate": {
+            "type": "integer",
+            "description": "波特率 (默认 115200)",
+            "default": 115200
+          },
+          "data_bits": {
+            "type": "integer",
+            "description": "数据位 (5, 6, 7, 8，默认 8)",
+            "default": 8
+          },
+          "stop_bits": {
+            "type": "number",
+            "description": "停止位 (1, 1.5, 2，默认 1)",
+            "default": 1
+          },
+          "parity": {
+            "type": "string",
+            "description": "校验位 ('N'=None, 'E'=Even, 'O'=Odd, 'M'=Mark, 'S'=Space，默认 'N')",
+            "default": "N"
+          },
+          "timeout": {
+            "type": "number",
+            "description": "读取超时秒数 (默认 0.5)",
+            "default": 0.5
+          }
+        },
+        "required": [
+          "port_name"
+        ]
+      }
+    },
+    {
+      "name": "close_serial_port",
+      "description": "关闭指定串口释放系统句柄。若系统当前仅打开了一个串口，可不传 port_name 自动关闭该串口",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "port_name": {
+            "type": "string",
+            "description": "要关闭的串口端口号（如 COM3，单串口时可选）"
+          }
+        }
+      }
+    },
+    {
+      "name": "send_serial_data",
+      "description": "向串口发送数据（支持文本字符串与 HEX 十六进制字节串）。若系统仅打开一个串口，无需指定 port_name 自动智能发送；若打开多个串口支持指定 port_name 或默认使用最近活跃串口",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "string",
+            "description": "要发送的文本内容或 HEX 字符串 (如 'AT\\r\\n' 或 'AA BB 01 02')"
+          },
+          "port_name": {
+            "type": "string",
+            "description": "目标串口端口号（如 COM3，单串口时可选）"
+          },
+          "is_hex": {
+            "type": "boolean",
+            "description": "是否为十六进制 HEX 字节串模式 (默认 false)",
+            "default": false
+          },
+          "append_crlf": {
+            "type": "boolean",
+            "description": "是否自动在末尾追加 \\r\\n 换行符 (仅文本模式有效，默认 false)",
+            "default": false
+          }
+        },
+        "required": [
+          "data"
+        ]
+      }
+    },
+    {
+      "name": "read_serial_data",
+      "description": "从串口接收缓存区读取最新数据。若系统仅打开一个串口，无需指定 port_name 自动智能读取；若打开多个串口支持指定 port_name",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "port_name": {
+            "type": "string",
+            "description": "目标串口端口号（如 COM3，单串口时可选）"
+          },
+          "max_bytes": {
+            "type": "integer",
+            "description": "最大读取字节数 (默认 4096)",
+            "default": 4096
+          },
+          "timeout": {
+            "type": "number",
+            "description": "等待数据到达超时秒数 (默认 0.5)",
+            "default": 0.5
+          },
+          "format": {
+            "type": "string",
+            "description": "数据返回格式: 'text' (UTF-8字符串) 或 'hex' (大写HEX串，默认 'text')",
+            "default": "text"
+          },
+          "clear_buffer": {
+            "type": "boolean",
+            "description": "读取后是否清空已读数据 (默认 true)",
+            "default": true
+          }
+        }
+      }
+    },
+    {
+      "name": "inspect_firmware_file",
+      "description": "检测并解析固件文件 (.hex 或 .bin)，返回其地址段范围、分段 (Segments)、有效数据大小等信息",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "固件文件绝对路径 (.hex 或 .bin)"
+          },
+          "file_type": {
+            "type": "string",
+            "description": "可选类型 ('hex' 或 'bin'，默认自动根据扩展名识别)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "若是 bin 文件的装载基地址 (默认 0)"
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    },
+    {
+      "name": "merge_hex_files",
+      "description": "将多个 Intel HEX 文件合并为一个统一的目标固件文件（支持输出为 .hex 或 .bin），具备重叠冲突检测",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "description": "要合并的 HEX 文件列表，每项含 file_path 及可选的重定位 offset",
+            "items": {
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "type": "string"
+                },
+                "offset": {
+                  "type": "string",
+                  "description": "地址重定位偏移 (可选，如 '0x00000000')"
+                }
+              },
+              "required": [
+                "file_path"
+              ]
+            }
+          },
+          "output_path": {
+            "type": "string",
+            "description": "合并后保存的目标文件绝对路径"
+          },
+          "output_format": {
+            "type": "string",
+            "description": "输出格式: 'hex' 或 'bin' (默认 'hex')",
+            "default": "hex"
+          },
+          "overlap_strategy": {
+            "type": "string",
+            "description": "地址冲突处理策略: 'error'(报错中断), 'ignore'(保留先入), 'replace'(覆盖更新)",
+            "default": "error"
+          },
+          "pad_byte": {
+            "type": "integer",
+            "description": "输出为 BIN 时空白区域的填充字节 (默认 0xFF)",
+            "default": 255
+          }
+        },
+        "required": [
+          "files",
+          "output_path"
+        ]
+      }
+    },
+    {
+      "name": "merge_bin_files",
+      "description": "将多个原始 BIN 二进制文件按指定起始偏移地址合并为一个统一的目标固件（支持输出为 .bin 或 .hex）",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "description": "要合并的 BIN 文件列表，每项必须指定起始装载地址 offset 与 file_path",
+            "items": {
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "type": "string"
+                },
+                "offset": {
+                  "type": "string",
+                  "description": "装载物理基地址 (如 '0x02000000')"
+                }
+              },
+              "required": [
+                "file_path",
+                "offset"
+              ]
+            }
+          },
+          "output_path": {
+            "type": "string",
+            "description": "合并后保存的目标文件绝对路径"
+          },
+          "output_format": {
+            "type": "string",
+            "description": "输出格式: 'bin' 或 'hex' (默认 'bin')",
+            "default": "bin"
+          },
+          "pad_byte": {
+            "type": "integer",
+            "description": "段间空白填充字节 (默认 0xFF)",
+            "default": 255
+          },
+          "overlap_strategy": {
+            "type": "string",
+            "description": "地址重叠策略: 'error', 'ignore', 'replace'",
+            "default": "error"
+          }
+        },
+        "required": [
+          "files",
+          "output_path"
+        ]
+      }
+    }
+  ]
+}

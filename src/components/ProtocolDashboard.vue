@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import ProtocolWorkbench from './ProtocolWorkbench.vue';
+import { serialIdentity, guardedSend } from '../utils/serialSession';
 import { ref, watch } from 'vue';
 import {
   Sliders,
@@ -13,7 +15,6 @@ import {
   ArrowUp,
   ArrowDown
 } from '@lucide/vue';
-import { safeInvoke } from '../utils/ipc';
 import { appendChecksum, type ChecksumAlgorithm } from '../utils/crc';
 import { t } from '../utils/i18n';
 
@@ -31,6 +32,7 @@ export interface ProtocolField {
 
 const props = defineProps<{
   portName: string;
+  baudRate?: number;
   isConnected: boolean;
 }>();
 
@@ -41,13 +43,14 @@ const emit = defineEmits<{
 }>();
 
 const STORAGE_KEY = 'ai_hil_protocol_dashboard_v2';
+const workbench = ref(true);
 
 // 1. 协议流水线规约配置: 帧头、校验、帧尾
 const headerHex = ref<string>('AA 55');
 const tailOption = ref<string>('crlf'); // 'none' | 'crlf' | 'lf' | '55aa' | 'ffff' | 'custom'
 const customTailHex = ref<string>('0D 0A');
 const checksumType = ref<ChecksumAlgorithm>('modbus_crc16');
-const autoSendOnChange = ref<boolean>(true);
+const autoSendOnChange = ref<boolean>(false);
 
 // 2. 字段列表
 const fields = ref<ProtocolField[]>([
@@ -87,7 +90,8 @@ watch([fields, headerHex, tailOption, customTailHex, checksumType, autoSendOnCha
 
 // 解析帧头字节
 function parseHexBytes(hexStr: string): number[] {
-  const clean = hexStr.replace(/[^0-9a-fA-F]/g, '');
+  const clean = hexStr.replace(/\s/g, '');
+  if (clean.length % 2 || !/^[0-9a-fA-F]*$/.test(clean)) throw new Error('HEX 必须由完整字节组成');
   const res: number[] = [];
   for (let i = 0; i < clean.length; i += 2) {
     res.push(parseInt(clean.substring(i, i + 2), 16));
@@ -119,6 +123,8 @@ function getTailBytes(): number[] {
 function getFieldHexBytes(f: ProtocolField): number[] {
   const bytes: number[] = [];
   const v = Math.round(f.value);
+  const bounds: Record<string, [number,number]> = { uint8:[0,255],uint16:[0,65535],uint32:[0,4294967295],int16:[-32768,32767],bool:[0,1] };
+  if (!Number.isInteger(f.value) || !bounds[f.type] || v < bounds[f.type]![0] || v > bounds[f.type]![1]) throw new Error('字段超出类型范围: ' + f.name);
   if (f.type === 'uint8' || f.type === 'bool') {
     bytes.push(v & 0xFF);
   } else if (f.type === 'uint16' || f.type === 'int16') {
@@ -152,6 +158,7 @@ const framePreview = ref<FrameSegmentPreview>({
 });
 
 async function updateLivePreview() {
+  try {
   const headerBytes = parseHexBytes(headerHex.value);
   const tailBytes = getTailBytes();
 
@@ -183,6 +190,7 @@ async function updateLivePreview() {
     tail: tailBytes.map(x => x.toString(16).padStart(2, '0').toUpperCase()).join(' '),
     totalLength: total
   };
+  } catch (error) { emit('log', String(error), 'error'); }
 }
 
 watch([fields, headerHex, tailOption, customTailHex, checksumType], () => {
@@ -209,11 +217,10 @@ async function sendFrame() {
   }
 
   try {
+    const targetPort = props.portName;
+    const identity = await serialIdentity(targetPort);
     const finalBytes = await buildFullFrame();
-    const count: number = await safeInvoke('send_serial_data', {
-      data: finalBytes,
-      portName: props.portName
-    });
+    const count = await guardedSend(targetPort, identity, finalBytes);
     emit('bytes-sent', count);
 
     const hexStr = finalBytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
@@ -368,6 +375,9 @@ function moveFieldDown(idx: number) {
 
 <template>
   <div class="w-full h-full bg-zinc-900 border-l border-zinc-800 flex flex-col font-mono text-xs select-none">
+    <div class="flex gap-2 px-3 py-2 border-b border-zinc-800"><button @click="workbench = true" :class="workbench ? 'text-emerald-300' : ''">协议工作台</button><button @click="workbench = false" :class="!workbench ? 'text-emerald-300' : ''">原有控件调试</button><button class="ml-auto" @click="emit('close')">关闭</button></div>
+    <ProtocolWorkbench v-if="workbench" :port-name="portName" :baud-rate="baudRate" :is-connected="isConnected" />
+    <template v-else>
     <!-- Header -->
     <div class="px-3 py-2 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/90 shrink-0">
       <div class="flex items-center gap-1.5 font-semibold text-emerald-400">
@@ -704,5 +714,6 @@ function moveFieldDown(idx: number) {
         </div>
       </div>
     </div>
+    </template>
   </div>
 </template>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { buildDtmCommand, DTM_TEST_END, H4Decoder } from '../utils/bleProtocol';
 import { safeInvoke, isTauri } from '../utils/ipc';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SerialRxPayload, PortInfo } from '../types';
@@ -45,13 +46,51 @@ const dtmPhy = ref<'1M' | '2M' | 'coded_s8' | 'coded_s2'>('1M');
 const dtmPayloadType = ref<'prbs9' | '1010' | '1111' | 'single_carrier'>('prbs9');
 const dtmPacketLength = ref<number>(37); // 0 ~ 255
 const isDtmRunning = ref<boolean>(false);
+const dtmBusy = ref(false);
+const dtmResultValid = ref(false);
+const h4 = new H4Decoder();
+let dtmBuffer: number[] = [];
+let pendingDtm: { resolve: (word: number) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+let dtmPort = '';
+let unlistenDisconnect: UnlistenFn | null = null;
+
+function receiveDtm(data: number[]) {
+  dtmBuffer.push(...data);
+  while (dtmBuffer.length >= 2) {
+    const word = (dtmBuffer.shift()! << 8) | dtmBuffer.shift()!;
+    if (pendingDtm) {
+      clearTimeout(pendingDtm.timer);
+      pendingDtm.resolve(word);
+      pendingDtm = null;
+    }
+  }
+}
+
+function sendDtm(data: number[]): Promise<number> {
+  if (pendingDtm) return Promise.reject(new Error('上一条 DTM 命令尚未完成'));
+  dtmBuffer = [];
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingDtm = null;
+      reject(new Error('DTM 应答超时，设备状态未知，请执行停止或检查设备'));
+    }, 3000);
+    pendingDtm = { resolve, reject, timer };
+    safeInvoke('send_serial_data', { data, portName: dtmPort }).catch(err => {
+      if (pendingDtm?.timer === timer) {
+        clearTimeout(timer);
+        pendingDtm = null;
+        reject(new Error(String(err)));
+      }
+    });
+  });
+}
 const dtmLogs = ref<Array<{ time: string; text: string; status: 'info' | 'success' | 'error' }>>([]);
 
 // Rx Statistics
 const rxPacketsCount = ref<number>(0);
 const rxExpectedPackets = ref<number>(100);
 const rxPerRate = computed(() => {
-  if (rxExpectedPackets.value <= 0) return 0;
+  if (!dtmResultValid.value || rxExpectedPackets.value <= 0) return '--';
   const lost = Math.max(0, rxExpectedPackets.value - rxPacketsCount.value);
   return Number(((lost / rxExpectedPackets.value) * 100).toFixed(1));
 });
@@ -68,7 +107,7 @@ let unlistenRx: UnlistenFn | null = null;
 const channelsList = Array.from({ length: 40 }, (_, i) => ({
   ch: i,
   freq: 2402 + i * 2,
-  isAdv: i === 37 || i === 38 || i === 39
+  isAdv: i === 0 || i === 12 || i === 39
 }));
 
 // Filtered HCI Packets
@@ -106,20 +145,16 @@ async function loadPorts() {
 }
 
 async function ensurePortOpen() {
-  if (!selectedPort.value) return;
-  try {
-    await safeInvoke('open_serial_port', {
-      portName: selectedPort.value,
-      baudRate: Number(selectedBaud.value) || 115200
-    });
-    isPortOpen.value = true;
-  } catch (err: any) {
-    // If port is already open by app, treat as open
-    isPortOpen.value = true;
-  }
+  if (!selectedPort.value) throw new Error('请先选择串口');
+  await safeInvoke('open_serial_port', { portName: selectedPort.value, baudRate: Number(selectedBaud.value) });
+  isPortOpen.value = true;
 }
 
 async function togglePortConnection() {
+  if (dtmBusy.value || isDtmRunning.value) {
+    addDtmLog('请先停止 DTM 测试，再关闭或更换串口', 'error');
+    return;
+  }
   if (!selectedPort.value) return;
   if (isPortOpen.value) {
     try {
@@ -143,63 +178,45 @@ async function togglePortConnection() {
   }
 }
 
-// Start / Stop DTM Test
+// Legacy two-wire DTM (1M, 0~63 bytes), command completion is acknowledged by the target.
 async function startDtmTest() {
-  if (!selectedPort.value) {
-    alert('请先选择目标芯片串口端口');
-    return;
-  }
-
-  await ensurePortOpen();
-
-  isDtmRunning.value = true;
-  rxPacketsCount.value = 0;
-  const freqMhz = 2402 + dtmChannel.value * 2;
-
-  if (dtmMode.value === 'tx') {
-    addDtmLog(`启动 TX 射频发射测试: 频点 CH${dtmChannel.value} (${freqMhz}MHz), PHY: ${dtmPhy.value}, 载荷: ${dtmPayloadType.value}, 长度: ${dtmPacketLength.value}B`, 'info');
-    // Standard Bluetooth DTM 2-byte command: 0x02 (Transmitter Test) | (Frequency << 2) ...
-    // Send over selected serial port
-    try {
-      const cmdByte1 = 0x80 | (dtmChannel.value & 0x3F);
-      const cmdByte2 = (dtmPacketLength.value & 0x3F);
-      await safeInvoke('send_serial_data', {
-        data: [cmdByte1, cmdByte2],
-        portName: selectedPort.value
-      });
-      addDtmLog('DTM TX 指令已下发到芯片控制器', 'success');
-    } catch (err: any) {
-      addDtmLog(`DTM 指令发送失败: ${err}`, 'error');
+  if (dtmBusy.value || isDtmRunning.value) return;
+  dtmBusy.value = true;
+  dtmResultValid.value = false;
+  try {
+    const data = buildDtmCommand(dtmMode.value, Number(dtmChannel.value), Number(dtmPacketLength.value), dtmPayloadType.value, dtmPhy.value);
+    await ensurePortOpen();
+    dtmPort = selectedPort.value;
+    rxPacketsCount.value = 0;
+    isDtmRunning.value = true; // Until acknowledged otherwise, treat the target as potentially active.
+    const response = await sendDtm(data);
+    if (response !== 0) {
+      isDtmRunning.value = false;
+      throw new Error('设备拒绝 DTM 测试命令');
     }
-  } else {
-    addDtmLog(`启动 RX 接收灵敏度测试: 频点 CH${dtmChannel.value} (${freqMhz}MHz), PHY: ${dtmPhy.value}`, 'info');
-    try {
-      const cmdByte1 = 0x40 | (dtmChannel.value & 0x3F);
-      await safeInvoke('send_serial_data', {
-        data: [cmdByte1, 0x00],
-        portName: selectedPort.value
-      });
-      addDtmLog('DTM RX 监听已启动', 'success');
-    } catch (err: any) {
-      addDtmLog(`DTM RX 启动失败: ${err}`, 'error');
-    }
+    addDtmLog('设备已确认启动 DTM 测试', 'success');
+  } catch (err) {
+    addDtmLog(String(err), 'error');
+  } finally {
+    dtmBusy.value = false;
   }
 }
 
 async function stopDtmTest() {
-  if (!selectedPort.value) return;
-  addDtmLog('正在结束 DTM 射频测试并读取返回统计...', 'info');
+  if (dtmBusy.value) return;
+  dtmBusy.value = true;
   try {
-    // 0x00 0x00: Test End command
-    await safeInvoke('send_serial_data', {
-      data: [0x00, 0x00],
-      portName: selectedPort.value
-    });
+    dtmPort = dtmPort || selectedPort.value;
+    const response = await sendDtm(DTM_TEST_END);
+    if (!(response & 0x8000)) throw new Error('未收到有效的 DTM Test End 包计数应答');
+    rxPacketsCount.value = response & 0x7fff;
+    dtmResultValid.value = true;
     isDtmRunning.value = false;
-    addDtmLog('DTM 射频测试已停止', 'success');
-  } catch (err: any) {
-    addDtmLog(`停止测试失败: ${err}`, 'error');
-    isDtmRunning.value = false;
+    addDtmLog('设备已确认停止，返回包数: ' + rxPacketsCount.value, 'success');
+  } catch (err) {
+    addDtmLog(String(err), 'error');
+  } finally {
+    dtmBusy.value = false;
   }
 }
 
@@ -217,7 +234,7 @@ function parseHciChunk(bytes: Uint8Array) {
 
   if (typeByte === 0x01 && bytes.length >= 4) {
     type = 'CMD';
-    const ocf = bytes[1];
+    const ocf = bytes[1] | ((bytes[2] & 3) << 8);
     const ogf = bytes[2] >> 2;
     opcodeOrEvent = `HCI_CMD (OGF:0x${ogf.toString(16)}, OCF:0x${ocf.toString(16)})`;
     summary = `命令参数长: ${bytes[3]} 字节`;
@@ -228,7 +245,7 @@ function parseHciChunk(bytes: Uint8Array) {
     type = 'EVT';
     const evtCode = bytes[1];
     const paramLen = bytes[2];
-    if (evtCode === 0x3E) {
+    if (evtCode === 0x3E && bytes.length >= 4) {
       const subEvent = bytes[3];
       opcodeOrEvent = `LE_META (Sub:0x${subEvent ? subEvent.toString(16).padStart(2, '0') : '00'})`;
       if (subEvent === 0x02) {
@@ -272,9 +289,7 @@ function parseHciChunk(bytes: Uint8Array) {
   hciPackets.value.unshift(packet);
   if (hciPackets.value.length > 500) hciPackets.value.pop();
 
-  if (type === 'EVT' && isDtmRunning.value && dtmMode.value === 'rx') {
-    rxPacketsCount.value++;
-  }
+
 }
 
 function clearPackets() {
@@ -303,9 +318,22 @@ onMounted(async () => {
 
   if (isTauri()) {
     try {
+      unlistenDisconnect = await listen<{ port: string }>('serial-disconnected', event => {
+        if (event.payload.port !== selectedPort.value) return;
+        isPortOpen.value = false;
+        if (pendingDtm) {
+          clearTimeout(pendingDtm.timer);
+          pendingDtm.reject(new Error('串口断开，测试状态未知'));
+          pendingDtm = null;
+        }
+        h4.reset();
+        dtmBuffer = [];
+        dtmResultValid.value = false;
+      });
       unlistenRx = await listen<SerialRxPayload>('serial-rx', (event) => {
         if (selectedPort.value && event.payload.port === selectedPort.value) {
-          parseHciChunk(new Uint8Array(event.payload.data));
+          if (isDtmRunning.value || pendingDtm || activeSubTab.value === 'dtm') receiveDtm(event.payload.data);
+          else for (const frame of h4.push(new Uint8Array(event.payload.data))) parseHciChunk(frame);
         }
       });
     } catch (e) {
@@ -316,6 +344,12 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (unlistenRx) unlistenRx();
+  if (unlistenDisconnect) unlistenDisconnect();
+  if (pendingDtm) {
+    clearTimeout(pendingDtm.timer);
+    pendingDtm.reject(new Error('页面关闭'));
+    pendingDtm = null;
+  }
 });
 </script>
 
@@ -341,6 +375,7 @@ onUnmounted(() => {
           <span class="text-zinc-500 font-mono">串口:</span>
           <select
             v-model="selectedPort"
+          :disabled="isPortOpen || isDtmRunning || dtmBusy"
             class="bg-transparent text-emerald-400 font-mono outline-none cursor-pointer"
           >
             <option v-for="p in availablePorts" :key="p.port_name" :value="p.port_name">
@@ -410,6 +445,7 @@ onUnmounted(() => {
           </div>
           <select
             v-model.number="dtmChannel"
+            :disabled="isDtmRunning || dtmBusy"
             class="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-zinc-200 outline-none font-mono"
           >
             <option v-for="ch in channelsList" :key="ch.ch" :value="ch.ch">
@@ -422,12 +458,13 @@ onUnmounted(() => {
           <label class="block text-zinc-400 text-[11px] mb-1 font-medium">物理层 PHY</label>
           <select
             v-model="dtmPhy"
+                :disabled="isDtmRunning || dtmBusy"
             class="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-zinc-200 outline-none"
           >
             <option value="1M">LE 1M PHY (标准)</option>
-            <option value="2M">LE 2M PHY (高速)</option>
-            <option value="coded_s8">LE Coded (S=8, 125kbps 远距离)</option>
-            <option value="coded_s2">LE Coded (S=2, 500kbps)</option>
+            <option disabled value="2M">LE 2M PHY (高速)</option>
+            <option disabled value="coded_s8">LE Coded (S=8, 125kbps 远距离)</option>
+            <option disabled value="coded_s2">LE Coded (S=2, 500kbps)</option>
           </select>
         </div>
 
@@ -436,12 +473,13 @@ onUnmounted(() => {
             <label class="block text-zinc-400 text-[11px] mb-1 font-medium">载荷序列类型 (Payload)</label>
             <select
               v-model="dtmPayloadType"
+              :disabled="isDtmRunning || dtmBusy"
               class="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-zinc-200 outline-none"
             >
               <option value="prbs9">PRBS9 (伪随机二进制序列 9)</option>
               <option value="1010">10101010 序列</option>
               <option value="1111">11110000 序列</option>
-              <option value="single_carrier">单载波持续发射 (CW Unmodulated)</option>
+              <option disabled value="single_carrier">单载波持续发射 (CW Unmodulated)</option>
             </select>
           </div>
 
@@ -453,8 +491,9 @@ onUnmounted(() => {
             <input
               type="number"
               v-model.number="dtmPacketLength"
+              :disabled="isDtmRunning || dtmBusy"
               min="0"
-              max="255"
+              max="63"
               class="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-zinc-200 outline-none font-mono"
             />
           </div>
@@ -464,6 +503,7 @@ onUnmounted(() => {
           <button
             v-if="!isDtmRunning"
             @click="startDtmTest"
+            :disabled="dtmBusy || isDtmRunning"
             class="w-full py-2 bg-blue-600 hover:bg-blue-500 text-zinc-950 font-bold rounded shadow-sm transition-all flex items-center justify-center gap-1.5"
           >
             <Play class="w-4 h-4 fill-current" />
@@ -472,6 +512,7 @@ onUnmounted(() => {
           <button
             v-else
             @click="stopDtmTest"
+            :disabled="dtmBusy"
             class="w-full py-2 bg-rose-600 hover:bg-rose-500 text-zinc-100 font-bold rounded shadow-sm transition-all flex items-center justify-center gap-1.5 animate-pulse"
           >
             <Square class="w-4 h-4 fill-current" />

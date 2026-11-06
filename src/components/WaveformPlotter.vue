@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated, nextTick } from 'vue';
+import CaptureAnalysis from './CaptureAnalysis.vue';
+import { samplesCsv, statistics, type Sample } from '../utils/captureAnalysis';
+import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated, nextTick, markRaw } from 'vue';
 import { isTauri, safeInvoke } from '../utils/ipc';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SerialRxPayload, PlotterChannel, JScopeSymbol, WaveformPointsPayload } from '../types';
@@ -35,6 +37,10 @@ defineProps<{
 
 // --- Rust Protocol Engine State ---
 const isProtocolModalOpen = ref<boolean>(false);
+const analysisOpen = ref(false);
+const statsFrom = ref(0);
+const statsTo = ref(Number.MAX_SAFE_INTEGER);
+const regionStats = computed(() => { try { return statistics(channels.value.flatMap(c => c.points.map(p => ({ t: p.t, channel: c.name, value: p.v }))), statsFrom.value, statsTo.value); } catch { return []; } });
 const activeProtocolTab = ref<'firewater' | 'justfloat' | 'custom_json' | 'rawdata'>('custom_json');
 const isCopied = ref<boolean>(false);
 const isRustEngineActive = ref<boolean>(false);
@@ -337,7 +343,7 @@ const fixedMinY = ref<number>(-50);
 const fixedMaxY = ref<number>(50);
 
 // Zoom & Pan state
-const MAX_BUFFER_POINTS = 50000;
+const MAX_BUFFER_POINTS = 20000;
 const viewportSpan = ref<number>(500);
 const viewportOffset = ref<number>(0);
 const autoFollow = ref<boolean>(true);
@@ -423,6 +429,7 @@ const fpsTarget = ref<'vsync' | '120hz' | '60hz' | '30hz'>('vsync');
 const downsampleMode = ref<'none' | 'smart_minmax' | '2x' | '5x' | '10x'>('smart_minmax');
 
 let unlistenRx: UnlistenFn | null = null;
+let unlistenDisconnect: UnlistenFn | null = null;
 let unlistenPoints: UnlistenFn | null = null;
 let simTimer: any = null;
 let animFrameId: number | null = null;
@@ -449,7 +456,7 @@ function ingestDataPoint(record: Record<string, number>, timestamp: number) {
         name: key,
         color: getChannelColor(channels.value.length),
         visible: true,
-        points: [],
+        points: markRaw([]),
         lastValue: val,
         minValue: val,
         maxValue: val,
@@ -462,11 +469,11 @@ function ingestDataPoint(record: Record<string, number>, timestamp: number) {
     ch.minValue = Math.min(ch.minValue, val);
     ch.maxValue = Math.max(ch.maxValue, val);
 
-    if (!isPaused.value) {
+    {
       ch.points.push({ t: timestamp, v: val });
       // Batch slice rather than calling shift() on each incoming point (O(1) amortized vs O(N) memory copy)
       if (ch.points.length > MAX_BUFFER_POINTS + 1000) {
-        ch.points = ch.points.slice(ch.points.length - MAX_BUFFER_POINTS);
+        ch.points = markRaw(ch.points.slice(ch.points.length - MAX_BUFFER_POINTS));
       }
     }
   }
@@ -538,8 +545,8 @@ const cDemoRawData = `// RawData 纯字节流透传模式:
 `;
 
 // Handle raw bytes coming from Serial (Supports ASCII FireWater & Binary JustFloat)
-function processIncomingBytes(raw: Uint8Array) {
-  const now = performance.now();
+function processIncomingBytes(raw: Uint8Array, timestamp?: number) {
+  const now = timestamp ?? Date.now();
 
   // 1. Check for JustFloat binary frame tail: 0x00 0x00 0x80 0x7F
   let combined: Uint8Array;
@@ -605,6 +612,7 @@ function processIncomingBytes(raw: Uint8Array) {
 // --- Simulation Mode for Regression Verification ---
 let simStep = 0;
 function toggleSimulation() {
+  clearPlot();
   if (isSimulating.value) {
     if (simTimer) clearInterval(simTimer);
     simTimer = null;
@@ -630,13 +638,11 @@ function toggleSimulation() {
 
 // --- Clear & Export ---
 function clearPlot() {
-  for (const ch of channels.value) {
-    ch.points = [];
-    ch.minValue = 0;
-    ch.maxValue = 0;
-  }
+  channels.value = [];
+  partialLineBuffer = ''; rawByteAccumulator = new Uint8Array(0);
   receivedSamplesCount.value = 0;
   liveFftResult.value = null;
+  safeInvoke('trim_system_memory').catch(() => {});
 }
 
 /**
@@ -694,37 +700,12 @@ async function triggerDspCalculations() {
 }
 
 function exportCsv() {
-  if (channels.value.length === 0) {
-    alert(t('plot_alert_no_channel_data'));
-    return;
-  }
-
-  // Find max points
-  const maxLen = Math.max(...channels.value.map(c => c.points.length));
-  if (maxLen === 0) {
-    alert(t('plot_alert_no_sample_points'));
-    return;
-  }
-
-  const header = ['SampleIndex', ...channels.value.map(c => c.name)].join(',');
-  const rows: string[] = [header];
-
-  for (let i = 0; i < maxLen; i++) {
-    const row = [i.toString()];
-    for (const ch of channels.value) {
-      const pt = ch.points[i];
-      row.push(pt !== undefined ? pt.v.toString() : '');
-    }
-    rows.push(row.join(','));
-  }
-
-  const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `telemetry_data_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+  const samples: Sample[] = channels.value.flatMap(c => c.points.map(p => ({ t: p.t, channel: c.name, value: p.v })));
+  if (!samples.length) return;
+  const url = URL.createObjectURL(new Blob([samplesCsv(samples)], { type: 'text/csv;charset=utf-8;' }));
+  const link = document.createElement('a'); link.href = url;
+  link.download = isSimulating.value ? 'SIMULATED-waveform.csv' : 'waveform-host-timestamps.csv';
+  link.click(); URL.revokeObjectURL(url);
 }
 
 // Dirty check & rendering activity timestamp to save GPU and CPU resources
@@ -763,6 +744,7 @@ function scheduleNextRender() {
 }
 
 function renderCanvas() {
+  if (isPaused.value) { scheduleNextRender(); return; }
   framesRendered++;
   const now = performance.now();
   if (now - lastFpsTime >= 1000) {
@@ -1230,6 +1212,10 @@ onMounted(async () => {
 
   if (isTauri()) {
     try {
+      unlistenDisconnect = await listen<{port: string}>('serial-disconnected', event => {
+        if (event.payload.port === 'JScope 变量采样') isSampling.value = false;
+        refreshActivePortList();
+      });
       unlistenRx = await listen<SerialRxPayload>('serial-rx', (event) => {
         // Filter by bound waveform port if set
         if (boundWaveformSource.value && event.payload.port && event.payload.port !== boundWaveformSource.value) {
@@ -1238,7 +1224,7 @@ onMounted(async () => {
         // Only run frontend fallback parsing if Rust engine is not already doing it
         if (!isRustEngineActive.value) {
           const raw = new Uint8Array(event.payload.data);
-          processIncomingBytes(raw);
+          if (!isSimulating.value) processIncomingBytes(raw, event.payload.timestamp_ms);
         }
       });
 
@@ -1247,7 +1233,8 @@ onMounted(async () => {
         if (boundWaveformSource.value && event.payload.port && event.payload.port !== boundWaveformSource.value) {
           return;
         }
-        const now = performance.now();
+        if (isSimulating.value) return;
+        const now = event.payload.timestamp_ms;
         for (const pt of event.payload.points) {
           ingestDataPoint(pt, now);
         }
@@ -1276,6 +1263,8 @@ onDeactivated(() => {
   if (animFrameId) {
     cancelAnimationFrame(animFrameId);
     animFrameId = null;
+    partialLineBuffer = '';
+    rawByteAccumulator = new Uint8Array(0);
   }
 });
 
@@ -1294,6 +1283,7 @@ onActivated(() => {
 });
 
 onUnmounted(() => {
+  if (unlistenDisconnect) unlistenDisconnect();
   if (dspTimer) clearInterval(dspTimer);
   if (renderTimerId) clearTimeout(renderTimerId);
   if (unlistenRx) unlistenRx();
@@ -1306,6 +1296,12 @@ onUnmounted(() => {
 
 <template>
   <div class="h-full flex flex-col bg-zinc-950 text-zinc-100 font-mono text-xs overflow-hidden select-none">
+    <CaptureAnalysis v-if="analysisOpen" @close="analysisOpen = false" />
+    <div class="px-4 py-1.5 flex flex-wrap gap-3 items-center bg-zinc-900 border-b border-zinc-800">
+      <button @click="analysisOpen = true" class="px-2 py-1 bg-sky-900 rounded">记录回放与分析</button>
+      <span class="text-amber-300">暂停仅冻结显示，采集继续；时间为主机接收时间</span>
+      <details><summary>原始样本区间统计</summary><div class="flex gap-2"><label>开始 ms <input type="number" v-model.number="statsFrom" class="w-32 bg-zinc-950" /></label><label>结束 ms <input type="number" v-model.number="statsTo" class="w-32 bg-zinc-950" /></label></div><pre class="select-text max-h-32 overflow-auto">{{ regionStats }}</pre></details>
+    </div>
     <!-- Top Plotter Control Toolbar -->
     <div class="bg-zinc-900 border-b border-zinc-800 px-4 py-2 flex items-center justify-between gap-3 shrink-0">
       <!-- Left: Title & Simulation -->

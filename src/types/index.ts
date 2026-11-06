@@ -30,6 +30,7 @@ export interface ProbeInfo {
 }
 
 export interface SerialRxPayload {
+  session_id?: string | null;
   port: string;
   data: number[];
   timestamp_ms: number;
@@ -469,6 +470,8 @@ export interface SvdField {
 }
 
 export interface SvdRegister {
+  read_action?: string | null;
+  modified_write?: string | null;
   name: string;
   description: string;
   offset: string;
@@ -524,6 +527,10 @@ export interface ProtocolConfig {
 }
 
 export interface TerminalSessionTab {
+  alias?: string;
+  deviceKey?: string;
+  autoReconnect?: boolean;
+  isListening?: boolean;
   id: string;
   portName: string;
   baudRate: number;
@@ -573,6 +580,15 @@ export interface IngFlashProgressPayload {
 // --- HIL Automated Test Sequencer Types ---
 
 export type HilStepAction =
+  | 'firmware.flash' | 'target.reset' | 'serial.capture' | 'serial.send' | 'serial.expect' | 'test.observe' | 'memory.read' | 'repeat'
+  | 'instrumentation_start'
+  | 'instrumentation_stop'
+  | 'instrumentation_assert'
+  | 'protocol_request'
+  | 'serial_open'
+  | 'hil_observe'
+  | 'swd_read_block'
+  | 'loop_block'
   | 'flash_firmware'
   | 'reset_target'
   | 'serial_send'
@@ -582,6 +598,23 @@ export type HilStepAction =
   | 'delay';
 
 export interface HilStepParams {
+  device_id?: string;
+  mode?: 'binary' | 'text';
+  control?: 'passive';
+  budgets?: Record<string, { metric: 'elapsed'; threshold: number; unit: 'ns'|'us'|'ms'; min_samples: number }>;
+  protocol?: Record<string, unknown>;
+  values?: Record<string, unknown>;
+  expected?: Record<string, unknown>;
+  after_flash?: 'halt' | 'reset' | 'none';
+  frequency?: number;
+  pack_path?: string;
+  boot_timeout_ms?: number | string;
+  idle_timeout_ms?: number | string;
+  boot_count?: number;
+  continue_on_failure?: boolean;
+  count?: number;
+  symbol?: string;
+  axf_path?: string;
   // flash_firmware
   flash_type?: 'pyocd' | 'ing_ini' | 'ing_single';
   file_path?: string;
@@ -595,17 +628,19 @@ export interface HilStepParams {
   // reset_target
   reset_method?: 'swd_soft_reset' | 'pin_dtr_pulse' | 'bootloader_reset';
   pulse_ms?: number;
+  pin_reset?: { profile_id: string; wiring_verified: boolean; reset_asserted_dtr: boolean; boot_asserted_rts: boolean; settle_ms: number; pulse_ms: number; boot_hold_ms: number };
   port_name?: string;
 
   // serial_send
   send_data?: string;
+  character_delay_ms?: number;
   send_format?: 'string' | 'hex';
   send_ending?: 'crlf' | 'lf' | 'none';
 
   // serial_wait_match
   match_type?: 'contains' | 'regex';
   pattern?: string;
-  timeout_ms?: number;
+  timeout_ms?: number | string;
 
   // swd_read_assert
   memory_addr?: string;
@@ -624,26 +659,33 @@ export interface HilStepParams {
 }
 
 export interface HilTestStep {
+  steps?: HilTestStep[];
   id: string;
   name: string;
   action: HilStepAction;
   enabled: boolean;
   params: HilStepParams;
-  timeout_ms?: number;
+  timeout_ms?: number | string;
   on_failure?: 'abort' | 'continue' | 'retry';
   retry_count?: number;
 }
 
 export interface HilTestPipeline {
+  stop?: { port_name?: string; baud_rate?: number; send_data: string; send_format?: 'string'|'hex'; send_ending?: 'none'|'lf'|'crlf'; match_type?: 'contains'|'regex'; ack_pattern: string; timeout_ms?: number|string };
+  schema_version?: number;
+  bench?: { probe_id?: string; target_device?: string; port_name?: string; baud_rate?: number; frequency?: number; pack_path?: string;
+    devices?: Record<string, Record<string, unknown>>; bindings?: Record<string, string>; instrumentation?: {mode?: 'binary'|'text'; control?: 'passive'}; instruments?: Record<string,unknown>; exit_policy?: Record<string,unknown> };
+  evidence?: { enabled?: boolean; memory_addr?: string; count?: number; timeout_ms?: number };
   name: string;
   version: string;
   description?: string;
   loop_count: number;
   stop_on_error: boolean;
+  timeout_ms?: number | string;
   steps: HilTestStep[];
 }
 
-export type HilStepStatus = 'idle' | 'running' | 'pass' | 'fail' | 'skipped';
+export type HilStepStatus = 'idle' | 'running' | 'pass' | 'fail' | 'error' | 'cancelled' | 'skipped';
 
 export interface HilStepResult {
   step_id: string;
@@ -660,12 +702,21 @@ export interface HilExecutionReport {
   pipeline_name: string;
   start_time: string;
   end_time: string;
-  duration_ms: number;
-  total_loops: number;
-  total_steps: number;
-  pass_count: number;
-  fail_count: number;
-  success_rate: number;
+  duration_ms: number | null;
+  total_loops: number | null;
+  total_steps: number | null;
+  pass_count: number | null;
+  fail_count: number | null;
+  success_rate: number | null;
+  planned_steps: number | null;
+  executed_steps: number | null;
+  skipped_steps: number | null;
+  attempt_count: number | null;
+  passed_steps: number | null;
+  failed_steps: number | null;
+  cancelled_steps: number | null;
+  hardware_verified: boolean | null;
+  statistics_note: string;
   results: HilStepResult[];
 }
 

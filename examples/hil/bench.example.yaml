@@ -1,0 +1,6 @@
+# Copy to bench.local.yaml and fill in the exact IDs for this workstation.
+probe_id: REPLACE_WITH_FULL_PROBE_ID
+target_device: REPLACE_WITH_PACK_TARGET
+port_name: COM3
+baud_rate: 115200
+frequency: 1000000

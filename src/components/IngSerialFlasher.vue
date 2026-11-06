@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+let activeJobId = '';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { IngIniConfig, IngFlashProgressPayload } from '../types';
 import { t } from '../utils/i18n';
@@ -44,7 +45,10 @@ const BASE_KEY_SINGLE_ADDR = 'ing_flasher_last_single_address';
 const BASE_KEY_FAMILY = 'ing_flasher_last_family';
 const BASE_KEY_MODE = 'ing_flasher_last_mode';
 const BASE_KEY_BAUD = 'ing_flasher_last_baud';
-const BASE_KEY_MANUAL_BOOT = 'ing_flasher_last_manual_boot';
+// This dialog has no verified board-wiring profile editor. Never restore the
+// legacy automatic RTS/DTR setting; only manual ISP entry is supported here.
+const manualBoot = true;
+const bootPolicyNotice = '自动 RTS/DTR 复位不可用：尚未配置并验证板级接线。点击开始烧录后，请在等待握手期间按板卡说明手动进入 ISP。';
 
 // Helper to read setting scoped to tab/port, checking portName key as fallback before global default
 function readSetting(baseKey: string, defaultValue: string = ''): string {
@@ -82,9 +86,6 @@ const selectedFamily = ref<string>(
 const selectedBaud = ref<number>(
   Number(readSetting(BASE_KEY_BAUD, '115200')) || 115200
 );
-const manualBoot = ref<boolean>(
-  readSetting(BASE_KEY_MANUAL_BOOT, 'false') === 'true'
-);
 
 const baudRates = [9600, 115200, 230400, 460800, 921600, 1000000, 1152000, 1500000];
 const isCustomBaud = ref<boolean>(!baudRates.includes(selectedBaud.value));
@@ -114,7 +115,6 @@ watch([() => props.tabId, () => props.portName], ([newTab, newPort]) => {
   singleAddress.value = readSetting(BASE_KEY_SINGLE_ADDR, '0x02002000');
   selectedFamily.value = readSetting(BASE_KEY_FAMILY, 'auto');
   selectedBaud.value = Number(readSetting(BASE_KEY_BAUD, '115200')) || 115200;
-  manualBoot.value = readSetting(BASE_KEY_MANUAL_BOOT, 'false') === 'true';
 
   if (iniPath.value && mode.value === 'ini') {
     loadAndParseIni(iniPath.value);
@@ -159,12 +159,6 @@ watch(selectedBaud, (v) => {
   localStorage.setItem(getPortKey(BASE_KEY_BAUD), String(v));
   if (props.portName) {
     localStorage.setItem(`${BASE_KEY_BAUD}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, String(v));
-  }
-});
-watch(manualBoot, (v) => {
-  localStorage.setItem(getPortKey(BASE_KEY_MANUAL_BOOT), String(v));
-  if (props.portName) {
-    localStorage.setItem(`${BASE_KEY_MANUAL_BOOT}_${props.portName.replace(/[^a-zA-Z0-9_-]/g, '_')}`, String(v));
   }
 });
 
@@ -270,6 +264,7 @@ async function startFlash() {
   try {
     await safeInvoke('ing_start_flash', {
       request: {
+        job_id: (activeJobId = crypto.randomUUID()),
         port_name: props.portName,
         mode: mode.value,
         ini_path: mode.value === 'ini' ? iniPath.value : null,
@@ -277,8 +272,8 @@ async function startFlash() {
         single_address: mode.value === 'single' ? singleAddress.value : null,
         family: selectedFamily.value,
         target_baud: selectedBaud.value,
-        manual_boot: manualBoot.value,
-        timeout_sec: manualBoot.value ? 15 : 2
+        manual_boot: manualBoot,
+        timeout_sec: 15
       }
     });
   } catch (err: any) {
@@ -286,13 +281,15 @@ async function startFlash() {
     progressStage.value = 'error';
     progressMsg.value = t('ing_status_start_fail', { err });
     addLog(t('ing_log_start_err', { err }), 'error');
+  } finally {
+    isFlashing.value = false;
   }
 }
 
 async function cancelFlash() {
   if (!isFlashing.value) return;
   try {
-    await safeInvoke('ing_cancel_flash');
+    await safeInvoke('ing_cancel_flash', { jobId: activeJobId });
     addLog(t('ing_log_abort_sent'), 'warn');
   } catch (err: any) {
     addLog(t('ing_log_abort_fail', { err }), 'error');
@@ -304,6 +301,8 @@ onMounted(async () => {
   try {
     unlistenProgress = await listen<IngFlashProgressPayload>('ing-flash-progress', (event) => {
       const p = event.payload;
+      if ((p as any).job_id !== activeJobId) return;
+      if ((p as any).port_name !== props.portName) return;
       progressStage.value = p.stage;
       progressPct.value = Math.min(100, Math.max(0, p.percentage));
       progressSpeed.value = p.speed_kbps;
@@ -313,7 +312,6 @@ onMounted(async () => {
         isFlashing.value = false;
         addLog(`[${t('common_error')}] ${p.message}`, 'error');
       } else if (p.stage === 'success') {
-        isFlashing.value = false;
         progressPct.value = 100;
         addLog(`[${t('common_success')}] ${p.message}`, 'success');
       } else {
@@ -439,16 +437,19 @@ onUnmounted(() => {
             />
           </div>
 
-          <!-- Manual Boot Listening Mode Checkbox -->
-          <label class="flex items-center gap-1.5 text-xs cursor-pointer select-none ml-1 text-zinc-300 hover:text-zinc-100" :title="t('ing_manual_boot_tip')">
+          <!-- Automatic reset stays unavailable without verified board wiring. -->
+          <label class="flex items-center gap-1.5 text-xs select-none ml-1 text-zinc-300" :title="bootPolicyNotice">
             <input
               type="checkbox"
-              v-model="manualBoot"
-              class="rounded bg-zinc-950 border-zinc-700 text-indigo-500 focus:ring-0 cursor-pointer"
+              :checked="manualBoot"
+              disabled
+              aria-describedby="ing-boot-policy"
+              class="rounded bg-zinc-950 border-zinc-700 text-indigo-500 focus:ring-0 cursor-not-allowed"
             />
-            <span :class="manualBoot ? 'text-amber-300 font-semibold' : 'text-zinc-400'">{{ t('ing_manual_boot') }}</span>
+            <span class="text-amber-300 font-semibold">{{ t('ing_manual_boot') }}</span>
           </label>
         </div>
+        <p id="ing-boot-policy" class="mt-2 text-xs text-amber-300" role="note">{{ bootPolicyNotice }}</p>
       </div>
 
       <!-- Main Config Body (Scrollable) -->

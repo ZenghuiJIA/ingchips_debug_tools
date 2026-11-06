@@ -104,9 +104,21 @@ def build_executable():
         "--hidden-import", "map_analyzer",
         "--hidden-import", "svd_manager",
         "--hidden-import", "hardfault_analyzer",
+        "--hidden-import", "hil.worker",
+        "--hidden-import", "hil.replay",
+        "--hidden-import", "hil.codec",
+        "--hidden-import", "hil.plugins",
+        "--hidden-import", "debug_service",
+        "--hidden-import", "flash_control",
+        "--hidden-import", "instrumentation.analysis",
+        "--hidden-import", "hil.crash",
+        "--hidden-import", "instruments.power",
+        "--hidden-import", "instruments.contracts",
+        "--hidden-import", "yaml",
+        "--hidden-import", "psutil",
         "--distpath", str(dist_dir),
         "--workpath", str(work_dir),
-        "--name", "hil-daemon",
+        "--name", "hil-python-worker",
     ]
     for mod in exclude_modules:
         cmd.extend(["--exclude-module", mod])
@@ -116,7 +128,7 @@ def build_executable():
     subprocess.check_call(cmd)
     elapsed = time.time() - start_time
 
-    built_exe = dist_dir / "hil-daemon.exe"
+    built_exe = dist_dir / "hil-python-worker.exe"
     if not built_exe.exists():
         raise FileNotFoundError(f"PyInstaller build failed, expected output not found: {built_exe}")
 
@@ -125,108 +137,98 @@ def build_executable():
     return built_exe, dist_dir, work_dir
 
 def sync_binaries(built_exe: Path, dist_dir: Path, work_dir: Path):
-    """Copy the newly built binary to all deployment locations."""
-    print("\n[3/5] Synchronizing binaries across workspace...")
-    kill_locking_processes()
-
+    """Update workspace launch locations without terminating active debugging sessions."""
     for target in TARGET_PATHS:
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(built_exe, target)
-        print(f"  [COPIED] -> {target}")
+        staging = target.with_suffix(".exe.new")
+        try:
+            shutil.copy2(built_exe, staging)
+            os.replace(staging, target)
+            print(f"  [COPIED] {target}")
+        except PermissionError:
+            if staging.exists():
+                staging.unlink()
+            print(f"  [IN USE] {target}; new binary remains in {built_exe}")
+    # Historical releases are immutable. The new archive receives the verified binary.
 
-    # Synchronize to any active release directories
-    rel_dir = ROOT_DIR / "release"
-    if rel_dir.exists():
-        for sub in rel_dir.glob("AI-HIL-Debugger-*"):
-            if sub.is_dir() and (sub / "bin").exists():
-                shutil.copy2(built_exe, sub / "bin" / OUT_EXE_NAME)
-                print(f"  [COPIED] -> {sub / 'bin' / OUT_EXE_NAME}")
-
-    # Clean temporary directories
-    shutil.rmtree(dist_dir, ignore_errors=True)
-    shutil.rmtree(work_dir, ignore_errors=True)
-    spec_file = ROOT_DIR / "hil-daemon.spec"
-    if spec_file.exists():
-        spec_file.unlink()
-    print("  [CLEAN] Removed intermediate build artifacts.")
 
 def verify_mcp_protocol(exe_path: Path):
-    """Run automated JSON-RPC MCP handshake and tool call tests on the frozen binary."""
-    print("\n[4/5] Running automated MCP protocol validation on frozen binary...")
-    p = subprocess.Popen(
-        [str(exe_path), "--mode", "stdio-mcp"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8"
-    )
-
+    """Bounded, hardware-free tests on the frozen process."""
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "__invalid_test_tool__", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 5, "method": "shutdown"},
+    ]
+    process = subprocess.Popen([str(exe_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, encoding="utf-8")
     try:
-        # Test 1: initialize handshake
-        init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}})
-        p.stdin.write(init_req + "\n")
-        p.stdin.flush()
-        init_resp_line = p.stdout.readline()
-        init_resp = json.loads(init_resp_line)
-        assert init_resp.get("id") == 1, f"Invalid response ID: {init_resp}"
-        assert "serverInfo" in init_resp.get("result", {}), "Missing serverInfo in initialize response"
-        print(f"  [PASS] MCP initialize handshake verified: {init_resp['result']['serverInfo']}")
+        out, err = process.communicate("\n".join(json.dumps(r) for r in requests) + "\n", timeout=60)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise RuntimeError("Frozen MCP protocol test timed out")
+    if process.returncode:
+        raise RuntimeError(err)
+    responses = [json.loads(line) for line in out.splitlines() if line.strip().startswith("{")]
+    assert [r["id"] for r in responses] == [1, 2, 3, 4, 5], responses
+    expected_version = json.loads((ROOT_DIR / 'package.json').read_text(encoding='utf-8'))['version']
+    assert responses[0]["result"]["serverInfo"]["version"] == expected_version
+    assert len(responses[1]["result"]["tools"]) >= 7
+    assert responses[2]["result"]["isError"] is True
+    assert responses[3]["result"] == {}
+    print("[PASS] Frozen MCP initialize/notification/tools/error/ping/shutdown")
 
-        # Test 2: notification handling
-        notif_req = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        p.stdin.write(notif_req + "\n")
-        p.stdin.flush()
-        print("  [PASS] MCP notification handling verified (silent ignore without error)")
 
-        # Test 3: tools/list
-        tools_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-        p.stdin.write(tools_req + "\n")
-        p.stdin.flush()
-        tools_resp = json.loads(p.stdout.readline())
-        tools_list = tools_resp.get("result", {}).get("tools", [])
-        assert len(tools_list) >= 7, f"Expected at least 7 tools, got {len(tools_list)}"
-        print(f"  [PASS] MCP tools/list verified: {len(tools_list)} tools available")
+def build_native_codec():
+    subprocess.run(['cargo', 'build', '--locked', '--release', '-p', 'hil-debug-core', '--bin', 'hil-protocol'], cwd=ROOT_DIR / 'src-tauri', check=True)
+    source = ROOT_DIR / 'src-tauri/target/release/hil-protocol.exe'
+    for directory in [ROOT_DIR / 'build_dist', ROOT_DIR / 'src-tauri/binaries', ROOT_DIR / 'bin']:
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / 'hil-protocol.exe'
+        staging = directory / 'hil-protocol.exe.new'
+        shutil.copy2(source, staging)
+        try:
+            os.replace(staging, target)
+        except PermissionError:
+            staging.unlink(missing_ok=True)
+            print(f'[IN USE] {target}; native codec available in {source}')
 
-        # Test 4: tools/call list_probes
-        call_req = json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_probes", "arguments": {}}})
-        p.stdin.write(call_req + "\n")
-        p.stdin.flush()
-        call_resp = json.loads(p.stdout.readline())
-        call_res = call_resp.get("result", {})
-        assert "content" in call_res and "isError" in call_res, f"Invalid CallToolResult schema: {call_res}"
-        assert call_res["isError"] is False, f"list_probes reported error: {call_res}"
-        print(f"  [PASS] MCP tools/call 'list_probes' executed successfully with standard CallToolResult!")
 
-    finally:
-        p.kill()
+def build_native_runtime():
+    subprocess.run(['cargo', 'build', '--locked', '--release', '-p', 'hil-runtime', '--bin', 'hil-native'], cwd=ROOT_DIR / 'src-tauri', check=True)
+    source = ROOT_DIR / 'src-tauri/target/release/hil-native.exe'
+    output = ROOT_DIR / 'build_dist/hil-native.exe'
+    shutil.copy2(source, output)
+    sys.path.insert(0, str(SRC_ENTRY.parent))
+    import daemon_entry
+    catalog = {'tools': daemon_entry.MCP_TOOLS}
+    for folder in [ROOT_DIR / 'build_dist', SRC_ENTRY.parent, ROOT_DIR / 'src-tauri/binaries', ROOT_DIR / 'src-tauri/target/release', ROOT_DIR / 'src-tauri/target/debug']:
+        (folder / 'mcp-tools.json').write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding='utf-8')
+        if folder != ROOT_DIR / 'build_dist':
+            shutil.copy2(ROOT_DIR / 'build_dist/hil-python-worker.exe', folder / 'hil-python-worker.exe')
+            shutil.copy2(output, folder / 'hil-native.exe')
+    return output
 
-def post_build_updates():
-    """Update agent registrations and refresh the release distribution package."""
-    print("\n[5/5] Updating Agent registrations and refreshing release archive...")
-    
-    # Update MCP agents
-    deploy_script = ROOT_DIR / "scripts" / "deploy_mcp_to_agents.py"
-    if deploy_script.exists():
-        subprocess.check_call([sys.executable, str(deploy_script)])
-
-    # Update release package
-    package_script = ROOT_DIR / "scripts" / "package_release.py"
-    if package_script.exists():
-        subprocess.check_call([sys.executable, str(package_script)])
 
 def main():
     print("=" * 65)
     print("  AI-HIL Debugger - Standalone MCP Daemon Build & Test Pipeline")
     print("=" * 65)
     try:
-        kill_locking_processes()
-        built_exe, dist_dir, work_dir = build_executable()
-        sync_binaries(built_exe, dist_dir, work_dir)
-        verify_mcp_protocol(TARGET_PATHS[1])
-        post_build_updates()
+        build_native_codec()
+        python_worker, dist_dir, work_dir = build_executable()
+        native_runtime = build_native_runtime()
+        verify_mcp_protocol(python_worker)
+        verify_mcp_protocol(native_runtime)
+        sync_binaries(native_runtime, dist_dir, work_dir)
+        if "--daemon-only" not in sys.argv:
+            from package_release import package
+            package(daemon_source=native_runtime)
         print("\n" + "=" * 65)
-        print(" [ALL COMPLETE] Standalone MCP Daemon compiled, verified & deployed!")
+        print(" [ALL COMPLETE] Standalone MCP Daemon compiled and verified!")
         print("=" * 65)
     except Exception as e:
         print(f"\n[FAILED] Error during build pipeline: {e}")

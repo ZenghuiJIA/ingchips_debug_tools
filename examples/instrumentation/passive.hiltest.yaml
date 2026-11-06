@@ -1,0 +1,23 @@
+schema_version: 3
+name: HILI passive observation
+bench:
+  devices:
+    board: {device_id: replace-with-board-id}
+    console: {transport: uart, port_name: COM3, baud_rate: 115200}
+  bindings: {target: board, console: console}
+  instrumentation: {mode: text, control: passive}
+steps:
+  - id: prepare
+    action: instrumentation_start
+  # Insert the project's explicit SWD/pin reset or START command here, so BOOT_INFO
+  # is captured after the observation consumer has been installed.
+  - id: observe
+    action: delay
+    timeout_ms: 11s
+    params: {delay_ms: 10s}
+  - id: budget
+    action: instrumentation_assert
+    timeout_ms: 30s
+    params:
+      budgets:
+        "42": {metric: elapsed, threshold: 100, unit: us, min_samples: 10}

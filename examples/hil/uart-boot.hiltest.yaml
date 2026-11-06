@@ -1,0 +1,25 @@
+schema_version: 2
+name: UART pin boot example
+bench:
+  port_name: COM3
+  baud_rate: 115200
+steps:
+  - id: boot
+    action: reset_target
+    timeout_ms: 3s
+    params:
+      reset_method: bootloader_reset
+      pin_reset:
+        profile_id: replace-with-verified-board-wiring
+        wiring_verified: false  # Set true only after checking the actual wiring.
+        reset_asserted_dtr: true
+        boot_asserted_rts: true
+        settle_ms: 500
+        pulse_ms: 100
+        boot_hold_ms: 100
+  - id: confirm
+    action: serial_wait_match
+    timeout_ms: 3s
+    params:
+      match_type: contains
+      pattern: REPLACE_WITH_ACTUAL_BOOTLOADER_RESPONSE

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
-import { isTauri } from './utils/ipc';
+import { ref, watch, onMounted, onUnmounted, onErrorCaptured } from 'vue';
+import { isTauri, safeInvoke } from './utils/ipc';
 import { initTheme } from './utils/themeManager';
 import HeaderBar from './components/HeaderBar.vue';
 import SerialTerminal from './components/SerialTerminal.vue';
@@ -50,6 +50,20 @@ import { usePersistentState } from './composables/usePersistentState';
 const activeSessionsCount = ref<number>(0);
 const currentTab = usePersistentState<'terminal' | 'plotter' | 'flasher' | 'merger' | 'analyzer' | 'svd' | 'rtos' | 'lcd' | 'hardfault' | 'memory' | 'sequencer' | 'ble_rf' | 'profiler' | 'calculator' | 'ai'>('hil_app_current_tab', 'terminal');
 const sharedFirmwarePath = usePersistentState<string>('hil_app_shared_firmware_path', '');
+const tabError = ref<string | null>(null);
+
+onErrorCaptured((err: any) => {
+  console.error('Unhandled tab error captured:', err);
+  tabError.value = err instanceof Error ? err.message : String(err);
+  return false;
+});
+
+watch(currentTab, () => {
+  tabError.value = null;
+  if (isTauri()) {
+    safeInvoke('trim_system_memory').catch(() => {});
+  }
+});
 
 const runningInBrowser = ref<boolean>(!isTauri());
 const isSettingsOpen = ref<boolean>(false);
@@ -81,14 +95,14 @@ const allTabNavItems: TabNavItem[] = [
   { id: 'merger', titleKey: 'tab_merger', icon: Merge, color: 'text-emerald-400', category: 'firmware', desc: '多固件 Bin/Hex 拼接与地址偏移合并' },
   { id: 'analyzer', titleKey: 'tab_analyzer', icon: PieChart, color: 'text-teal-400', category: 'firmware', desc: 'ELF / AXF 符号与 RAM/Flash 内存占用' },
   { id: 'svd', titleKey: 'tab_svd', icon: Sliders, color: 'text-indigo-400', category: 'swd', desc: '芯片外设寄存器与位域实时交互' },
-  { id: 'rtos', titleKey: 'tab_rtos', icon: Cpu, color: 'text-purple-400', category: 'swd', desc: 'FreeRTOS / RT-Thread 内核状态与任务追踪' },
+  { id: 'rtos', titleKey: 'tab_rtos', icon: Cpu, color: 'text-purple-400', category: 'swd', desc: '从固件符号识别 RTOS 内核与控制块地址' },
   { id: 'lcd', titleKey: 'tab_lcd', icon: Monitor, color: 'text-cyan-400', category: 'swd', desc: '屏幕显存实时镜像抓取与截图' },
   { id: 'hardfault', titleKey: 'tab_hardfault', icon: AlertOctagon, color: 'text-rose-400', category: 'swd', desc: 'Cortex-M 崩溃现场定位与智能诊断' },
   { id: 'memory', titleKey: 'tab_memory', icon: Database, color: 'text-emerald-400', category: 'swd', desc: 'RAM/Flash 内存直转储与 HEX 差异对比' },
-  { id: 'profiler', titleKey: 'tab_profiler', icon: Gauge, color: 'text-amber-400', category: 'swd', desc: 'DWT 周期计数与函数耗时热点统计' },
+  { id: 'profiler', titleKey: 'tab_profiler', icon: Gauge, color: 'text-amber-400', category: 'swd', desc: 'DWT_PCSR 统计采样与函数符号定位' },
   { id: 'sequencer', titleKey: 'tab_sequencer', icon: Workflow, color: 'text-blue-400', category: 'tool', desc: '自动化 HIL 硬件在环测试编排与断言' },
   { id: 'calculator', titleKey: 'tab_calculator', icon: Calculator, color: 'text-emerald-400', category: 'tool', desc: '2/8/10/16 快捷进制转换与位操作计算器' },
-  { id: 'ai', titleKey: 'tab_ai', icon: Sparkles, color: 'text-fuchsia-400', category: 'tool', desc: '嵌入式大模型调试协同副驾驶' }
+  { id: 'ai', titleKey: 'tab_ai', icon: Sparkles, color: 'text-fuchsia-400', category: 'tool', desc: '完整快捷命令驱动硬件操作' }
 ];
 
 function selectTabFromNav(tabId: TabNavItem['id']) {
@@ -375,8 +389,13 @@ onUnmounted(() => {
 
       <!-- Tab Content Area -->
       <div class="flex-1 overflow-hidden relative">
-        <!-- Resource governance: Limit KeepAlive cache to 2 components. Heavy analysis tools (SVD/RTOS/HardFault/LCD) are released when leaving -->
-        <KeepAlive :max="2">
+        <div v-if="tabError" class="p-6 bg-rose-950/40 border border-rose-800 m-4 rounded text-rose-200">
+          <div class="font-bold text-sm mb-2">组件渲染异常：{{ tabError }}</div>
+          <p class="text-xs text-zinc-400 mb-3">页面已拦截异常，防止应用崩溃黑屏。可尝试点击下方重试恢复。</p>
+          <button @click="tabError = null" class="px-3 py-1 bg-rose-700 hover:bg-rose-600 rounded text-xs">重试恢复</button>
+        </div>
+        <!-- Keep task owners mounted: navigation must not discard running jobs or their logs. -->
+        <KeepAlive v-else>
           <component
             :is="
               currentTab === 'terminal' ? SerialTerminal :
@@ -417,7 +436,7 @@ onUnmounted(() => {
         <span>MCP stdio RPC 2.0</span>
       </div>
       <div>
-        <span class="text-emerald-500">● {{ t('hardware_scheduler_ok') }}</span>
+        <span class="text-zinc-400">硬件状态以各工具连接与任务结果为准</span>
       </div>
     </footer>
 

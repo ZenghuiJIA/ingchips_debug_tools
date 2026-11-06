@@ -23,6 +23,8 @@ pub struct ModbusParsedRegister {
     pub raw_hex: String,
     pub u16_val: u16,
     pub i16_val: i16,
+    #[serde(default)]
+    pub bool_val: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +36,7 @@ pub struct ModbusResponsePayload {
     pub is_exception: bool,
     pub exception_code: Option<u8>,
     pub exception_desc: Option<String>,
+    pub description: Option<String>,
     pub registers: Vec<ModbusParsedRegister>,
     pub raw_hex: String,
     pub raw_ascii: Option<String>,
@@ -74,6 +77,30 @@ pub fn build_modbus_pdu(
             frame.push((start_addr & 0xFF) as u8);
             frame.push(((count_or_val >> 8) & 0xFF) as u8);
             frame.push((count_or_val & 0xFF) as u8);
+        }
+        // Write Multiple Coils (15 / 0x0F)
+        0x0F => {
+            let values = extra_values.unwrap_or(&[]);
+            let coil_count = if !values.is_empty() { values.len() as u16 } else { count_or_val };
+            frame.push(((start_addr >> 8) & 0xFF) as u8);
+            frame.push((start_addr & 0xFF) as u8);
+            frame.push(((coil_count >> 8) & 0xFF) as u8);
+            frame.push((coil_count & 0xFF) as u8);
+            let byte_count = ((coil_count + 7) / 8) as usize;
+            frame.push(byte_count as u8);
+            let mut current_byte = 0u8;
+            for (idx, &v) in values.iter().enumerate() {
+                if v != 0 {
+                    current_byte |= 1 << (idx % 8);
+                }
+                if idx % 8 == 7 || idx == values.len() - 1 {
+                    frame.push(current_byte);
+                    current_byte = 0;
+                }
+            }
+            while frame.len() < 7 + byte_count {
+                frame.push(0);
+            }
         }
         // Write Multiple Registers (16 / 0x10)
         0x10 => {
@@ -235,6 +262,7 @@ pub fn parse_modbus_response(
             is_exception: true,
             exception_code: Some(err_code),
             exception_desc: Some(desc.to_string()),
+            description: Some(format!("从机 0x{:02X} 返回异常: {}", slave_id, desc)),
             registers: Vec::new(),
             raw_hex,
             raw_ascii,
@@ -243,24 +271,140 @@ pub fn parse_modbus_response(
     }
 
     let mut registers = Vec::new();
-    // Functions 03 & 04 return: [Slave, Func, ByteCount, High0, Low0, High1, Low1, ...]
-    if (func == 0x03 || func == 0x04) && raw_pdu.len() >= 3 {
-        let byte_count = raw_pdu[2] as usize;
-        let data_bytes = &raw_pdu[3..3 + byte_count.min(raw_pdu.len() - 3)];
-        let num_regs = data_bytes.len() / 2;
+    let mut description = None;
 
-        for i in 0..num_regs {
-            let h = data_bytes[i * 2] as u16;
-            let l = data_bytes[i * 2 + 1] as u16;
-            let u16_val = (h << 8) | l;
-            let i16_val = u16_val as i16;
-            let addr = start_addr + i as u16;
-            registers.push(ModbusParsedRegister {
-                address: addr,
-                raw_hex: format!("{:02X} {:02X}", h, l),
-                u16_val,
-                i16_val,
-            });
+    match func {
+        // 01: Read Coils, 02: Read Discrete Inputs
+        // PDU: [Slave, Func, ByteCount, BitBytes...]
+        0x01 | 0x02 => {
+            if raw_pdu.len() >= 3 {
+                let byte_count = raw_pdu[2] as usize;
+                let data_bytes = &raw_pdu[3..3 + byte_count.min(raw_pdu.len().saturating_sub(3))];
+                for (byte_idx, &b) in data_bytes.iter().enumerate() {
+                    for bit_idx in 0..8 {
+                        let coil_idx = byte_idx * 8 + bit_idx;
+                        let is_on = (b & (1 << bit_idx)) != 0;
+                        let addr = start_addr + coil_idx as u16;
+                        registers.push(ModbusParsedRegister {
+                            address: addr,
+                            raw_hex: if is_on { "01".to_string() } else { "00".to_string() },
+                            u16_val: if is_on { 1 } else { 0 },
+                            i16_val: if is_on { 1 } else { 0 },
+                            bool_val: Some(is_on),
+                        });
+                    }
+                }
+                description = Some(format!(
+                    "读取 {} 个{}成功",
+                    registers.len(),
+                    if func == 0x01 { "线圈 (Coils)" } else { "离散输入 (Discrete Inputs)" }
+                ));
+            }
+        }
+
+        // 03: Read Holding Regs, 04: Read Input Regs
+        // PDU: [Slave, Func, ByteCount, High0, Low0, High1, Low1, ...]
+        0x03 | 0x04 => {
+            if raw_pdu.len() >= 3 {
+                let byte_count = raw_pdu[2] as usize;
+                let data_bytes = &raw_pdu[3..3 + byte_count.min(raw_pdu.len().saturating_sub(3))];
+                let num_regs = data_bytes.len() / 2;
+
+                for i in 0..num_regs {
+                    let h = data_bytes[i * 2] as u16;
+                    let l = data_bytes[i * 2 + 1] as u16;
+                    let u16_val = (h << 8) | l;
+                    let i16_val = u16_val as i16;
+                    let addr = start_addr + i as u16;
+                    registers.push(ModbusParsedRegister {
+                        address: addr,
+                        raw_hex: format!("{:02X} {:02X}", h, l),
+                        u16_val,
+                        i16_val,
+                        bool_val: None,
+                    });
+                }
+                description = Some(format!(
+                    "读取 {} 个{}成功",
+                    registers.len(),
+                    if func == 0x03 { "保持寄存器 (Holding Regs)" } else { "输入寄存器 (Input Regs)" }
+                ));
+            }
+        }
+
+        // 05: Write Single Coil
+        // Echoes request: [Slave, 0x05, AddrHi, AddrLo, ValHi, ValLo]
+        0x05 => {
+            if raw_pdu.len() >= 6 {
+                let addr = ((raw_pdu[2] as u16) << 8) | (raw_pdu[3] as u16);
+                let is_on = raw_pdu[4] == 0xFF;
+                registers.push(ModbusParsedRegister {
+                    address: addr,
+                    raw_hex: if is_on { "FF 00".to_string() } else { "00 00".to_string() },
+                    u16_val: if is_on { 1 } else { 0 },
+                    i16_val: if is_on { 1 } else { 0 },
+                    bool_val: Some(is_on),
+                });
+                description = Some(format!(
+                    "写入单个线圈 [0x{:04X}] = {} 确认成功",
+                    addr,
+                    if is_on { "ON (0xFF00)" } else { "OFF (0x0000)" }
+                ));
+            }
+        }
+
+        // 06: Write Single Register
+        // Echoes request: [Slave, 0x06, AddrHi, AddrLo, ValHi, ValLo]
+        0x06 => {
+            if raw_pdu.len() >= 6 {
+                let addr = ((raw_pdu[2] as u16) << 8) | (raw_pdu[3] as u16);
+                let val = ((raw_pdu[4] as u16) << 8) | (raw_pdu[5] as u16);
+                registers.push(ModbusParsedRegister {
+                    address: addr,
+                    raw_hex: format!("{:02X} {:02X}", raw_pdu[4], raw_pdu[5]),
+                    u16_val: val,
+                    i16_val: val as i16,
+                    bool_val: None,
+                });
+                description = Some(format!(
+                    "写入单个保持寄存器 [0x{:04X}] = {} (0x{:04X}) 确认成功",
+                    addr, val, val
+                ));
+            }
+        }
+
+        // 15 (0x0F): Write Multiple Coils
+        // Normal response: [Slave, 0x0F, AddrHi, AddrLo, QtyHi, QtyLo]
+        0x0F => {
+            if raw_pdu.len() >= 6 {
+                let addr = ((raw_pdu[2] as u16) << 8) | (raw_pdu[3] as u16);
+                let qty = ((raw_pdu[4] as u16) << 8) | (raw_pdu[5] as u16);
+                description = Some(format!(
+                    "写入多个线圈 [0x{:04X} ~ 0x{:04X}] 共 {} 个确认成功",
+                    addr,
+                    addr + qty.saturating_sub(1),
+                    qty
+                ));
+            }
+        }
+
+        // 16 (0x10): Write Multiple Registers
+        // Normal response: [Slave, 0x10, AddrHi, AddrLo, QtyHi, QtyLo]
+        0x10 => {
+            if raw_pdu.len() >= 6 {
+                let addr = ((raw_pdu[2] as u16) << 8) | (raw_pdu[3] as u16);
+                let qty = ((raw_pdu[4] as u16) << 8) | (raw_pdu[5] as u16);
+                description = Some(format!(
+                    "写入多个寄存器 [0x{:04X} ~ 0x{:04X}] 共 {} 个确认成功",
+                    addr,
+                    addr + qty.saturating_sub(1),
+                    qty
+                ));
+            }
+        }
+
+        _ => {
+            description = Some(format!("收到 Modbus 功能码 0x{:02X} 响应", func));
         }
     }
 
@@ -272,6 +416,7 @@ pub fn parse_modbus_response(
         is_exception: false,
         exception_code: None,
         exception_desc: None,
+        description,
         registers,
         raw_hex,
         raw_ascii,
@@ -315,6 +460,38 @@ impl ModbusSlaveStorage {
         response_pdu.push(self.slave_id);
 
         match func {
+            // Read Coils (0x01) or Read Discrete Inputs (0x02)
+            0x01 | 0x02 => {
+                if request_pdu.len() < 6 {
+                    return None;
+                }
+                let start_addr = ((request_pdu[2] as u16) << 8) | (request_pdu[3] as u16);
+                let count = ((request_pdu[4] as u16) << 8) | (request_pdu[5] as u16);
+                let byte_count = ((count + 7) / 8) as u8;
+
+                response_pdu.push(func);
+                response_pdu.push(byte_count);
+
+                let map_guard = if func == 0x01 {
+                    self.coils.lock().unwrap()
+                } else {
+                    self.discrete_inputs.lock().unwrap()
+                };
+
+                for byte_idx in 0..byte_count {
+                    let mut b = 0u8;
+                    for bit_idx in 0..8 {
+                        let bit_offset = (byte_idx as u16) * 8 + bit_idx;
+                        if bit_offset < count {
+                            let addr = start_addr + bit_offset;
+                            if map_guard.get(&addr).copied().unwrap_or(false) {
+                                b |= 1 << bit_idx;
+                            }
+                        }
+                    }
+                    response_pdu.push(b);
+                }
+            }
             // Read Holding Registers (0x03) or Read Input Registers (0x04)
             0x03 | 0x04 => {
                 if request_pdu.len() < 6 {
@@ -340,6 +517,20 @@ impl ModbusSlaveStorage {
                     response_pdu.push((val & 0xFF) as u8);
                 }
             }
+            // Write Single Coil (0x05)
+            0x05 => {
+                if request_pdu.len() < 6 {
+                    return None;
+                }
+                let addr = ((request_pdu[2] as u16) << 8) | (request_pdu[3] as u16);
+                let is_on = request_pdu[4] == 0xFF;
+
+                let mut map_guard = self.coils.lock().unwrap();
+                map_guard.insert(addr, is_on);
+
+                // Echo back the request PDU
+                response_pdu = request_pdu[..6].to_vec();
+            }
             // Write Single Register (0x06)
             0x06 => {
                 if request_pdu.len() < 6 {
@@ -352,6 +543,53 @@ impl ModbusSlaveStorage {
                 map_guard.insert(addr, val);
 
                 // Echo back the request PDU
+                response_pdu = request_pdu[..6].to_vec();
+            }
+            // Write Multiple Coils (0x0F)
+            0x0F => {
+                if request_pdu.len() < 7 {
+                    return None;
+                }
+                let start_addr = ((request_pdu[2] as u16) << 8) | (request_pdu[3] as u16);
+                let count = ((request_pdu[4] as u16) << 8) | (request_pdu[5] as u16);
+                let byte_count = request_pdu[6] as usize;
+                if request_pdu.len() < 7 + byte_count {
+                    return None;
+                }
+                let data_bytes = &request_pdu[7..7 + byte_count];
+                let mut map_guard = self.coils.lock().unwrap();
+                for i in 0..count {
+                    let byte_idx = (i / 8) as usize;
+                    let bit_idx = (i % 8) as u8;
+                    if byte_idx < data_bytes.len() {
+                        let is_on = (data_bytes[byte_idx] & (1 << bit_idx)) != 0;
+                        map_guard.insert(start_addr + i, is_on);
+                    }
+                }
+                // Echo back first 6 bytes: [Slave, 0x0F, AddrHi, AddrLo, QtyHi, QtyLo]
+                response_pdu = request_pdu[..6].to_vec();
+            }
+            // Write Multiple Registers (0x10)
+            0x10 => {
+                if request_pdu.len() < 7 {
+                    return None;
+                }
+                let start_addr = ((request_pdu[2] as u16) << 8) | (request_pdu[3] as u16);
+                let count = ((request_pdu[4] as u16) << 8) | (request_pdu[5] as u16);
+                let byte_count = request_pdu[6] as usize;
+                if request_pdu.len() < 7 + byte_count {
+                    return None;
+                }
+                let data_bytes = &request_pdu[7..7 + byte_count];
+                let mut map_guard = self.holding_registers.lock().unwrap();
+                for i in 0..count {
+                    let idx = (i * 2) as usize;
+                    if idx + 1 < data_bytes.len() {
+                        let val = ((data_bytes[idx] as u16) << 8) | (data_bytes[idx + 1] as u16);
+                        map_guard.insert(start_addr + i, val);
+                    }
+                }
+                // Echo back first 6 bytes: [Slave, 0x10, AddrHi, AddrLo, QtyHi, QtyLo]
                 response_pdu = request_pdu[..6].to_vec();
             }
             _ => {
@@ -486,5 +724,30 @@ mod tests {
         assert_eq!(parsed.registers.len(), 2);
         assert_eq!(parsed.registers[0].u16_val, 1234);
         assert_eq!(parsed.registers[1].u16_val, 5678);
+    }
+
+    #[test]
+    fn test_modbus_coils_and_multi_write() {
+        let slave = ModbusSlaveStorage::new(2);
+        // Write single coil 0x0002 = ON (05)
+        let req_05 = build_modbus_request(2, 0x05, 0x0002, 1, None);
+        let resp_05 = slave.handle_request(&req_05[..req_05.len() - 2], false).unwrap();
+        assert!(validate_modbus_crc(&resp_05));
+        let parsed_05 = parse_modbus_response("COM2", 0x0002, &resp_05).unwrap();
+        assert_eq!(parsed_05.registers.len(), 1);
+        assert_eq!(parsed_05.registers[0].bool_val, Some(true));
+
+        // Read coils 0x0000 ~ 0x0003 (01)
+        let req_01 = build_modbus_request(2, 0x01, 0x0000, 4, None);
+        let resp_01 = slave.handle_request(&req_01[..req_01.len() - 2], false).unwrap();
+        let parsed_01 = parse_modbus_response("COM2", 0x0000, &resp_01).unwrap();
+        assert_eq!(parsed_01.registers.len(), 8); // 1 byte = 8 bits
+        assert_eq!(parsed_01.registers[2].bool_val, Some(true));
+        assert_eq!(parsed_01.registers[0].bool_val, Some(false));
+
+        // Write multiple coils (0x0F)
+        let req_0f = build_modbus_request(2, 0x0F, 0x0010, 3, Some(&[1, 0, 1]));
+        let resp_0f = slave.handle_request(&req_0f[..req_0f.len() - 2], false).unwrap();
+        assert!(validate_modbus_crc(&resp_0f));
     }
 }

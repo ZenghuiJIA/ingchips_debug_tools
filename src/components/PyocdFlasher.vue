@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import { pyocdFlashUnsupportedReason } from '../utils/flashCapabilities';
 import type { ProbeInfo } from '../types';
 import {
   Zap,
@@ -121,6 +122,8 @@ watch(() => props.initialFilePath, (newVal) => {
 });
 const isFlashing = ref<boolean>(false);
 const isResetting = ref<boolean>(false);
+const flashUnsupportedReason = computed(() => pyocdFlashUnsupportedReason(targetMcu.value));
+const flashDisabled = computed(() => isFlashing.value || !filePath.value || !!flashUnsupportedReason.value);
 const flashLogs = ref<Array<{ time: string; text: string; status: 'info' | 'success' | 'error' }>>([]);
 
 async function handlePickFile() {
@@ -173,6 +176,11 @@ async function scanProbes() {
 }
 
 async function handleFlash() {
+  if (isFlashing.value) return;
+  if (flashUnsupportedReason.value) {
+    logMsg(flashUnsupportedReason.value, 'error');
+    return;
+  }
   if (!filePath.value) {
     logMsg(t('pyocd_log_no_file'), 'error');
     return;
@@ -348,11 +356,17 @@ onMounted(() => {
         </div>
       </div>
 
+      <p v-if="flashUnsupportedReason" id="pyocd-flash-capability" role="note"
+         class="text-xs text-amber-300 border border-amber-800/60 rounded px-3 py-2">
+        {{ flashUnsupportedReason }}
+      </p>
+
       <!-- Action Buttons -->
       <div class="flex items-center gap-3 pt-2">
         <button
           @click="handleFlash"
-          :disabled="isFlashing || !filePath"
+          :disabled="flashDisabled"
+          :aria-describedby="flashUnsupportedReason ? 'pyocd-flash-capability' : undefined"
           class="flex items-center gap-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-medium transition-colors shadow-sm disabled:opacity-40"
         >
           <Zap class="w-4 h-4" :class="{ 'animate-pulse': isFlashing }" />

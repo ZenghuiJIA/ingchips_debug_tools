@@ -6,10 +6,13 @@ import '@xterm/xterm/css/xterm.css';
 import { Trash2, Copy, Check } from '@lucide/vue';
 import { safeInvoke } from '../utils/ipc';
 import { t } from '../utils/i18n';
+import { serialXtermOptions, writeSerialOutput, type SerialAppearance } from '../utils/serialAppearance';
 
 const props = defineProps<{
   portName: string;
   isConnected: boolean;
+  appearance: SerialAppearance;
+  autoScroll: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -21,6 +24,7 @@ const terminalRef = ref<HTMLDivElement | null>(null);
 let term: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
+let welcomeTimer: ReturnType<typeof setTimeout> | undefined;
 
 const isCopied = ref<boolean>(false);
 
@@ -30,12 +34,11 @@ function initTerminal() {
   term = new Terminal({
     cursorBlink: true,
     cursorStyle: 'block',
-    fontSize: 12,
-    fontFamily: 'Consolas, "Fira Code", monospace, "Courier New"',
+    fontSize: props.appearance.fontSize,
+    fontFamily: props.appearance.fontFamily,
+    scrollOnUserInput: false,
     theme: {
-      background: '#09090b', // zinc-950
-      foreground: '#f4f4f5', // zinc-100
-      cursor: '#10b981',     // emerald-500
+      ...serialXtermOptions(props.appearance).theme,
       cursorAccent: '#000000',
       selectionBackground: '#047857',
       black: '#18181b',
@@ -91,7 +94,7 @@ function initTerminal() {
   });
   resizeObserver.observe(terminalRef.value);
 
-  setTimeout(() => {
+  welcomeTimer = setTimeout(() => {
     fitAddon?.fit();
     term?.focus();
     printWelcomeBanner();
@@ -110,9 +113,8 @@ function printWelcomeBanner() {
  * Feeds raw bytes received from serial into xterm
  */
 function writeRawBytes(bytes: Uint8Array) {
-  if (term) {
-    term.write(bytes);
-  }
+  const current = term;
+  if (current) writeSerialOutput(current, bytes, () => props.autoScroll, () => term === current);
 }
 
 function clearTerminal() {
@@ -142,9 +144,22 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  if (welcomeTimer !== undefined) clearTimeout(welcomeTimer);
   resizeObserver?.disconnect();
-  term?.dispose();
+  const current = term;
+  term = null;
+  current?.dispose();
 });
+
+watch(() => props.appearance, value => {
+  if (!term) return;
+  const options = serialXtermOptions(value);
+  term.options.fontFamily = options.fontFamily;
+  term.options.fontSize = options.fontSize;
+  term.options.theme = { ...term.options.theme, ...options.theme };
+  // Hidden sessions are fitted when selected by the parent.
+  if (terminalRef.value?.clientWidth && terminalRef.value?.clientHeight) fitAddon?.fit();
+}, { deep: true });
 
 watch(() => props.isConnected, (connected) => {
   if (term) {
@@ -158,7 +173,7 @@ watch(() => props.isConnected, (connected) => {
 </script>
 
 <template>
-  <div class="h-full flex flex-col bg-zinc-950 relative overflow-hidden select-text">
+  <div class="h-full flex flex-col relative overflow-hidden select-text" :style="{ backgroundColor: appearance.background }">
     <!-- Mini floating toolbar for terminal -->
     <div class="absolute top-2 right-4 z-10 flex items-center gap-1.5 bg-zinc-900/80 backdrop-blur-xs border border-zinc-800 rounded px-2 py-1 select-none">
       <span class="text-[10px] text-zinc-400 font-mono">VT100 Console</span>
@@ -188,8 +203,5 @@ watch(() => props.isConnected, (connected) => {
 :deep(.xterm) {
   padding: 4px;
   height: 100%;
-}
-:deep(.xterm-viewport) {
-  background-color: #09090b !important;
 }
 </style>

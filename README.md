@@ -2,6 +2,8 @@
 
 本项目是一款基于 **Tauri v2 (Rust)** 与 **Vue 3 + Vite + TailwindCSS** 构建的现代化、极速、低内存消耗的 AI 驱动嵌入式调试工具。
 
+当前版本 **v1.7.1** 修复自动化编辑、提交与统计，并新增串口外观设置及仅新消息跟随的自动滚动；保留此前的嵌入式插桩、崩溃证据、RTOS/耗时和离线仪器分析底座。使用方法见 [嵌入式调试状态](docs/EMBEDDED_DEBUG_STATUS.md)、[Rust 迁移说明](docs/RUST_MIGRATION.md) 和 [ABC 调试说明](docs/ABC_DEBUGGING.md)，交付范围见 [发布说明](docs/RELEASE_NOTES_v1.7.1.md)。[HIL runner](docs/HIL_RUNNER.md) 保留 UI、CLI、MCP 共用执行器。真实 MCU、FreeRTOS 端口、功耗仪和电源驱动仍需目标选型与上板验证。
+
 ---
 
 ## 🎯 核心特性清单
@@ -12,7 +14,7 @@
    - **硬件时序安全隔离（仅 DAPLink 支持硬件复位）**：
      - **普通复位 (Normal Reset)**：RTS=0 $\to$ 延迟 50ms $\to$ DTR 脉冲 100ms (复位低电平有效) $\to$ 释放 DTR。
      - **引导模式 (ISP Bootloader Reset)**：RTS=1 (拉高进入Boot) $\to$ 稳定等待 **500ms** $\to$ DTR 脉冲 100ms (拉低复位) $\to$ 释放 DTR。
-     - **安全限制**：由于仅 DAPLink 具备标准 HIL RTS/DTR 硬件引脚接线，**J-Link CDC 及其他通用串口设备不支持一键进入 BOOT 和硬件复位功能**。前端界面将自动禁用复位按键并给予提示，Rust 后端同样实施严格的硬件校验与状态拦截。
+     - **安全限制**：现有入口仅适配已知的专用接线，DAPLink 名称本身不能证明板级 RTS/DTR 接线，**J-Link CDC 及其他通用串口设备不支持一键进入 BOOT 和硬件复位功能**。前端界面将自动禁用复位按键并给予提示，Rust 后端同样实施严格的硬件校验与状态拦截。
 
 2. **串口命令组与多格式编码**：
    - 支持为每条命令配置独立的换行符与格式：`+CRLF (\r\n)`、`+LF (\n)`、`+CR (\r)`、`RAW (无换行)`、`HEX (十六进制字节流)`。

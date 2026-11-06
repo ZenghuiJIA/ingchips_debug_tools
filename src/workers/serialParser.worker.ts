@@ -1,6 +1,7 @@
 // Web Worker for high-frequency serial stream parsing (up to 921600 baud)
 // Prevents UI thread blocking and keeps frame rate at 60 FPS
 
+const decoder = new TextDecoder('utf-8', { fatal: false });
 self.onmessage = (e: MessageEvent<{ rawBytes: Uint8Array; mode: 'string' | 'hex'; timestamp: string }>) => {
   const { rawBytes, mode, timestamp } = e.data;
   if (!rawBytes || rawBytes.length === 0) return;
@@ -12,13 +13,14 @@ self.onmessage = (e: MessageEvent<{ rawBytes: Uint8Array; mode: 'string' | 'hex'
     }
     self.postMessage({
       type: 'formatted_chunk',
-      text: hexStr.trim(),
+      // RX rows concatenate across transport chunks; retain the byte separator.
+      text: hexStr,
       timestamp,
       rawLength: rawBytes.length
     });
   } else {
     try {
-      const decoded = new TextDecoder('utf-8', { fatal: false }).decode(rawBytes);
+      const decoded = decoder.decode(rawBytes, { stream: true });
       self.postMessage({
         type: 'formatted_chunk',
         text: decoded,

@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, onActivated } from 'vue';
 import { safeInvoke, isTauri } from '../utils/ipc';
 import { t } from '../utils/i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { TerminalSessionTab, PortInfo, SvdDevice } from '../types';
 import SerialTerminalSession from './SerialTerminalSession.vue';
+import { deviceKey, reconnectCandidate } from '../utils/deviceIdentity';
 import BaudrateSelect from './common/BaudrateSelect.vue';
 import {
   Plus,
@@ -148,6 +149,9 @@ function saveTabsToStorage(newTabs: TerminalSessionTab[]) {
   try {
     const serialized = newTabs.map(t => ({
       id: t.id,
+      alias: t.alias,
+      deviceKey: t.deviceKey,
+      autoReconnect: t.autoReconnect,
       portName: t.portName,
       baudRate: t.baudRate,
       isDaplink: t.isDaplink,
@@ -256,10 +260,12 @@ async function importPackForNewPortRtt() {
 }
 
 async function toggleTabConnection(tab: TerminalSessionTab) {
-  if (tab.isConnected) {
+  reconnectPending.delete(tab.id);
+  if (tab.isConnected || tab.isListening) {
     try {
       await safeInvoke('close_serial_port', { portName: tab.portName });
       tab.isConnected = false;
+      tab.isListening = false;
     } catch (err) {
       console.error(`关闭端口 ${tab.portName} 失败:`, err);
     }
@@ -286,6 +292,8 @@ async function toggleTabConnection(tab: TerminalSessionTab) {
           blockAddress: tab.rttBlockAddress !== undefined ? tab.rttBlockAddress : (newPortRttBlockAddrHex.value.trim() ? parseInt(newPortRttBlockAddrHex.value.trim(), 16) : null),
         });
       } else {
+        const identity = availablePorts.value.find(p => p.port_name === tab.portName);
+        tab.deviceKey = identity ? deviceKey(identity) || undefined : undefined;
         await safeInvoke('open_serial_port', {
           portName: tab.portName,
           baudRate: tab.baudRate,
@@ -294,7 +302,7 @@ async function toggleTabConnection(tab: TerminalSessionTab) {
           blockAddress: null,
         });
       }
-      tab.isConnected = true;
+      await syncActiveSessions();
     } catch (err: any) {
       alert(t('term_alert_open_port_err', { port: tab.portName, err }));
     }
@@ -334,6 +342,9 @@ async function handleTabPortChange(tab: TerminalSessionTab, newPort: string) {
     }
   }
   tab.portName = newPort;
+  reconnectPending.delete(tab.id); tab.autoReconnect = false;
+  const identity = availablePorts.value.find(p => p.port_name === newPort);
+  tab.deviceKey = identity ? deviceKey(identity) || undefined : undefined;
   const isDap = availablePorts.value.find(p => p.port_name === newPort)?.is_daplink ?? false;
   tab.isDaplink = isDap;
 }
@@ -379,6 +390,7 @@ async function confirmOpenNewPort() {
     // Check if tab already exists
     let tab = tabs.value.find(t => t.portName === streamName);
     if (tab && tab.isConnected) {
+      await syncActiveSessions();
       activeTabId.value = tab.id;
       isNewPortModalOpen.value = false;
       return;
@@ -408,6 +420,7 @@ async function confirmOpenNewPort() {
         tab.isConnected = true;
       }
 
+      await syncActiveSessions();
       activeTabId.value = tab.id;
       isNewPortModalOpen.value = false;
     } catch (err: any) {
@@ -455,11 +468,13 @@ async function confirmOpenNewPort() {
     }
 
     const isDap = availablePorts.value.find(p => p.port_name === targetPort)?.is_daplink ?? false;
+    const matchedPort = availablePorts.value.find(p => p.port_name === targetPort);
 
     if (!tab) {
       tab = {
         id: `tab_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
         portName: targetPort,
+        deviceKey: matchedPort ? deviceKey(matchedPort) || undefined : undefined,
         baudRate: targetBaud,
         isConnected: true,
         isDaplink: isDap,
@@ -482,7 +497,7 @@ async function confirmOpenNewPort() {
 async function closeTab(tab: TerminalSessionTab, e?: MouseEvent) {
   if (e) e.stopPropagation();
 
-  if (tab.isConnected) {
+  if (tab.isConnected || tab.isListening) {
     try {
       await safeInvoke('close_serial_port', { portName: tab.portName });
     } catch (err) {
@@ -535,10 +550,12 @@ function handleTabStatsUpdate(tabId: string, stats: { rx: number; tx: number }) 
 async function syncActiveSessions() {
   try {
     const activeSessions: string[] = await safeInvoke('list_active_serial_sessions');
+    const network = await safeInvoke<any[]>('list_network_streams');
     
     // 1. Mark status for existing tabs
     for (const tab of tabs.value) {
       tab.isConnected = activeSessions.includes(tab.portName);
+      tab.isListening = network.some(n => n.name === tab.portName && n.mode === 'tcp_server' && !n.is_connected);
     }
 
     // 2. Authoritative restoration: If backend has active sessions not in tabs, auto-reconstruct them!
@@ -576,17 +593,44 @@ async function syncActiveSessions() {
 }
 
 let unlistenDisconnect: UnlistenFn | null = null;
+const reconnectPending = new Set<string>();
+const reconnectMessage = ref('');
+let portPoll: ReturnType<typeof setInterval> | undefined;
+let pollingPorts = false;
+const editingTab = computed(() => tabs.value.find(tab => tab.id === activeTabId.value));
+async function pollPorts() {
+  if (pollingPorts || !isTauri()) return;
+  pollingPorts = true;
+  try {
+    await refreshPortList();
+    for (const tab of tabs.value) {
+      if (!reconnectPending.has(tab.id) || !tab.autoReconnect || tab.isConnected || !tab.deviceKey) continue;
+      const candidate = reconnectCandidate(tab.deviceKey, availablePorts.value);
+      if (!candidate) { reconnectMessage.value = '重连等待：没有唯一匹配设备'; continue; }
+      try {
+        await safeInvoke('open_serial_port', { portName: candidate.port_name, baudRate: tab.baudRate });
+        tab.portName = candidate.port_name; tab.isConnected = true; reconnectPending.delete(tab.id);
+        reconnectMessage.value = '已重连；发送循环与触发器需要重新启动';
+      } catch (error) { reconnectMessage.value = '重连等待：' + String(error); }
+    }
+  } finally { pollingPorts = false; }
+}
+let unlistenNetwork: UnlistenFn | null = null;
+onActivated(syncActiveSessions);
 
 onMounted(async () => {
+  portPoll = setInterval(pollPorts, 2000);
   await refreshPortList();
   await syncActiveSessions();
 
   if (isTauri()) {
     try {
+      unlistenNetwork = await listen('network-state', () => { syncActiveSessions(); });
       unlistenDisconnect = await listen<{ port: string; reason: string }>('serial-disconnected', (event) => {
         const disconnectedPort = event.payload.port;
         const targetTab = tabs.value.find(t => t.portName === disconnectedPort);
         if (targetTab) {
+          if (targetTab.isConnected && targetTab.autoReconnect && targetTab.deviceKey && !/HIL|交给|已关闭/.test(event.payload.reason)) reconnectPending.add(targetTab.id);
           targetTab.isConnected = false;
         }
       });
@@ -597,6 +641,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  if (portPoll) clearInterval(portPoll);
+  if (unlistenNetwork) unlistenNetwork();
   if (unlistenDisconnect) {
     unlistenDisconnect();
     unlistenDisconnect = null;
@@ -606,6 +652,12 @@ onUnmounted(() => {
 
 <template>
   <div class="h-full flex flex-col bg-zinc-950 text-zinc-100 overflow-hidden select-none">
+    <div v-if="editingTab" class="flex items-center gap-3 px-3 py-1 bg-zinc-900 text-xs border-b border-zinc-800">
+      <input v-model="editingTab.alias" placeholder="设备别名" class="w-32 bg-zinc-950 border border-zinc-700 rounded px-2 py-1" />
+      <span class="text-zinc-400">{{ editingTab.portName }}</span>
+      <label :title="editingTab.deviceKey ? '按 USB 序列号匹配同一设备' : '设备缺少唯一 USB 身份，不能自动回连'"><input type="checkbox" v-model="editingTab.autoReconnect" :disabled="!editingTab.deviceKey" /> 断线自动回连</label>
+      <span class="text-amber-400 truncate">{{ reconnectMessage }}</span>
+    </div>
     <!-- Top Tabs Bar (Chrome / VS Code style) -->
     <div class="bg-zinc-900 border-b border-zinc-800 px-2 pt-1.5 flex items-center justify-between gap-2 shrink-0">
       <!-- Left: Tab List -->
@@ -627,7 +679,7 @@ onUnmounted(() => {
             ></span>
 
             <!-- Port Label -->
-            <span class="truncate max-w-[130px]">{{ tab.portName }}</span>
+            <span class="truncate max-w-[130px]">{{ tab.alias || tab.portName }}</span>
 
             <!-- Close Tab Button -->
             <button
@@ -715,6 +767,7 @@ onUnmounted(() => {
               :port-name="tab.portName"
               :baud-rate="tab.baudRate"
               :is-connected="tab.isConnected"
+              :is-listening="tab.isListening"
               :is-daplink="tab.isDaplink"
               :available-ports="availablePorts"
               @switch-tab="(t) => emit('switch-tab', t)"
@@ -750,6 +803,7 @@ onUnmounted(() => {
                 :port-name="tab.portName"
                 :baud-rate="tab.baudRate"
                 :is-connected="tab.isConnected"
+              :is-listening="tab.isListening"
                 :is-daplink="tab.isDaplink"
                 :available-ports="availablePorts"
                 @switch-tab="(t) => emit('switch-tab', t)"
@@ -828,6 +882,7 @@ onUnmounted(() => {
                   :port-name="tab.portName"
                   :baud-rate="tab.baudRate"
                   :is-connected="tab.isConnected"
+              :is-listening="tab.isListening"
                   :is-daplink="tab.isDaplink"
                   :available-ports="availablePorts"
                   @switch-tab="(t) => emit('switch-tab', t)"

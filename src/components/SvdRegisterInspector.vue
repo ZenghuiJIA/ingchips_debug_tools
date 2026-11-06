@@ -212,7 +212,7 @@ function updateFieldsFromRegValue(reg: SvdRegister) {
   const regVal = reg.current_value_uint >>> 0;
   reg.fields.forEach(f => {
     const mask = f.bit_width >= 32 ? 0xFFFFFFFF : (((1 << f.bit_width) - 1) >>> 0);
-    const fval = (regVal >>> f.bit_offset) & mask;
+    const fval = ((regVal >>> f.bit_offset) & mask) >>> 0;
     f.value = fval;
     f.hex_value = `0x${fval.toString(16).toUpperCase()}`;
     f.bin_value = fval.toString(2).padStart(f.bit_width, '0');
@@ -251,7 +251,7 @@ async function readAllRegisters() {
   setStatus(t('svd_log_batch_reading', { periph: selectedPeripheral.value.name }), 'info');
 
   try {
-    const addrs = registers.value.map(r => r.address);
+    const addrs = registers.value.filter(r => r.access !== 'write-only' && !r.read_action).map(r => r.address);
     const res: any = await safeInvoke('svd_read_all_registers', {
       addresses: addrs,
       probeId: selectedProbeId.value || null,
@@ -296,12 +296,13 @@ async function confirmWriteRegister() {
   let val = 0;
   try {
     const raw = editRegValueHex.value.trim();
+    if (!/^(0x[\da-f]+|\d+)$/i.test(raw)) throw new Error(t('svd_err_invalid_val_fmt'));
     if (raw.toLowerCase().startsWith('0x')) {
       val = parseInt(raw, 16);
     } else {
       val = parseInt(raw, 10);
     }
-    if (isNaN(val)) throw new Error(t('svd_err_invalid_val_fmt'));
+    if (!Number.isSafeInteger(val) || val < 0 || val >= 2 ** editingRegister.value.size) throw new Error('数值超出寄存器宽度');
   } catch (e: any) {
     setStatus(e.message, 'error');
     isSubmittingReg.value = false;
@@ -355,6 +356,7 @@ async function submitWriteField(reg: SvdRegister, field: SvdField, directVal?: n
   } else {
     try {
       const raw = editFieldValue.value.trim();
+      if (!/^(0x[\da-f]+|\d+)$/i.test(raw)) throw new Error(t('svd_err_invalid_val'));
       if (raw.toLowerCase().startsWith('0x')) {
         val = parseInt(raw, 16);
       } else {
@@ -369,6 +371,7 @@ async function submitWriteField(reg: SvdRegister, field: SvdField, directVal?: n
 
   isSubmittingField.value = true;
   try {
+    if (!Number.isSafeInteger(val) || val < 0 || val >= 2 ** field.bit_width) throw new Error('数值超出位域宽度');
     const res: any = await safeInvoke('svd_write_field', {
       address: reg.address,
       bitOffset: field.bit_offset,

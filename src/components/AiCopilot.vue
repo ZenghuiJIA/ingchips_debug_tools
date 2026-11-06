@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import { parseHardwareIntent } from '../utils/hardwareContracts';
 import { t } from '../utils/i18n';
 import type { ChatMessage } from '../types';
 import {
@@ -64,9 +65,25 @@ async function handleSendMessage(customPrompt?: string) {
 
   try {
     // Check if query matches hardware actions for direct MCP tool execution
-    const lower = prompt.toLowerCase();
+    const intent = parseHardwareIntent(prompt);
+    if (!intent) {
+      addMessage('assistant', '未执行硬件操作。此页支持完整快捷命令，不解析自由问答。请使用下方快捷按钮；写内存必须明确提供地址和值。');
+      return;
+    }
+    let probeId: string | null = null;
+    let portName: string | null = null;
+    if (['fault', 'read', 'write'].includes(intent.action)) {
+      const probes = await safeInvoke<any[]>('pyocd_list_probes');
+      if (probes.length !== 1) throw new Error('需要且仅允许连接一只探针；多探针请在对应工具页明确选择');
+      probeId = probes[0].unique_id;
+    }
+    if (intent.action === 'reset' || intent.action === 'boot') {
+      const ports = await safeInvoke<string[]>('list_active_serial_sessions');
+      if (ports.length !== 1) throw new Error('请保留一个已连接的目标串口再执行复位');
+      portName = ports[0];
+    }
 
-    if (lower.includes('hardfault') || lower.includes('故障') || lower.includes('崩溃') || lower.includes('死机')) {
+    if (intent.action === 'fault') {
       // Execute diagnose_hardfault tool
       addMessage('assistant', '正在调用 MCP 硬件工具 `diagnose_hardfault` 读取 ARM Cortex-M 寄存器现场...', {
         name: 'diagnose_hardfault',
@@ -75,7 +92,7 @@ async function handleSendMessage(customPrompt?: string) {
       });
 
       const res: any = await safeInvoke('pyocd_diagnose_hardfault', {
-        probeId: null,
+        probeId,
         targetOverride: 'cortex_m'
       });
 
@@ -112,7 +129,7 @@ async function handleSendMessage(customPrompt?: string) {
 
       addMessage('assistant', aiAnalysis);
 
-    } else if (lower.includes('复位') || lower.includes('reset') || lower.includes('重启')) {
+    } else if (intent.action === 'reset') {
       // Execute hardware reset tool
       addMessage('assistant', '正在通过 MCP 硬件引脚状态机下发 `normal_reset` (RTS 设为 0 -> 100ms DTR 复位脉冲)...', {
         name: 'hardware_serial_control',
@@ -120,7 +137,7 @@ async function handleSendMessage(customPrompt?: string) {
         status: 'running'
       });
 
-      await safeInvoke('execute_reset_sequence', { seqType: 'normal_reset' });
+      await safeInvoke('execute_reset_sequence', { seqType: 'normal_reset', portName });
 
       messages.value[messages.value.length - 1].tool_call = {
         name: 'hardware_serial_control',
@@ -131,7 +148,7 @@ async function handleSendMessage(customPrompt?: string) {
 
       addMessage('assistant', '✅ 单片机普通复位完成。RTS 保持 0 (正常态)，DTR 复位完成，MCU 正在从 Flash 起始地址正常重启运行。');
 
-    } else if (lower.includes('探针') || lower.includes('probe') || lower.includes('daplink')) {
+    } else if (intent.action === 'probes') {
       addMessage('assistant', '正在通过 MCP 协议扫描系统总线上的调试器探针...', {
         name: 'list_probes',
         arguments: {},
@@ -153,14 +170,14 @@ async function handleSendMessage(customPrompt?: string) {
         addMessage('assistant', '⚠️ 未发现已连接的 DAPLink / CMSIS-DAP 探针，请检查 USB 接口与供电。');
       }
 
-    } else if (lower.includes('boot') || lower.includes('引导') || lower.includes('isp')) {
+    } else if (intent.action === 'boot') {
       addMessage('assistant', '正在通过 MCP 状态机触发进入 ISP Bootloader 模式 (RTS 设为 1 -> 等待 500ms 电平建立 -> 100ms DTR 复位脉冲)...', {
         name: 'hardware_serial_control',
         arguments: { action: 'bootloader_reset' },
         status: 'running'
       });
 
-      await safeInvoke('execute_reset_sequence', { seqType: 'bootloader_reset' });
+      await safeInvoke('execute_reset_sequence', { seqType: 'bootloader_reset', portName });
 
       messages.value[messages.value.length - 1].tool_call = {
         name: 'hardware_serial_control',
@@ -171,10 +188,9 @@ async function handleSendMessage(customPrompt?: string) {
 
       addMessage('assistant', '⚡ 单片机已成功切换至 System Bootloader (ISP) 引导模式 (RTS 1 维持 500ms 后复位触发)！');
 
-    } else if ((lower.includes('读') || lower.includes('read')) && (lower.includes('ram') || lower.includes('mem') || lower.includes('内存') || lower.includes('0x'))) {
+    } else if (intent.action === 'read') {
       // Parse address if specified
-      const addrMatch = prompt.match(/0x[0-9a-fA-F]+/);
-      const targetAddr = addrMatch ? addrMatch[0] : '0x20000000';
+      const targetAddr = intent.address!;
       const count = 16;
 
       addMessage('assistant', `正在调用 MCP 工具 \`read_memory\` 读取内存地址 ${targetAddr}...`, {
@@ -186,7 +202,7 @@ async function handleSendMessage(customPrompt?: string) {
       const res: any = await safeInvoke('pyocd_read_memory', {
         address: targetAddr,
         count,
-        probeId: null,
+        probeId,
         targetOverride: 'cortex_m'
       });
 
@@ -199,10 +215,9 @@ async function handleSendMessage(customPrompt?: string) {
 
       addMessage('assistant', `✅ 成功通过 MCP 读取内存 **${res.address || targetAddr}** (16 字节):\n\`\`\`\nHEX: ${res.hex_dump || 'N/A'}\n\`\`\`\n原始字节: \`[${res.bytes?.join(', ')}]\``);
 
-    } else if ((lower.includes('写') || lower.includes('write') || lower.includes('修改')) && (lower.includes('ram') || lower.includes('mem') || lower.includes('内存') || lower.includes('0x'))) {
-      const allHex = prompt.match(/0x[0-9a-fA-F]+/g) || [];
-      const targetAddr = allHex[0] || '0x20000000';
-      const valStr = allHex.length > 1 ? allHex[1] : '0x12345678';
+    } else if (intent.action === 'write') {
+      const targetAddr = intent.address!;
+      const valStr = intent.value!;
 
       addMessage('assistant', `正在调用 MCP 工具 \`write_memory\` 向地址 ${targetAddr} 写入 ${valStr}...`, {
         name: 'write_memory',
@@ -213,7 +228,7 @@ async function handleSendMessage(customPrompt?: string) {
       const res: any = await safeInvoke('pyocd_write_memory', {
         address: targetAddr,
         value: valStr,
-        probeId: null,
+        probeId,
         targetOverride: 'cortex_m'
       });
 
@@ -260,7 +275,7 @@ onMounted(() => {
       </div>
       <div class="flex items-center gap-2 text-[11px] text-zinc-400">
         <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-        <span>MCP Server (stdio) 在线</span>
+        <span>快捷命令模式 · 执行时检查连接</span>
       </div>
     </div>
 

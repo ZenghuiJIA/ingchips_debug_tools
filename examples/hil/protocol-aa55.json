@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "AA55 example - replace with actual board protocol",
+  "header": [170, 85],
+  "fixed_length": 7,
+  "endian": "little",
+  "checksum": { "algorithm": "sum8", "offset": 6, "start": 0 },
+  "partial_timeout_ms": 1000,
+  "fields": [
+    { "name": "seq", "offset": 2, "type": "uint8" },
+    { "name": "value", "offset": 3, "type": "int16" },
+    { "name": "status", "offset": 5, "type": "uint8", "labels": { "0": "OK", "1": "BUSY" } }
+  ]
+}
