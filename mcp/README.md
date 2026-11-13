@@ -10,8 +10,9 @@
 
 * **通信协议**：基于标准 **JSON-RPC 2.0** over `stdio`（标准输入输出）；
 * **独立运行**：支持两种运行形态：
-  1. **独立二进制发布形态（推荐）**：`bin/hil-daemon-x86_64-pc-windows-msvc.exe --mode stdio-mcp`（无需目标机安装 Python 环境）；
-  2. **Python 源码形态**：`python src-tauri/daemon/daemon_entry.py --mode stdio-mcp`（需依赖 `pyocd`、`pyserial`）。
+  1. **Rust 原生发布形态（推荐）**：`bin/hil-native.exe --mode stdio-mcp`（串口、UI 共享、离线分析和 HIL 计划不启动 Python）；
+  2. **兼容二进制形态**：`bin/hil-daemon-x86_64-pc-windows-msvc.exe --mode stdio-mcp`（旧入口，硬件探针能力仍可用）；
+  3. **Python 源码形态**：`python src-tauri/daemon/daemon_entry.py --mode stdio-mcp`（仅在没有原生二进制时使用，需 `pyocd`、`pyserial`）。
 * **物理依赖**：USB 连接的 DAPLink / CMSIS-DAP 调试器（支持 ARM Cortex-M0/M3/M4/M7/M33 全系，如 STM32, RP2040, NRF52, ING918 等）。
 
 ---
@@ -70,7 +71,7 @@ install_mcp.bat
 {
   "mcpServers": {
     "embedded-hil-debugger": {
-      "command": "C:\\ming\\source\\tools\\test_tools\\bin\\hil-daemon-x86_64-pc-windows-msvc.exe",
+      "command": "C:\\ming\\source\\tools\\test_tools\\bin\\hil-native.exe",
       "args": ["--mode", "stdio-mcp"]
     }
   }
@@ -83,7 +84,7 @@ install_mcp.bat
 {
   "mcpServers": {
     "embedded-hil-debugger": {
-      "command": "C:\\ming\\source\\tools\\test_tools\\bin\\hil-daemon-x86_64-pc-windows-msvc.exe",
+      "command": "C:\\ming\\source\\tools\\test_tools\\bin\\hil-native.exe",
       "args": ["--mode", "stdio-mcp"]
     }
   }
@@ -96,7 +97,7 @@ install_mcp.bat
 {
   "mcpServers": {
     "embedded-hil-debugger": {
-      "command": "C:\\ming\\source\\tools\\test_tools\\bin\\hil-daemon-x86_64-pc-windows-msvc.exe",
+      "command": "C:\\ming\\source\\tools\\test_tools\\bin\\hil-native.exe",
       "args": ["--mode", "stdio-mcp"]
     }
   }
@@ -107,7 +108,7 @@ install_mcp.bat
 文件路径：`~/.codex/config.toml`
 ```toml
 [mcp_servers.embedded_hil_debugger]
-command = 'C:\ming\source\tools\test_tools\bin\hil-daemon-x86_64-pc-windows-msvc.exe'
+command = 'C:\ming\source\tools\test_tools\bin\hil-native.exe'
 args = ["--mode", "stdio-mcp"]
 ```
 
@@ -117,7 +118,7 @@ args = ["--mode", "stdio-mcp"]
 {
   "mcpServers": {
     "embedded-hil-debugger": {
-      "command": "C:\\ming\\source\\tools\\test_tools\\bin\\hil-daemon-x86_64-pc-windows-msvc.exe",
+      "command": "C:\\ming\\source\\tools\\test_tools\\bin\\hil-native.exe",
       "args": ["--mode", "stdio-mcp"]
     }
   }

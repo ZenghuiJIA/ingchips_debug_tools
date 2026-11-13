@@ -14,8 +14,31 @@ fn dispatch(
     args: &Value,
 ) -> Result<Value, String> {
     match method {
+        "get_ui_state" => match hil_runtime::ui_bridge::call("get_ui_state", args)? {
+            Some(value) => Ok(value),
+            None => Ok(json!({
+                "status": "standalone",
+                "owner": "mcp-native",
+                "serial_sessions": [],
+                "capabilities": {"serial_read": true, "serial_write": true, "serial_close": true, "serial_reset": false}
+            })),
+        },
+        "get_serial_snapshot" => hil_runtime::ui_bridge::call("get_serial_snapshot", args)?
+            .ok_or_else(|| "Desktop UI bridge is not available; no shared serial snapshot exists".into()),
         "list_serial_ports" | "open_serial_port" | "close_serial_port" | "send_serial_data"
-        | "read_serial_data" => hil_runtime::serial_api::dispatch(method, args),
+        | "read_serial_data" => match hil_runtime::ui_bridge::call(method, args)? {
+            Some(value) => Ok(value),
+            None => hil_runtime::serial_api::dispatch(method, args),
+        },
+        "reset_serial" => match hil_runtime::ui_bridge::call(method, args)? {
+            Some(value) => Ok(value),
+            None => {
+                if bridge.is_none() {
+                    *bridge = Some(Bridge::start()?);
+                }
+                bridge.as_mut().unwrap().call(method, args.clone(), Duration::from_secs(30))
+            }
+        },
         "read_memory_image" | "inspect_firmware_file" | "merge_hex_files" | "merge_bin_files" => {
             hil_runtime::image::dispatch(method, args)
         }
@@ -187,7 +210,10 @@ fn run() -> Result<(), String> {
             _ => 2,
         });
     }
-    if arguments
+    let stdio_mcp = arguments.windows(2).any(|pair| {
+        pair[0] == "--mode" && pair[1] == "stdio-mcp"
+    });
+    if !stdio_mcp && arguments
         .iter()
         .any(|a| ["--file", "--mode", "--validate", "--help"].contains(&a.as_str()))
     {

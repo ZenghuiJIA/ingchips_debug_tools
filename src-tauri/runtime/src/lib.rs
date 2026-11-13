@@ -13,3 +13,4 @@ pub mod stop;
 pub mod stream;
 pub mod svd;
 pub mod symbols;
+pub mod ui_bridge;

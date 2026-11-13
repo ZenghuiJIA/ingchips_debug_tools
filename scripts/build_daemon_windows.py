@@ -24,6 +24,10 @@ TARGET_PATHS = [
     ROOT_DIR / "src-tauri" / "target" / "release" / OUT_EXE_NAME,
     ROOT_DIR / "src-tauri" / "target" / "debug" / OUT_EXE_NAME,
 ]
+NATIVE_TARGET_PATHS = [
+    ROOT_DIR / "bin" / "hil-native.exe",
+    ROOT_DIR / "src-tauri" / "binaries" / "hil-native.exe",
+]
 
 def kill_locking_processes():
     """Terminate any background instances holding locks on the target binary."""
@@ -138,7 +142,7 @@ def build_executable():
 
 def sync_binaries(built_exe: Path, dist_dir: Path, work_dir: Path):
     """Update workspace launch locations without terminating active debugging sessions."""
-    for target in TARGET_PATHS:
+    for target in [*TARGET_PATHS, *NATIVE_TARGET_PATHS]:
         target.parent.mkdir(parents=True, exist_ok=True)
         staging = target.with_suffix(".exe.new")
         try:
@@ -202,6 +206,8 @@ def build_native_runtime():
     source = ROOT_DIR / 'src-tauri/target/release/hil-native.exe'
     output = ROOT_DIR / 'build_dist/hil-native.exe'
     shutil.copy2(source, output)
+    (ROOT_DIR / 'bin').mkdir(parents=True, exist_ok=True)
+    shutil.copy2(output, ROOT_DIR / 'bin' / 'hil-native.exe')
     sys.path.insert(0, str(SRC_ENTRY.parent))
     import daemon_entry
     catalog = {'tools': daemon_entry.MCP_TOOLS}

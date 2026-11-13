@@ -10,6 +10,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
 
 candidates = [
+    # Native runtime keeps the common MCP/UI/serial path free of Python.
+    ROOT_DIR / "bin" / "hil-native.exe",
+    ROOT_DIR / "build_dist" / "hil-native.exe",
     ROOT_DIR / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe",
 ]
 # 动态寻找 release/AI-HIL-Debugger-*/bin 下的 daemon
@@ -17,6 +20,7 @@ release_dir = ROOT_DIR / "release"
 if release_dir.exists():
     for sub in release_dir.glob("AI-HIL-Debugger-*"):
         if sub.is_dir():
+            candidates.append(sub / "bin" / "hil-native.exe")
             candidates.append(sub / "bin" / "hil-daemon-x86_64-pc-windows-msvc.exe")
 
 found_exe = next((p for p in candidates if p.exists()), candidates[0])
@@ -36,7 +40,7 @@ else:
 USER_HOME = Path.home()
 
 def is_same_daemon(cmd_str: str) -> bool:
-    """Check if an existing command points to a valid hil-daemon executable."""
+    """Check if an existing command points to either supported runtime."""
     if not cmd_str:
         return False
     if cmd_str == DAEMON_EXE:
@@ -46,7 +50,10 @@ def is_same_daemon(cmd_str: str) -> bool:
         p2 = Path(DAEMON_EXE).resolve()
         if p1 == p2:
             return True
-        if p1.exists() and "hil-daemon" in p1.name:
+        if p1.exists() and p1.name.lower() in {
+            "hil-native.exe",
+            "hil-daemon-x86_64-pc-windows-msvc.exe",
+        }:
             return True
     except Exception:
         pass

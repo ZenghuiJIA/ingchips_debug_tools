@@ -12,6 +12,8 @@ description: >-
 
 MCP 与桌面 UI 共享同一个 Rust 串口捕获和状态源。开始任何硬件动作前，先调用 `get_ui_state`；如果目标串口在 `serial_sessions` 中且 `owner` 为 `desktop-ui`，MCP 只能调用 `get_serial_snapshot`、`read_serial_data` 等只读接口。
 
+优先连接 Rust 原生 `hil-native.exe --mode stdio-mcp`。它直接处理串口、UI 共享、快照、离线文件分析和 HIL 计划；只有调用 PyOCD/J-Link、CMSIS-Pack、SVD 或其他探针兼容能力时，才按需启动 Python worker。
+
 - `open_serial_port` 默认使用 `access_mode="observe"`，只能观察已由 UI 打开的串口，不会替 UI 创建会话或改变波特率。
 - `send_serial_data`、`close_serial_port`、`reset_serial`、RTS/DTR 脉冲和通过串口进入 bootloader 都是独占控制；UI 持有资源时必须接受结构化 `resource_busy`，不能重试抢占、关闭或复位。
 - 需要写入、烧录或复位时，先确认 UI 已释放目标并重新调用 `get_ui_state`。探针写操作同样遵守现有 probe lease；不要因 `list_probes` 返回设备就默认可以连接。
