@@ -13,6 +13,7 @@
   1. **Rust 原生发布形态（推荐）**：`bin/hil-native.exe --mode stdio-mcp`（串口、UI 共享、离线分析和 HIL 计划不启动 Python）；
   2. **兼容二进制形态**：`bin/hil-daemon-x86_64-pc-windows-msvc.exe --mode stdio-mcp`（旧入口，硬件探针能力仍可用）；
   3. **Python 源码形态**：`python src-tauri/daemon/daemon_entry.py --mode stdio-mcp`（仅在没有原生二进制时使用，需 `pyocd`、`pyserial`）。
+* **兼容模式延迟加载**：Python daemon 启动时只加载 MCP、文件和 UI bridge 基础代码；PyOCD/J-Link、CMSIS-Pack、pyserial、IntelHex 和 HIL runner 在首次调用对应工具时才加载。UI bridge 可用时，串口只读请求不会加载 pyserial。
 * **物理依赖**：USB 连接的 DAPLink / CMSIS-DAP 调试器（支持 ARM Cortex-M0/M3/M4/M7/M33 全系，如 STM32, RP2040, NRF52, ING918 等）。
 
 ---

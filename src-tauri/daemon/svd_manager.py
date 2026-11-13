@@ -83,8 +83,8 @@ class SvdManager:
 
     @classmethod
     def get_loaded_packs(cls) -> List[Any]:
-        from daemon_entry import discover_and_load_packs, CMSIS_PACK_AVAILABLE
-        if not CMSIS_PACK_AVAILABLE:
+        from daemon_entry import discover_and_load_packs, ensure_cmsis_pack
+        if not ensure_cmsis_pack():
             return []
         from pyocd.target.pack.cmsis_pack import CmsisPack
 
@@ -109,6 +109,10 @@ class SvdManager:
 
         # Invalidate SVD parsed tree cache
         cls._svd_root_cache.clear()
+
+        from daemon_entry import ensure_cmsis_pack
+        if not ensure_cmsis_pack():
+            raise RuntimeError("CMSIS-Pack support is unavailable in this daemon build")
 
         # Register targets and flash algorithms into PyOCD
         try:

@@ -39,53 +39,123 @@ logging.basicConfig(
 )
 logger = logging.getLogger("hil_daemon")
 
-try:
-    import pyocd
-    from pyocd.core.helpers import ConnectHelper
-    from pyocd.core.session import Session
-    from pyocd.core.target import Target
-    from pyocd.flash.file_programmer import FileProgrammer
-    PYOCD_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"PyOCD import warning: {e}")
-    PYOCD_AVAILABLE = False
+# Optional integrations are intentionally imported on first use.  The MCP
+# compatibility process can serve UI/serial bridge calls without importing
+# PyOCD, PyLink, CMSIS-Pack, pyserial, IntelHex or the HIL runner.
+pyocd = None
+ConnectHelper = Session = Target = FileProgrammer = None
+pylink = None
+CmsisPack = PackTargets = TARGET = None
+serial = None
+HilRunner = None
+IntelHex = None
+PYOCD_AVAILABLE = None
+PYLINK_AVAILABLE = None
+CMSIS_PACK_AVAILABLE = None
+SERIAL_AVAILABLE = None
+HIL_RUNNER_AVAILABLE = None
+INTELHEX_AVAILABLE = None
 
-try:
-    import pylink
-    PYLINK_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"PyLink import warning: {e}")
-    PYLINK_AVAILABLE = False
 
-try:
-    from pyocd.target.pack.cmsis_pack import CmsisPack
-    from pyocd.target.pack.pack_target import PackTargets
-    from pyocd.target import TARGET
-    CMSIS_PACK_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"CMSIS Pack import warning: {e}")
-    CMSIS_PACK_AVAILABLE = False
+def ensure_pyocd() -> bool:
+    """Load PyOCD only when a probe operation is requested."""
+    global pyocd, ConnectHelper, Session, Target, FileProgrammer, PYOCD_AVAILABLE
+    if PYOCD_AVAILABLE is not None:
+        return PYOCD_AVAILABLE
+    try:
+        import pyocd as pyocd_module
+        from pyocd.core.helpers import ConnectHelper as connect_helper
+        from pyocd.core.session import Session as session
+        from pyocd.core.target import Target as target
+        from pyocd.flash.file_programmer import FileProgrammer as file_programmer
+        pyocd = pyocd_module
+        ConnectHelper, Session, Target, FileProgrammer = connect_helper, session, target, file_programmer
+        PYOCD_AVAILABLE = True
+    except Exception as error:
+        logger.warning(f"PyOCD import warning: {error}")
+        PYOCD_AVAILABLE = False
+    return PYOCD_AVAILABLE
 
-try:
-    import serial
-    import serial.tools.list_ports
-    SERIAL_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"pyserial import warning: {e}")
-    SERIAL_AVAILABLE = False
 
-try:
-    from hil.runner import HilRunner
-except Exception as e:
-    HilRunner = None
-    logger.warning(f"HIL runner import warning: {e}")
+def ensure_pylink() -> bool:
+    """Load the optional J-Link binding only for J-Link operations."""
+    global pylink, PYLINK_AVAILABLE
+    if PYLINK_AVAILABLE is not None:
+        return PYLINK_AVAILABLE
+    try:
+        import pylink as pylink_module
+        pylink = pylink_module
+        PYLINK_AVAILABLE = True
+    except Exception as error:
+        logger.warning(f"PyLink import warning: {error}")
+        PYLINK_AVAILABLE = False
+    return PYLINK_AVAILABLE
 
-try:
-    from intelhex import IntelHex
-    INTELHEX_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"intelhex import warning: {e}")
-    INTELHEX_AVAILABLE = False
+
+def ensure_cmsis_pack() -> bool:
+    """Load CMSIS-Pack support only for pack discovery or SVD operations."""
+    global CmsisPack, PackTargets, TARGET, CMSIS_PACK_AVAILABLE
+    if CMSIS_PACK_AVAILABLE is not None:
+        return CMSIS_PACK_AVAILABLE
+    if not ensure_pyocd():
+        CMSIS_PACK_AVAILABLE = False
+        return False
+    try:
+        from pyocd.target.pack.cmsis_pack import CmsisPack as cmsis_pack
+        from pyocd.target.pack.pack_target import PackTargets as pack_targets
+        from pyocd.target import TARGET as target_registry
+        CmsisPack, PackTargets, TARGET = cmsis_pack, pack_targets, target_registry
+        CMSIS_PACK_AVAILABLE = True
+    except Exception as error:
+        logger.warning(f"CMSIS Pack import warning: {error}")
+        CMSIS_PACK_AVAILABLE = False
+    return CMSIS_PACK_AVAILABLE
+
+
+def ensure_serial() -> bool:
+    """Load pyserial only when the native UI bridge cannot serve the request."""
+    global serial, SERIAL_AVAILABLE
+    if SERIAL_AVAILABLE is not None:
+        return SERIAL_AVAILABLE
+    try:
+        import serial as serial_module
+        import serial.tools.list_ports
+        serial = serial_module
+        SERIAL_AVAILABLE = True
+    except Exception as error:
+        logger.warning(f"pyserial import warning: {error}")
+        SERIAL_AVAILABLE = False
+    return SERIAL_AVAILABLE
+
+
+def ensure_hil_runner() -> bool:
+    """Load the HIL document runner only when a HIL job is requested."""
+    global HilRunner, HIL_RUNNER_AVAILABLE
+    if HIL_RUNNER_AVAILABLE is not None:
+        return HIL_RUNNER_AVAILABLE
+    try:
+        from hil.runner import HilRunner as hil_runner
+        HilRunner = hil_runner
+        HIL_RUNNER_AVAILABLE = True
+    except Exception as error:
+        logger.warning(f"HIL runner import warning: {error}")
+        HIL_RUNNER_AVAILABLE = False
+    return HIL_RUNNER_AVAILABLE
+
+
+def ensure_intelhex() -> bool:
+    """Load IntelHex only for HEX inspection or merge operations."""
+    global IntelHex, INTELHEX_AVAILABLE
+    if INTELHEX_AVAILABLE is not None:
+        return INTELHEX_AVAILABLE
+    try:
+        from intelhex import IntelHex as intel_hex
+        IntelHex = intel_hex
+        INTELHEX_AVAILABLE = True
+    except Exception as error:
+        logger.warning(f"intelhex import warning: {error}")
+        INTELHEX_AVAILABLE = False
+    return INTELHEX_AVAILABLE
 
 _DISCOVERED_PACKS = []
 _PACKS_LOCK = threading.Lock()
@@ -109,7 +179,7 @@ def get_primary_packs_dir() -> str:
 def discover_and_load_packs() -> List[str]:
     """Find and dynamically populate targets & algorithms from .pack files in packs/ directories."""
     global _DISCOVERED_PACKS
-    if not CMSIS_PACK_AVAILABLE:
+    if not ensure_cmsis_pack():
         return []
 
     with _PACKS_LOCK:
@@ -374,7 +444,7 @@ class PyOCDController:
     @classmethod
     def _create_session(cls, probe_id: Optional[str] = None, target_override: Optional[str] = None,
                         auto_open: bool = True, pack: Optional[str] = None, frequency: Optional[int] = None):
-        if not PYOCD_AVAILABLE:
+        if not ensure_pyocd():
             raise RuntimeError("PyOCD is not available.")
         discover_and_load_packs()
         if pack and os.path.isfile(pack):
@@ -402,7 +472,7 @@ class PyOCDController:
 
     @staticmethod
     def list_probes() -> List[Dict[str, Any]]:
-        if not PYOCD_AVAILABLE:
+        if not ensure_pyocd():
             return []
         try:
             probes = ConnectHelper.get_all_connected_probes(blocking=False)
@@ -914,7 +984,7 @@ class RTTController:
 
             cls._running = True
 
-            if chosen_type == "jlink" and PYLINK_AVAILABLE:
+            if chosen_type == "jlink" and ensure_pylink():
                 try:
                     cls._start_jlink(probe_id, target_override, block_address)
                     cls._mode = "jlink"
@@ -1922,7 +1992,7 @@ class FirmwareMerger:
         file_size = os.path.getsize(file_path)
 
         if t == "hex":
-            if not INTELHEX_AVAILABLE:
+            if not ensure_intelhex():
                 raise RuntimeError("Python intelhex 模块未就绪，无法解析 HEX 文件")
             ih = IntelHex(file_path)
             if len(ih) == 0:
@@ -1989,7 +2059,7 @@ class FirmwareMerger:
         - overlap_strategy: 'error' (raise on conflict), 'ignore' (keep earlier), 'replace' (newer overwrites earlier)
         - pad_byte: Filler byte (default 0xFF) when exporting to BIN
         """
-        if not INTELHEX_AVAILABLE:
+        if not ensure_intelhex():
             raise RuntimeError("Python intelhex 模块未就绪，无法执行 HEX 合并")
 
         if not files:
@@ -2078,7 +2148,7 @@ class FirmwareMerger:
         if not files:
             raise ValueError("未指定要合并的 BIN 文件列表")
 
-        if not INTELHEX_AVAILABLE:
+        if not ensure_intelhex():
             raise RuntimeError("Python intelhex 模块未就绪，无法执行 BIN 地址合并")
 
         merged = IntelHex()
@@ -2210,7 +2280,7 @@ class JScopeController:
                         chosen_type = p.get("probe_type", "generic")
                         break
 
-            if chosen_type == "jlink" and PYLINK_AVAILABLE:
+            if chosen_type == "jlink" and ensure_pylink():
                 try:
                     cls._lease = ProbeLease(probe_id)
                     cls._jlink = pylink.JLink()
@@ -2540,14 +2610,14 @@ class SerialController:
     @classmethod
     def list_ports(cls) -> List[Dict[str, Any]]:
         """枚举系统当前所有可用串口及状态。"""
-        if not SERIAL_AVAILABLE:
-            raise RuntimeError("pyserial 未安装或不可用")
-
         bridge_resp = DesktopBridgeClient.call_bridge("list_ports")
         raise_bridge_error(bridge_resp, "serial:enumeration")
         if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") in ("ok", "shared_read_only", "opened_shared", "already_open")):
             res = bridge_resp.get("result") if isinstance(bridge_resp.get("result"), dict) else bridge_resp
             return res.get("ports", bridge_resp.get("ports", []))
+
+        if not ensure_serial():
+            raise RuntimeError("pyserial 未安装或不可用")
 
         ports = serial.tools.list_ports.comports()
         result = []
@@ -2604,9 +2674,6 @@ class SerialController:
         access_mode: str = "control"
     ) -> Dict[str, Any]:
         """打开指定串口。"""
-        if not SERIAL_AVAILABLE:
-            raise RuntimeError("pyserial 未安装或不可用")
-
         port_name = port_name.strip().upper() if port_name.upper().startswith("COM") else port_name.strip()
         if access_mode not in ("observe", "control"):
             raise ValueError("access_mode must be observe or control")
@@ -2626,6 +2693,9 @@ class SerialController:
                 "read_only": res.get("read_only", access_mode == "observe"),
                 "message": res.get("message", "Port shared with desktop")
             }
+
+        if not ensure_serial():
+            raise RuntimeError("pyserial 未安装或不可用")
 
         with cls._lock:
             if port_name in cls._ports and cls._ports[port_name].is_open:
@@ -3462,7 +3532,7 @@ _HIL_RUNNER_LOCK = threading.Lock()
 
 def get_hil_runner() -> "HilRunner":
     global _HIL_RUNNER
-    if HilRunner is None:
+    if not ensure_hil_runner():
         raise RuntimeError('HIL runner is unavailable in this daemon build')
     with _HIL_RUNNER_LOCK:
         if _HIL_RUNNER is None:
@@ -3608,6 +3678,8 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
             raise ValueError('Invalid memory image range')
         path = arguments['file_path']
         if str(path).lower().endswith(('.hex', '.ihex')):
+            if not ensure_intelhex():
+                raise RuntimeError('Python intelhex 模块未就绪，无法读取 HEX 文件')
             image = IntelHex(path)
             if not any(start < address + count and end > address for start, end in image.segments()):
                 raise ValueError('HEX file has no data in the selected address range')
@@ -4106,6 +4178,8 @@ if __name__ == "__main__":
                     Path(args.report_dir) / ('replay-' + uuid.uuid4().hex[:12]))
                 print(json.dumps(report, ensure_ascii=False), flush=True)
                 sys.exit(0 if report['state'] == 'PASS' else 1)
+            if not ensure_hil_runner():
+                raise RuntimeError('HIL runner is unavailable in this daemon build')
             runner = HilRunner(report_root=args.report_dir)
             state = runner.start(file=args.file, parameters=overrides)
             print(json.dumps(state, ensure_ascii=False), flush=True)

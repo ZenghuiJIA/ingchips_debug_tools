@@ -17,6 +17,8 @@ MCP 的 `get_ui_state` 和 `get_serial_snapshot` 是只读接口；`open_serial_
 
 v1.7.0 使用 `hil-runtime` 原生执行纯串口/HIL/离线处理及 HIL ING 下载。`hil-debug-core` 提供协议和记录核心。桌面、CLI、MCP 共用相同的任务接口；需要实际 SWD/J-Link/PyOCD 的操作才通过受限 Python worker。Python worker 只接受短请求，拥有自己的超时、进程树和探针租约。
 
+兼容 Python daemon 也采用延迟导入：基础 MCP/bridge 启动不加载 PyOCD、PyLink、CMSIS-Pack、pyserial、IntelHex 或 HIL runner；首次进入对应工具分支时才初始化依赖。这样旧客户端仍能使用原协议，同时避免普通 UI 状态和串口观察请求承担探针栈的启动与常驻内存开销。
+
 发布包中的三个相关程序：
 
 | 文件 | 用途 |
