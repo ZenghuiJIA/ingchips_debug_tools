@@ -25,7 +25,7 @@ DAEMON_FALLBACK_PY = str(ROOT_DIR / "src-tauri" / "daemon" / "daemon_entry.py")
 
 SERVER_ID = "embedded-hil-debugger"
 SERVER_NAME = "embedded-hil-debugger"
-SERVER_DESC = "AI 嵌入式硬件在环(HIL)测试与调试系统 (DAPLink串口/SWD烧录/寄存器分析/HardFault自动诊断)"
+SERVER_DESC = "AI 嵌入式 HIL 调试服务（Rust 串口/UI 只读共享、SWD 烧录、寄存器分析与 HardFault 诊断）"
 
 if not os.path.exists(DAEMON_EXE):
     print(f"[WARN] Daemon binary not found at: {DAEMON_EXE}")
@@ -271,6 +271,38 @@ def deploy_to_gemini():
     except Exception as e:
         print(f"  [ERROR] Failed to update Gemini configuration: {e}")
 
+
+def deploy_to_json_agent(label: str, config_path: Path, key: str = "mcpServers"):
+    """Deploy the same stdio entry to Cursor/Windsurf-style JSON configs."""
+    print(f"\n[5b] Deploying to {label} ({config_path})...")
+    try:
+        data = {}
+        if config_path.exists():
+            try:
+                data = json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        servers = data.get(key, {})
+        if not isinstance(servers, dict):
+            servers = {}
+        current = servers.get(SERVER_ID)
+        if isinstance(current, dict) and is_same_daemon(current.get("command", "")) and current.get("args") == ["--mode", "stdio-mcp"]:
+            print(f"  [EXISTS] {label} already points to the current daemon (Skipping)")
+            return
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_file(config_path)
+        servers[SERVER_ID] = {"command": DAEMON_EXE, "args": ["--mode", "stdio-mcp"]}
+        data[key] = servers
+        config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"  [OK] Successfully added '{SERVER_ID}' to {label}")
+    except Exception as e:
+        print(f"  [ERROR] Failed to update {label}: {e}")
+
+
+def deploy_to_cursor_and_windsurf():
+    deploy_to_json_agent("Cursor", USER_HOME / ".cursor" / "mcp.json")
+    deploy_to_json_agent("Windsurf", USER_HOME / ".codeium" / "windsurf" / "mcp_config.json")
+
 def deploy_to_claude_desktop():
     print(f"\n[6/7] Deploying to Claude Desktop (%APPDATA%/Claude/claude_desktop_config.json)...")
     appdata = os.getenv("APPDATA")
@@ -378,6 +410,7 @@ if __name__ == "__main__":
     deploy_to_codex()
     deploy_to_opencode()
     deploy_to_gemini()
+    deploy_to_cursor_and_windsurf()
     deploy_to_claude_desktop()
     deploy_to_deepseek_harness()
 

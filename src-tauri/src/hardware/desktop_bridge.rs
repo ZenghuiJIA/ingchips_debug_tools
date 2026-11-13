@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use super::serial_manager::SerialManager;
 
@@ -17,6 +17,10 @@ static BRIDGE_RUNNING: AtomicBool = AtomicBool::new(false);
 #[derive(Serialize, Deserialize)]
 struct BridgeRequest {
     action: String,
+    #[serde(default)]
+    access_mode: Option<String>,
+    #[serde(default)]
+    seq_type: Option<String>,
     port_name: Option<String>,
     baudrate: Option<u32>,
     data: Option<String>,
@@ -39,13 +43,6 @@ fn decode_hex_str(s: &str) -> Vec<u8> {
         }
     }
     b
-}
-
-fn get_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 pub struct DesktopBridgeServer;
@@ -149,7 +146,7 @@ impl DesktopBridgeServer {
 
     fn dispatch_action(
         req: &BridgeRequest,
-        app: &AppHandle,
+        _app: &AppHandle,
         serial: &Arc<SerialManager>,
         cursors: &Arc<Mutex<HashMap<String, u64>>>,
     ) -> Value {
@@ -179,8 +176,45 @@ impl DesktopBridgeServer {
                 json!({
                     "status": "ok",
                     "ports": ports_out,
-                    "active_sessions": active_sessions
+                    "active_sessions": active_sessions,
+                    "owner": "desktop-ui",
+                    "access": "read_only"
                 })
+            }
+
+            "get_ui_state" => json!({
+                "status": "ok",
+                "owner": "desktop-ui",
+                "pid": std::process::id(),
+                "serial_sessions": serial.session_snapshots(),
+                "capabilities": {
+                    "serial_read": true,
+                    "serial_write": false,
+                    "serial_close": false,
+                    "serial_reset": false
+                }
+            }),
+
+            "get_serial_snapshot" => {
+                let port = match &req.port_name {
+                    Some(p) => p.clone(),
+                    None => match serial.list_active_sessions().first() {
+                        Some(p) => p.clone(),
+                        None => return json!({"status": "error", "message": "No active desktop serial session"}),
+                    },
+                };
+                let after = req.after_cursor.unwrap_or(0);
+                let limit = req.max_bytes.unwrap_or(200).clamp(1, 1000);
+                match serial.capture_page(&port, after, limit) {
+                    Ok(page) => json!({
+                        "status": "ok",
+                        "owner": "desktop-ui",
+                        "port": port,
+                        "read_only": true,
+                        "page": page
+                    }),
+                    Err(e) => json!({"status": "error", "message": e}),
+                }
             }
 
             "open_port" => {
@@ -193,36 +227,52 @@ impl DesktopBridgeServer {
                 };
                 let baud = req.baudrate.unwrap_or(115200);
 
-                // If already open in desktop, return success immediately with shared state
-                if serial.list_active_sessions().contains(&port) {
-                    return json!({
-                        "status": "ok",
-                        "port": port,
-                        "baudrate": baud,
-                        "message": "Port already opened and shared with Vue desktop",
-                        "shared": true
-                    });
+                let access_mode = req.access_mode.as_deref().unwrap_or("observe");
+                if access_mode != "observe" && access_mode != "control" {
+                    return json!({"status": "error", "message": "access_mode must be observe or control"});
                 }
 
-                // If not open, let SerialManager open it so Vue & MCP share it
-                match serial.open(app.clone(), &port, baud) {
-                    Ok(_) => json!({
-                        "status": "ok",
+                // MCP may observe an existing UI session but must not create or
+                // reconfigure a desktop-owned session behind the user's back.
+                if serial.list_active_sessions().contains(&port) {
+                    if access_mode == "control" {
+                        return json!({
+                            "status": "resource_busy",
+                            "resource": format!("serial:{}", port),
+                            "owner": "desktop-ui",
+                            "retryable": true,
+                            "message": "串口由桌面 UI 持有；请在 UI 中发送/关闭，或先释放该会话"
+                        });
+                    }
+                    return json!({
+                        "status": "shared_read_only",
                         "port": port,
                         "baudrate": baud,
-                        "message": "Port opened in desktop and shared with MCP",
-                        "shared": true
-                    }),
-                    Err(e) => json!({"status": "error", "message": e}),
+                        "message": "Port is shared with Vue desktop in read-only mode",
+                        "shared": true,
+                        "owner": "desktop-ui",
+                        "read_only": true
+                    });
                 }
+                json!({
+                    "status": "resource_busy",
+                    "resource": format!("serial:{}", port),
+                    "owner": "desktop-ui",
+                    "retryable": true,
+                    "message": "桌面 bridge 不会替 MCP 创建新的串口会话；请先在 UI 打开串口"
+                })
             }
 
             "close_port" => {
                 let port = req.port_name.as_deref();
-                match serial.close(port) {
-                    Ok(_) => json!({"status": "ok", "message": "Port closed"}),
-                    Err(e) => json!({"status": "error", "message": e}),
-                }
+                let port_name = port.map(str::to_string).or_else(|| serial.list_active_sessions().first().cloned());
+                json!({
+                    "status": "resource_busy",
+                    "resource": port_name.map(|p| format!("serial:{}", p)).unwrap_or_else(|| "serial:unknown".into()),
+                    "owner": "desktop-ui",
+                    "retryable": true,
+                    "message": "串口由桌面 UI 持有；MCP 不能关闭 UI 会话"
+                })
             }
 
             "send_serial_data" => {
@@ -234,49 +284,24 @@ impl DesktopBridgeServer {
                     },
                 };
 
-                let raw_str = match &req.data {
-                    Some(d) => d,
-                    None => return json!({"status": "error", "message": "No data provided"}),
-                };
+                return json!({
+                    "status": "resource_busy",
+                    "resource": format!("serial:{}", port),
+                    "owner": "desktop-ui",
+                    "retryable": true,
+                    "message": "串口由桌面 UI 持有；MCP 默认只读，发送请通过 UI 或显式释放串口"
+                });
+            }
 
-                let mut bytes: Vec<u8> = if req.is_hex.unwrap_or(false) {
-                    let cleaned = raw_str.replace(|c: char| c.is_whitespace() || c == ',' || c == ':', "");
-                    if cleaned.len() % 2 != 0 {
-                        return json!({"status": "error", "message": "HEX data must have even number of characters"});
-                    }
-                    let mut b = Vec::new();
-                    for i in (0..cleaned.len()).step_by(2) {
-                        match u8::from_str_radix(&cleaned[i..i+2], 16) {
-                            Ok(v) => b.push(v),
-                            Err(e) => return json!({"status": "error", "message": format!("Invalid hex byte: {}", e)}),
-                        }
-                    }
-                    b
-                } else {
-                    raw_str.as_bytes().to_vec()
-                };
-
-                if req.append_crlf.unwrap_or(false) && !req.is_hex.unwrap_or(false) {
-                    bytes.extend_from_slice(b"\r\n");
-                }
-
-                match serial.write_data(&bytes, Some(&port)) {
-                    Ok(sent) => {
-                        // Notify Vue terminal about the AI-originated TX
-                        let _ = app.emit("serial-rx", json!({
-                            "port": port,
-                            "data": bytes,
-                            "timestamp_ms": get_timestamp_ms(),
-                            "source": "mcp-agent"
-                        }));
-                        json!({
-                            "status": "ok",
-                            "port": port,
-                            "bytes_sent": sent
-                        })
-                    }
-                    Err(e) => json!({"status": "error", "message": e}),
-                }
+            "reset_serial" => {
+                let port = req.port_name.clone().or_else(|| serial.list_active_sessions().first().cloned());
+                json!({
+                    "status": "resource_busy",
+                    "resource": port.map(|p| format!("serial:{}", p)).unwrap_or_else(|| "serial:unknown".into()),
+                    "owner": "desktop-ui",
+                    "retryable": true,
+                    "message": "串口 RTS/DTR 复位属于独占控制，MCP 不会抢占 UI 会话；请在 UI 执行"
+                })
             }
 
             "read_serial_data" => {

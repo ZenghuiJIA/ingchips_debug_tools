@@ -8,6 +8,18 @@ description: >-
 
 # Embedded HIL Debugger & Hardware MCP Skill
 
+## 0. UI 共享与资源所有权（必须先遵守）
+
+MCP 与桌面 UI 共享同一个 Rust 串口捕获和状态源。开始任何硬件动作前，先调用 `get_ui_state`；如果目标串口在 `serial_sessions` 中且 `owner` 为 `desktop-ui`，MCP 只能调用 `get_serial_snapshot`、`read_serial_data` 等只读接口。
+
+- `open_serial_port` 默认使用 `access_mode="observe"`，只能观察已由 UI 打开的串口，不会替 UI 创建会话或改变波特率。
+- `send_serial_data`、`close_serial_port`、`reset_serial`、RTS/DTR 脉冲和通过串口进入 bootloader 都是独占控制；UI 持有资源时必须接受结构化 `resource_busy`，不能重试抢占、关闭或复位。
+- 需要写入、烧录或复位时，先确认 UI 已释放目标并重新调用 `get_ui_state`。探针写操作同样遵守现有 probe lease；不要因 `list_probes` 返回设备就默认可以连接。
+- `get_serial_snapshot` 使用 `after` 游标读取 UI 已采集的数据，不清空 UI 环形日志。快照带有 `session_id`、`latest_seq` 和 `gap` 时，必须报告会话切换或数据丢失，不把旧数据贴到新会话上。
+- 没有桌面 bridge 的独立 daemon 才可使用 `open_serial_port(access_mode="control")` 创建自己的串口会话；这不授权与 UI 并行打开同一物理端口。
+
+推荐的 AI 调试顺序是：`get_ui_state` → `list_probes`/`list_serial_ports` → 只读快照或寄存器读取 → 明确资源所有权后再执行写、烧录、复位。
+
 本 Skill 为 AI 助手提供针对 ARM Cortex-M 单片机硬件在环（Hardware-in-the-Loop, HIL）调试、固件烧录、寄存器级状态提取与硬故障（HardFault）根因分析的专业指引与标准操作规程。
 
 通过连接至宿主机的 **DAPLink / CMSIS-DAP / J-Link** 调试器（均使用 PyOCD 引擎驱动），AI 助手可以直接通过 MCP 工具调用底层硬件物理接口，执行无侵入式的 SWD 调试与自动化测试。

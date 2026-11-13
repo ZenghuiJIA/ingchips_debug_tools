@@ -2461,7 +2461,7 @@ class DesktopBridgeClient:
             data = json.loads(bridge_file.read_text(encoding="utf-8"))
             pid = data.get("pid")
             port = data.get("port")
-            if pid and port:
+            if pid and port and is_process_running(int(pid)):
                 return data
         except Exception:
             pass
@@ -2476,7 +2476,9 @@ class DesktopBridgeClient:
         if not port:
             return None
 
-        req = {"action": action, "params": kwargs}
+        # Keep a flat request for the Rust bridge.  The nested params object is
+        # retained for older test bridges and third-party adapters.
+        req = {"action": action, **kwargs, "params": kwargs}
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(1.5)
@@ -2498,6 +2500,31 @@ class DesktopBridgeClient:
         return None
 
 
+class ResourceBusyError(RuntimeError):
+    """A physical resource is owned by the desktop or another task."""
+    def __init__(self, payload: Dict[str, Any]):
+        self.payload = payload
+        super().__init__(payload.get("message", "Resource is busy"))
+
+
+def raise_bridge_error(response: Optional[Dict[str, Any]], resource: str) -> None:
+    if not response:
+        return
+    result = response.get("result") if isinstance(response.get("result"), dict) else response
+    status = result.get("status") if isinstance(result, dict) else None
+    if status == "resource_busy":
+        raise ResourceBusyError({
+            "status": "resource_busy",
+            "resource": result.get("resource", resource),
+            "owner": result.get("owner", "desktop-ui"),
+            "retryable": result.get("retryable", True),
+            "message": result.get("message", "Resource is owned by the desktop UI"),
+        })
+    if status == "error" or response.get("success") is False:
+        message = result.get("message") if isinstance(result, dict) else None
+        raise RuntimeError(message or response.get("error") or "Desktop bridge request failed")
+
+
 class SerialController:
     """多串口并发管理与智能端口调度控制器。
     支持同时打开多个串口进行独立收发，当仅有一个串口活动时支持免传 port_name 智能路由。
@@ -2517,8 +2544,9 @@ class SerialController:
             raise RuntimeError("pyserial 未安装或不可用")
 
         bridge_resp = DesktopBridgeClient.call_bridge("list_ports")
-        if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") == "ok"):
-            res = bridge_resp.get("result", {})
+        raise_bridge_error(bridge_resp, "serial:enumeration")
+        if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") in ("ok", "shared_read_only", "opened_shared", "already_open")):
+            res = bridge_resp.get("result") if isinstance(bridge_resp.get("result"), dict) else bridge_resp
             return res.get("ports", bridge_resp.get("ports", []))
 
         ports = serial.tools.list_ports.comports()
@@ -2572,22 +2600,30 @@ class SerialController:
         data_bits: int = 8,
         stop_bits: float = 1,
         parity: str = "N",
-        timeout: float = 0.5
+        timeout: float = 0.5,
+        access_mode: str = "control"
     ) -> Dict[str, Any]:
         """打开指定串口。"""
         if not SERIAL_AVAILABLE:
             raise RuntimeError("pyserial 未安装或不可用")
 
         port_name = port_name.strip().upper() if port_name.upper().startswith("COM") else port_name.strip()
-        bridge_resp = DesktopBridgeClient.call_bridge("open_port", port_name=port_name, baudrate=baudrate)
-        if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") == "ok"):
+        if access_mode not in ("observe", "control"):
+            raise ValueError("access_mode must be observe or control")
+        bridge_resp = DesktopBridgeClient.call_bridge(
+            "open_port", port_name=port_name, baudrate=baudrate, access_mode=access_mode
+        )
+        raise_bridge_error(bridge_resp, f"serial:{port_name}")
+        if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") in ("ok", "shared_read_only", "opened_shared", "already_open")):
             cls._last_active_port = port_name
-            res = bridge_resp.get("result", {})
+            res = bridge_resp.get("result") if isinstance(bridge_resp.get("result"), dict) else bridge_resp
             return {
-                "status": "opened_shared",
+                "status": res.get("status", "shared_read_only"),
                 "port": port_name,
                 "baudrate": baudrate,
                 "shared_with_vue": True,
+                "owner": res.get("owner", "desktop-ui"),
+                "read_only": res.get("read_only", access_mode == "observe"),
                 "message": res.get("message", "Port shared with desktop")
             }
 
@@ -2682,8 +2718,9 @@ class SerialController:
     def close_port(cls, port_name: Optional[str] = None) -> Dict[str, Any]:
         """关闭串口。若仅打开一个串口可不传 port_name。"""
         bridge_resp = DesktopBridgeClient.call_bridge("close_port", port_name=port_name)
+        raise_bridge_error(bridge_resp, f"serial:{port_name or 'active'}")
         if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") == "ok"):
-            res = bridge_resp.get("result", {})
+            res = bridge_resp.get("result") if isinstance(bridge_resp.get("result"), dict) else bridge_resp
             return {
                 "status": "closed",
                 "port": port_name or res.get("port_name", "active"),
@@ -2722,8 +2759,9 @@ class SerialController:
     ) -> Dict[str, Any]:
         """向串口发送数据。未指定 port_name 且只打开单个串口时自动免选。"""
         bridge_resp = DesktopBridgeClient.call_bridge("send_serial_data", port_name=port_name, data=data, is_hex=is_hex, append_crlf=append_crlf)
+        raise_bridge_error(bridge_resp, f"serial:{port_name or 'active'}")
         if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") == "ok"):
-            res = bridge_resp.get("result", {})
+            res = bridge_resp.get("result") if isinstance(bridge_resp.get("result"), dict) else bridge_resp
             return {
                 "status": "sent",
                 "port": port_name or res.get("port_name", "active"),
@@ -2769,16 +2807,22 @@ class SerialController:
     ) -> Dict[str, Any]:
         """从串口接收缓存或总线读取数据。未指定 port_name 且只打开单个串口时自动免选。"""
         bridge_resp = DesktopBridgeClient.call_bridge("read_serial_data", port_name=port_name, max_bytes=max_bytes, format=format_type, clear_buffer=clear_buffer)
+        raise_bridge_error(bridge_resp, f"serial:{port_name or 'active'}")
         if bridge_resp and (bridge_resp.get("success") or bridge_resp.get("status") == "ok"):
-            res = bridge_resp.get("result", {})
+            res = bridge_resp.get("result") if isinstance(bridge_resp.get("result"), dict) else bridge_resp
             text_val = res.get("text", "")
             hex_val = res.get("hex", "")
+            if "data" in res and not text_val and not hex_val:
+                if format_type.lower() == "hex":
+                    hex_val = str(res.get("data", ""))
+                else:
+                    text_val = str(res.get("data", ""))
             data_val = hex_val if format_type == "hex" else text_val
             return {
                 "status": "read",
                 "port": port_name or res.get("port_name", "active"),
                 "format": format_type,
-                "bytes_read": res.get("bytes_count", len(data_val)),
+                "bytes_read": res.get("bytes_count", res.get("bytes_len", len(data_val))),
                 "data": data_val,
                 "text": text_val,
                 "hex": hex_val,
@@ -2816,6 +2860,35 @@ class SerialController:
             "data": formatted_data,
             "has_more": len(buf) > 0
         }
+
+    @classmethod
+    def ui_state(cls) -> Dict[str, Any]:
+        response = DesktopBridgeClient.call_bridge("get_ui_state")
+        if not response:
+            return {"status": "standalone", "owner": "mcp-daemon", "serial_sessions": []}
+        raise_bridge_error(response, "desktop-ui")
+        result = response.get("result", response)
+        return result if isinstance(result, dict) else {"status": "ok", "value": result}
+
+    @classmethod
+    def serial_snapshot(cls, port_name: Optional[str] = None, after: int = 0, limit: int = 200) -> Dict[str, Any]:
+        response = DesktopBridgeClient.call_bridge(
+            "get_serial_snapshot", port_name=port_name, after_cursor=after, max_bytes=limit
+        )
+        if not response:
+            raise RuntimeError("No desktop UI bridge is available for a shared serial snapshot")
+        raise_bridge_error(response, f"serial:{port_name or 'active'}")
+        result = response.get("result", response)
+        return result if isinstance(result, dict) else {"status": "ok", "value": result}
+
+    @classmethod
+    def reset_serial(cls, port_name: Optional[str], sequence: str) -> Dict[str, Any]:
+        response = DesktopBridgeClient.call_bridge("reset_serial", port_name=port_name, seq_type=sequence)
+        if not response:
+            raise RuntimeError("Serial reset requires the desktop UI bridge and an explicitly opened session")
+        raise_bridge_error(response, f"serial:{port_name or 'active'}")
+        result = response.get("result", response)
+        return result if isinstance(result, dict) else {"status": "ok", "value": result}
 
 
 # MCP Tools Definitions
@@ -3153,6 +3226,28 @@ MCP_TOOLS = [
         }
     },
     {
+        "name": "get_ui_state",
+        "description": "读取桌面 UI 当前持有的串口会话、捕获游标和 MCP 可用权限；只读，不抢占资源",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "get_serial_snapshot",
+        "description": "读取桌面 UI 串口共享环形日志的增量快照；不会清空 UI 缓冲或改变会话",
+        "inputSchema": {"type": "object", "properties": {
+            "port_name": {"type": "string"},
+            "after": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200}
+        }}
+    },
+    {
+        "name": "reset_serial",
+        "description": "请求串口 RTS/DTR 复位；桌面 UI 持有串口时返回 resource_busy，不会抢占",
+        "inputSchema": {"type": "object", "properties": {
+            "port_name": {"type": "string"},
+            "sequence": {"type": "string", "enum": ["reset", "bootloader"], "default": "reset"}
+        }}
+    },
+    {
         "name": "list_serial_ports",
         "description": "列出系统当前所有可用的物理与虚拟串口设备及其打开状态和默认/活跃标识",
         "inputSchema": {"type": "object", "properties": {}}
@@ -3169,6 +3264,7 @@ MCP_TOOLS = [
                 "stop_bits": {"type": "number", "description": "停止位 (1, 1.5, 2，默认 1)", "default": 1},
                 "parity": {"type": "string", "description": "校验位 ('N'=None, 'E'=Even, 'O'=Odd, 'M'=Mark, 'S'=Space，默认 'N')", "default": "N"},
                 "timeout": {"type": "number", "description": "读取超时秒数 (默认 0.5)", "default": 0.5}
+                ,"access_mode": {"type": "string", "enum": ["observe", "control"], "default": "observe", "description": "observe 只共享现有 UI 会话；control 仅适用于无 UI bridge 的独立 daemon"}
             },
             "required": ["port_name"]
         }
@@ -3207,7 +3303,7 @@ MCP_TOOLS = [
                 "max_bytes": {"type": "integer", "description": "最大读取字节数 (默认 4096)", "default": 4096},
                 "timeout": {"type": "number", "description": "等待数据到达超时秒数 (默认 0.5)", "default": 0.5},
                 "format": {"type": "string", "description": "数据返回格式: 'text' (UTF-8字符串) 或 'hex' (大写HEX串，默认 'text')", "default": "text"},
-                "clear_buffer": {"type": "boolean", "description": "读取后是否清空已读数据 (默认 true)", "default": True}
+                "clear_buffer": {"type": "boolean", "description": "是否推进 MCP 自己的游标；不会清空 UI 原始环形日志 (默认 false)", "default": False}
             }
         }
     },
@@ -3284,6 +3380,9 @@ MCP_DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
 # 兼容旧调用方式：直接以工具名作为 JSON-RPC method
 DIRECT_TOOL_METHODS = [
+    "get_ui_state",
+    "get_serial_snapshot",
+    "reset_serial",
     "get_debug_capabilities", "analyze_power_capture", "start_debug_analysis", "get_debug_analysis_status", "stop_debug_analysis", "get_debug_analysis_result",
     "analyze_instrumentation",
     "analyze_crash_bundle",
@@ -3347,9 +3446,13 @@ def wrap_tool_result(payload: Any) -> Dict[str, Any]:
     return {"content": [{"type": "text", "text": text}], "isError": False}
 
 
-def wrap_tool_error(message: str) -> Dict[str, Any]:
+def wrap_tool_error(error: Any, tool_name: str = "tool") -> Dict[str, Any]:
     """工具级失败按 MCP 约定用 isError 上报，而不是 JSON-RPC error。"""
-    return {"content": [{"type": "text", "text": message}], "isError": True}
+    if isinstance(error, ResourceBusyError):
+        text = json.dumps(error.payload, ensure_ascii=False)
+    else:
+        text = f"{tool_name}: {error}"
+    return {"content": [{"type": "text", "text": text}], "isError": True}
 
 
 _HIL_RUNNER = None
@@ -3705,6 +3808,19 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         from svd_manager import SvdManager
         pack_path = arguments["pack_path"]
         return SvdManager.import_pack(pack_path)
+    elif name == "get_ui_state":
+        return SerialController.ui_state()
+    elif name == "get_serial_snapshot":
+        return SerialController.serial_snapshot(
+            port_name=arguments.get("port_name"),
+            after=int(arguments.get("after", 0)),
+            limit=int(arguments.get("limit", 200)),
+        )
+    elif name == "reset_serial":
+        sequence = str(arguments.get("sequence", "reset"))
+        if sequence not in ("reset", "bootloader"):
+            raise ValueError("sequence must be reset or bootloader")
+        return SerialController.reset_serial(arguments.get("port_name"), sequence)
     elif name == "list_serial_ports":
         return SerialController.list_ports()
     elif name == "open_serial_port":
@@ -3714,13 +3830,15 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         stop_bits = float(arguments.get("stop_bits", 1))
         parity = str(arguments.get("parity", "N"))
         timeout = float(arguments.get("timeout", 0.5))
+        access_mode = str(arguments.get("access_mode", "observe"))
         return SerialController.open_port(
             port_name=port_name,
             baudrate=baudrate,
             data_bits=data_bits,
             stop_bits=stop_bits,
             parity=parity,
-            timeout=timeout
+            timeout=timeout,
+            access_mode=access_mode
         )
     elif name == "close_serial_port":
         port_name = arguments.get("port_name")
@@ -3741,7 +3859,7 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Any:
         max_bytes = int(arguments.get("max_bytes", 4096))
         timeout = float(arguments.get("timeout", 0.5))
         fmt = str(arguments.get("format", "text"))
-        clear_buf = bool(arguments.get("clear_buffer", True))
+        clear_buf = bool(arguments.get("clear_buffer", False))
         return SerialController.read_data(
             port_name=port_name,
             max_bytes=max_bytes,
@@ -3908,7 +4026,7 @@ def main():
                         result = wrap_tool_result(dispatch_tool(tool_name, tool_args))
                     except Exception as tool_error:
                         logger.error(f"Tool '{tool_name}' failed: {tool_error}")
-                        result = wrap_tool_error(f"{tool_name}: {tool_error}")
+                        result = wrap_tool_error(tool_error, tool_name)
                 elif method in DIRECT_TOOL_METHODS:
                     # 保留旧的“工具名即 method”调用方式，返回裸结果
                     result = dispatch_tool(method, params)
@@ -3960,6 +4078,11 @@ if __name__ == "__main__":
         plan = json.loads((folder / 'plan.json').read_text(encoding='utf-8'))
         result = Worker(plan, folder, {'pyocd': PyOCDController, 'serial': SerialController}).run()
         sys.exit({'PASS': 0, 'FAIL': 1, 'ERROR': 2, 'CANCELLED': 3}.get(result, 2))
+    elif '--mode' in sys.argv and sys.argv.index('--mode') + 1 < len(sys.argv) and sys.argv[sys.argv.index('--mode') + 1] == 'stdio-mcp':
+        # Deployment configs for Claude/Codex/Cursor/etc. pass an explicit
+        # stdio-mcp mode.  Keep it equivalent to the default no-argument MCP
+        # entry instead of routing it through the HIL CLI parser.
+        main()
     elif any(flag in sys.argv for flag in ('--mode', '--validate', '--file', '--replay-events', '--help')):
         import argparse
         from hil.config import load_plan

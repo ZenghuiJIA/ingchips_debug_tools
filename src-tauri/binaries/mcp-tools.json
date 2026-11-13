@@ -899,6 +899,56 @@
       }
     },
     {
+      "name": "get_ui_state",
+      "description": "读取桌面 UI 当前持有的串口会话、捕获游标和 MCP 可用权限；只读，不抢占资源",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "get_serial_snapshot",
+      "description": "读取桌面 UI 串口共享环形日志的增量快照；不会清空 UI 缓冲或改变会话",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "port_name": {
+            "type": "string"
+          },
+          "after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 200
+          }
+        }
+      }
+    },
+    {
+      "name": "reset_serial",
+      "description": "请求串口 RTS/DTR 复位；桌面 UI 持有串口时返回 resource_busy，不会抢占",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "port_name": {
+            "type": "string"
+          },
+          "sequence": {
+            "type": "string",
+            "enum": [
+              "reset",
+              "bootloader"
+            ],
+            "default": "reset"
+          }
+        }
+      }
+    },
+    {
       "name": "list_serial_ports",
       "description": "列出系统当前所有可用的物理与虚拟串口设备及其打开状态和默认/活跃标识",
       "inputSchema": {
@@ -940,6 +990,15 @@
             "type": "number",
             "description": "读取超时秒数 (默认 0.5)",
             "default": 0.5
+          },
+          "access_mode": {
+            "type": "string",
+            "enum": [
+              "observe",
+              "control"
+            ],
+            "default": "observe",
+            "description": "observe 只共享现有 UI 会话；control 仅适用于无 UI bridge 的独立 daemon"
           }
         },
         "required": [
@@ -1017,8 +1076,8 @@
           },
           "clear_buffer": {
             "type": "boolean",
-            "description": "读取后是否清空已读数据 (默认 true)",
-            "default": true
+            "description": "是否推进 MCP 自己的游标；不会清空 UI 原始环形日志 (默认 false)",
+            "default": false
           }
         }
       }

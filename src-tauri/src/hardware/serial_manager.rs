@@ -369,6 +369,31 @@ impl SerialManager {
         sessions.keys().cloned().collect()
     }
 
+    /// Return a read-only snapshot for the desktop bridge.  MCP and other
+    /// agents may inspect this state without acquiring the session transaction
+    /// or changing the UI-owned connection.
+    pub fn session_snapshots(&self) -> Vec<serde_json::Value> {
+        let sessions = self.sessions.lock().unwrap();
+        sessions.iter().map(|(port, session_arc)| {
+            let session = session_arc.lock().unwrap();
+            let status = session.capture.lock().unwrap().status();
+            serde_json::json!({
+                "port": port,
+                "owner": "desktop-ui",
+                "session_id": status.session_id,
+                "baudrate": session.baud_rate,
+                "is_running": session.is_running.load(Ordering::SeqCst),
+                "dtr": session.dtr_state.load(Ordering::SeqCst),
+                "rts": session.rts_state.load(Ordering::SeqCst),
+                "is_daplink": session.is_daplink,
+                "latest_seq": status.latest_seq,
+                "first_seq": status.first_seq,
+                "recording": status.recording,
+                "capture_error": status.error
+            })
+        }).collect()
+    }
+
     pub fn open_rtt(
         &self,
         app: AppHandle,

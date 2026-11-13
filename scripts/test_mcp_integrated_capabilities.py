@@ -99,9 +99,11 @@ class MockDesktopBridgeServer:
                 },
             }
         elif action == "open_port":
-            return {"id": req_id, "success": True, "result": {"port_name": params.get("port_name"), "status": "opened"}}
+            if params.get("access_mode") == "control":
+                return {"id": req_id, "success": True, "result": {"status": "resource_busy", "resource": "serial:COM3", "owner": "desktop-ui", "retryable": True, "message": "owned by UI"}}
+            return {"id": req_id, "success": True, "result": {"port_name": params.get("port_name"), "status": "shared_read_only", "owner": "desktop-ui", "read_only": True}}
         elif action == "send_serial_data":
-            return {"id": req_id, "success": True, "result": {"bytes_sent": 8, "port_name": params.get("port_name")}}
+            return {"id": req_id, "success": True, "result": {"status": "resource_busy", "resource": "serial:COM3", "owner": "desktop-ui", "retryable": True, "message": "owned by UI"}}
         elif action == "read_serial_data":
             return {
                 "id": req_id,
@@ -114,7 +116,11 @@ class MockDesktopBridgeServer:
                 },
             }
         elif action == "close_port":
-            return {"id": req_id, "success": True, "result": {"status": "closed"}}
+            return {"id": req_id, "success": True, "result": {"status": "resource_busy", "resource": "serial:COM3", "owner": "desktop-ui", "retryable": True, "message": "owned by UI"}}
+        elif action == "get_ui_state":
+            return {"id": req_id, "success": True, "result": {"status": "ok", "owner": "desktop-ui", "serial_sessions": [{"port": "COM3", "owner": "desktop-ui"}]}}
+        elif action == "get_serial_snapshot":
+            return {"id": req_id, "success": True, "result": {"status": "ok", "owner": "desktop-ui", "port": "COM3", "read_only": True, "page": {"events": [], "cursor": params.get("after_cursor", 0), "gap": False}}}
         else:
             return {"id": req_id, "success": False, "error": f"Unknown action: {action}"}
 
@@ -222,6 +228,9 @@ class McpIntegratedCapabilitiesTests(unittest.TestCase):
             "close_serial_port",
             "send_serial_data",
             "read_serial_data",
+            "get_ui_state",
+            "get_serial_snapshot",
+            "reset_serial",
         }
         for expected in expected_tools:
             self.assertIn(expected, tool_names, f"Expected MCP tool '{expected}' not found in tools/list")
@@ -253,12 +262,20 @@ class McpIntegratedCapabilitiesTests(unittest.TestCase):
             resp = self._rpc("tools/call", {"name": "open_serial_port", "arguments": {"port_name": "COM3", "baud_rate": 115200}})
             self.assertIn("result", resp)
             content_text = resp["result"]["content"][0]["text"]
-            self.assertIn("opened", content_text.lower())
+            self.assertIn("shared_read_only", content_text.lower())
+
+            # A UI-owned session is observable but remains read-only to MCP.
+
+            state = self._rpc("tools/call", {"name": "get_ui_state", "arguments": {}})
+            self.assertFalse(state["result"].get("isError", False))
+            snapshot = self._rpc("tools/call", {"name": "get_serial_snapshot", "arguments": {"port_name": "COM3", "after": 0}})
+            self.assertFalse(snapshot["result"].get("isError", False))
 
             # Call send_serial_data
             resp = self._rpc("tools/call", {"name": "send_serial_data", "arguments": {"port_name": "COM3", "data": "41 54 0D 0A", "is_hex": True}})
             self.assertIn("result", resp)
-            self.assertFalse(resp["result"].get("isError", False))
+            self.assertTrue(resp["result"].get("isError", False))
+            self.assertIn("resource_busy", resp["result"]["content"][0]["text"])
 
             # Call read_serial_data
             resp = self._rpc("tools/call", {"name": "read_serial_data", "arguments": {"port_name": "COM3", "max_bytes": 100}})

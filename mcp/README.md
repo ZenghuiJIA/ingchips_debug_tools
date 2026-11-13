@@ -2,7 +2,7 @@
 
 本服务为大语言模型（LLM）与各类 AI 编码助手（如 Claude Code, Cursor, Windsurf, CCSwitch, Antigravity, OpenCode, Codex）提供无侵入式的**嵌入式硬件在环（HIL）控制与调试能力**。
 
-通过与宿主机连接的 **DAPLink / CMSIS-DAP / JLink** 硬件探针通信，AI 助手可以直接调用底层的 SWD 协议，执行固件烧录、寄存器读写、内核复位以及对 Cortex-M 单片机死机硬故障（HardFault）进行全自动位域诊断。
+通过 Rust runtime、Tauri UI bridge 和受限 Python probe worker 共享同一套资源状态，AI 助手可以读取 UI 已采集的串口/调试快照，并在明确获得资源所有权后执行固件烧录、寄存器读写、内核复位以及 Cortex-M 单片机死机硬故障（HardFault）诊断。MCP 默认不会关闭、发送或复位 UI 正在使用的串口。
 
 ---
 
@@ -27,11 +27,14 @@
 | **`flash_firmware`** | 通过 SWD 擦除并烧录固件到 Flash | `file_path`*(必填)*, `target_override`*(可选)* | 自动化烧录 `.bin` / `.hex` / `.elf` 镜像 |
 | **`reset_target`** | 硬件/软件复位目标单片机 | `halt`*(布尔值, 默认 false)* | 固件烧录后重启运行，或挂起 CPU 检查初始态 |
 | **`diagnose_hardfault`** | **【核心诊断】** 自动化提取 HardFault 现场并输出位域根因分析 | `probe_id`*(可选)*, `target_override`*(可选)* | 单片机死机、卡死、进入 HardFault_Handler |
+| **`get_ui_state`** | 读取 UI 持有的串口会话、捕获游标和 MCP 权限 | 无 | 任何硬件动作前确认资源所有权 |
+| **`get_serial_snapshot`** | 按游标读取 UI 已采集的串口事件 | `port_name`*(可选)*, `after`, `limit` | 不抢占串口查看日志/响应 |
 | **`list_serial_ports`** | 枚举系统可用串口及连接状态 | 无 | 查看当前物理/虚拟串口，识别默认端口 |
-| **`open_serial_port`** | 打开串口（支持波特率/校验/多串口并发） | `port_name`*(必填)*, `baudrate`*(默认115200)* | 建立指定串口通信会话 |
-| **`close_serial_port`** | 关闭串口句柄 | `port_name`*(单串口时可选)* | 释放串口资源 |
-| **`send_serial_data`** | 向串口发送数据（文本/HEX，单串口智能免选） | `data`*(必填)*, `port_name`*(可选)*, `is_hex` | 发送 AT 指令或十六进制二进制报文 |
-| **`read_serial_data`** | 从串口接收区读取数据（单串口智能免选） | `port_name`*(可选)*, `format`*(text/hex)* | 接收单片机输出日志、AT响应或二进制流 |
+| **`open_serial_port`** | 以 observe 模式观察已有 UI 会话；独立 daemon 可显式 control | `port_name`*(必填)*, `access_mode`*(默认 observe)* | 建立或共享指定串口通信会话 |
+| **`close_serial_port`** | 请求关闭串口；UI 持有时返回 `resource_busy` | `port_name`*(单串口时可选)* | 仅在资源归属明确时使用 |
+| **`send_serial_data`** | 向串口发送数据；UI 持有时拒绝抢占 | `data`*(必填)*, `port_name`*(可选)*, `is_hex` | 资源已释放后的控制操作 |
+| **`reset_serial`** | 请求 RTS/DTR 复位；UI 持有时拒绝抢占 | `port_name`*(可选)*, `sequence` | 资源已释放后的复位操作 |
+| **`read_serial_data`** | 读取共享捕获；默认不推进 UI 缓冲 | `port_name`*(可选)*, `format`*(text/hex)*, `clear_buffer` | 接收单片机输出日志、AT响应或二进制流 |
 
 ---
 
