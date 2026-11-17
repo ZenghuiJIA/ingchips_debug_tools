@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serialport::{SerialPort, SerialPortType, UsbPortInfo};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+const RETAINED_CAPTURES: usize = 8;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +24,146 @@ fn values_equal(a:&serde_json::Value,b:&serde_json::Value)->bool { match (a.as_f
             port_name:"TEST".into(),baud_rate:115200,port:None,rtt_stream:Some(stream),is_daplink:false,is_running:Arc::new(AtomicBool::new(true)),dtr_state:Arc::new(AtomicBool::new(false)),rts_state:Arc::new(AtomicBool::new(false)),
         })));
         (manager,id,listener)
+    }
+    #[derive(Clone)]
+    struct Lines(Arc<Mutex<Vec<(char, bool)>>>);
+    impl Read for Lines { fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { Ok(0) } }
+    impl Write for Lines {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> { Ok(data.len()) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    impl SerialPort for Lines {
+        fn name(&self) -> Option<String> { Some("TEST".into()) }
+        fn baud_rate(&self) -> serialport::Result<u32> { Ok(115200) }
+        fn data_bits(&self) -> serialport::Result<serialport::DataBits> { Ok(serialport::DataBits::Eight) }
+        fn flow_control(&self) -> serialport::Result<serialport::FlowControl> { Ok(serialport::FlowControl::None) }
+        fn parity(&self) -> serialport::Result<serialport::Parity> { Ok(serialport::Parity::None) }
+        fn stop_bits(&self) -> serialport::Result<serialport::StopBits> { Ok(serialport::StopBits::One) }
+        fn timeout(&self) -> Duration { Duration::from_millis(20) }
+        fn set_baud_rate(&mut self, _: u32) -> serialport::Result<()> { Ok(()) }
+        fn set_data_bits(&mut self, _: serialport::DataBits) -> serialport::Result<()> { Ok(()) }
+        fn set_flow_control(&mut self, _: serialport::FlowControl) -> serialport::Result<()> { Ok(()) }
+        fn set_parity(&mut self, _: serialport::Parity) -> serialport::Result<()> { Ok(()) }
+        fn set_stop_bits(&mut self, _: serialport::StopBits) -> serialport::Result<()> { Ok(()) }
+        fn set_timeout(&mut self, _: Duration) -> serialport::Result<()> { Ok(()) }
+        fn write_request_to_send(&mut self, level: bool) -> serialport::Result<()> { self.0.lock().unwrap().push(('R', level)); Ok(()) }
+        fn write_data_terminal_ready(&mut self, level: bool) -> serialport::Result<()> { self.0.lock().unwrap().push(('D', level)); Ok(()) }
+        fn read_clear_to_send(&mut self) -> serialport::Result<bool> { Ok(false) }
+        fn read_data_set_ready(&mut self) -> serialport::Result<bool> { Ok(false) }
+        fn read_ring_indicator(&mut self) -> serialport::Result<bool> { Ok(false) }
+        fn read_carrier_detect(&mut self) -> serialport::Result<bool> { Ok(false) }
+        fn bytes_to_read(&self) -> serialport::Result<u32> { Ok(0) }
+        fn bytes_to_write(&self) -> serialport::Result<u32> { Ok(0) }
+        fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> { Ok(()) }
+        fn try_clone(&self) -> serialport::Result<Box<dyn SerialPort>> { Ok(Box::new(self.clone())) }
+        fn set_break(&self) -> serialport::Result<()> { Ok(()) }
+        fn clear_break(&self) -> serialport::Result<()> { Ok(()) }
+    }
+    fn install_lines(manager: &SerialManager) -> Arc<Mutex<Vec<(char, bool)>>> {
+        let lines = Arc::new(Mutex::new(vec![]));
+        let session = manager.resolve_session(Some("TEST")).unwrap();
+        let mut session = session.lock().unwrap();
+        session.port = Some(Box::new(Lines(lines.clone())));
+        session.is_daplink = true;
+        lines
+    }
+    #[test]
+    fn reset_keeps_adapter_sequence_and_excludes_other_operations() {
+        for boot in [false, true] {
+            let (manager, _, _listener) = fixture();
+            let lines = install_lines(&manager);
+            let mut waits = vec![];
+            manager.execute_reset_with_wait(boot, Some("TEST"), |duration| {
+                waits.push(duration.as_millis());
+                assert!(manager.set_dtr(false, Some("TEST")).unwrap_err().contains("transaction"));
+                assert!(manager.set_rts(false, Some("TEST")).unwrap_err().contains("transaction"));
+                assert!(manager.write_data(b"x", Some("TEST")).unwrap_err().contains("transaction"));
+                assert!(manager.execute_reset(false, Some("TEST")).unwrap_err().contains("transaction"));
+            }).unwrap();
+            assert_eq!(*lines.lock().unwrap(), vec![('R', boot), ('D', true), ('D', false)]);
+            assert_eq!(waits, vec![if boot { 500 } else { 50 }, 100]);
+        }
+    }
+    #[test]
+    fn reset_close_reopen_never_pulses_replacement() {
+        let (manager, _, _listener) = fixture();
+        let original = install_lines(&manager);
+        let (replacement, _, _peer) = fixture();
+        let replacement_lines = install_lines(&replacement);
+        let next = replacement.resolve_session(Some("TEST")).unwrap();
+        let error = manager.execute_reset_with_wait(true, Some("TEST"), |_| {
+            manager.close(Some("TEST")).unwrap();
+            manager.sessions.lock().unwrap().insert("TEST".into(), next.clone());
+        }).unwrap_err();
+        assert!(error.contains("disconnected"));
+        assert_eq!(*original.lock().unwrap(), vec![('R', true)]);
+        assert!(replacement_lines.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn duplicate_rtt_is_rejected_without_changing_session() {
+        let (manager, id, _listener) = fixture();
+        assert!(manager.ensure_rtt_closed("TEST").is_err());
+        assert_eq!(manager.capture("TEST").unwrap().lock().unwrap().session_id, id);
+        manager.close(Some("TEST")).unwrap();
+        assert!(manager.ensure_rtt_closed("TEST").is_ok());
+    }
+    #[test]
+    fn capture_cache_is_bounded_and_live_sessions_survive_eviction() {
+        let (manager, id, _listener) = fixture();
+        let oldest = manager.new_capture("oldest");
+        let weak = Arc::downgrade(&oldest);
+        drop(oldest);
+        for index in 0..100 {
+            manager.register_capture(&format!("PORT-{index}"), Arc::new(Mutex::new(Capture::new("test"))));
+            assert!(manager.captures.lock().unwrap().len() <= RETAINED_CAPTURES);
+        }
+        assert!(weak.upgrade().is_none());
+        assert!(manager.capture("oldest").is_err());
+        assert!(manager.capture("PORT-99").is_ok());
+        assert_eq!(manager.capture("TEST").unwrap().lock().unwrap().session_id, id);
+        let latest = manager.new_capture("PORT-99");
+        assert!(Arc::ptr_eq(&latest, &manager.capture("PORT-99").unwrap()));
+        assert_eq!(manager.captures.lock().unwrap().len(), RETAINED_CAPTURES);
+    }
+    #[test]
+    fn old_worker_never_notifies_or_removes_replacement() {
+        let (manager, _, _listener) = fixture();
+        let old = manager.resolve_session(Some("TEST")).unwrap().lock().unwrap().is_running.clone();
+        let (replacement, id, _listener2) = fixture();
+        let next = replacement.resolve_session(Some("TEST")).unwrap();
+        let running = next.lock().unwrap().is_running.clone();
+        manager.sessions.lock().unwrap().insert("TEST".into(), next);
+        assert!(!SerialManager::finish_session(&manager.sessions, "TEST", &old, "old", |_| panic!("stale event")));
+        let mut called = false;
+        assert!(SerialManager::finish_session(&manager.sessions, "TEST", &running, "current", |event| {
+            assert!(manager.sessions.try_lock().is_err(), "enqueue must precede replacement insertion");
+            assert_eq!(event.session_id.as_deref(), Some(id.as_str()));
+            called = true;
+        }));
+        assert!(called);
+        assert!(!SerialManager::finish_session(&manager.sessions, "TEST", &running, "duplicate", |_| panic!("duplicate event")));
+    }
+    #[test]
+    fn explicit_close_emits_identity_once_and_legacy_events_deserialize() {
+        let (manager, id, _listener) = fixture();
+        let mut events = vec![];
+        manager.close_inner_with_notify(None, "closed", |event| {
+            assert!(manager.sessions.try_lock().is_err());
+            events.push(event);
+        }).unwrap();
+        manager.close_inner_with_notify(None, "closed", |event| events.push(event)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id.as_deref(), Some(id.as_str()));
+        let old: SerialDisconnectPayload = serde_json::from_value(serde_json::json!({"port":"TEST","reason":"old"})).unwrap();
+        assert!(old.session_id.is_none());
+    }
+    #[test]
+    fn failed_restore_never_emits_success() {
+        let mut notified = false;
+        assert!(SerialManager::finish_restore(Err("open failed".into()), || notified = true).is_err());
+        assert!(!notified);
+        SerialManager::finish_restore(Ok(()), || notified = true).unwrap();
+        assert!(notified);
     }
     fn protocol()->Protocol{serde_json::from_value(serde_json::json!({"schema_version":1,"name":"echo","fixed_length":1,"fields":[{"name":"seq","offset":0,"type":"uint8"}]})).unwrap()}
     #[test]fn instant_response_and_stale_session_guard(){
@@ -80,6 +222,8 @@ pub struct WaveformPointsPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerialDisconnectPayload {
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub port: String,
     pub reason: String,
 }
@@ -125,7 +269,7 @@ impl Drop for RequestCleanup { fn drop(&mut self){self.0.lock().unwrap().request
 
 pub struct SerialManager {
     pub protocol_engine: Arc<Mutex<Option<ProtocolEngine>>>, // Legacy network waveform adapter only.
-    captures: Mutex<HashMap<String, Arc<Mutex<Capture>>>>,
+    captures: Mutex<VecDeque<(String, Arc<Mutex<Capture>>)>>,
     lifecycle: Mutex<()>,
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<PortSession>>>>>,
     last_active_port: Arc<Mutex<Option<String>>>,
@@ -136,7 +280,7 @@ impl SerialManager {
     pub fn new() -> Self {
         Self {
             protocol_engine: Arc::new(Mutex::new(None)),
-            captures: Mutex::new(HashMap::new()),
+            captures: Mutex::new(VecDeque::new()),
             lifecycle: Mutex::new(()),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             last_active_port: Arc::new(Mutex::new(None)),
@@ -163,15 +307,37 @@ impl SerialManager {
         Ok(())
     }
 
+    fn register_capture(&self, port: &str, capture: Arc<Mutex<Capture>>) {
+        // Live sessions own their capture independently. Only the most recent
+        // eight captures are retained for post-disconnect inspection (<=16 MiB
+        // of ring data); recording files are unaffected by cache eviction.
+        let retired = {
+            let mut captures = self.captures.lock().unwrap();
+            let mut retired = Vec::new();
+            if let Some(index) = captures.iter().position(|(name, _)| name == port) {
+                retired.push(captures.remove(index).unwrap());
+            }
+            captures.push_back((port.into(), capture));
+            while captures.len() > RETAINED_CAPTURES {
+                retired.push(captures.pop_front().unwrap());
+            }
+            retired
+        };
+        // A last Capture reference may flush a recording in Drop; never do so
+        // while holding the registry lock.
+        drop(retired);
+    }
     fn new_capture(&self, port: &str) -> Arc<Mutex<Capture>> {
         let capture = Arc::new(Mutex::new(Capture::new(port)));
-        let mut captures = self.captures.lock().unwrap();
-        if captures.len() >= 64 { captures.retain(|_, v| Arc::strong_count(v) > 1); }
-        captures.insert(port.into(), capture.clone());
+        self.register_capture(port, capture.clone());
         capture
     }
     pub fn capture(&self, port: &str) -> Result<Arc<Mutex<Capture>>, String> {
-        self.captures.lock().unwrap().get(port).cloned().ok_or_else(|| "No capture for this port".into())
+        if let Ok(session) = self.resolve_session(Some(port)) {
+            return Ok(session.lock().unwrap().capture.clone());
+        }
+        self.captures.lock().unwrap().iter().find(|(name, _)| name == port)
+            .map(|(_, capture)| capture.clone()).ok_or_else(|| "No retained capture for this port".into())
     }
     pub fn capture_page(&self, port: &str, after: u64, limit: usize) -> Result<CapturePage, String> {
         Ok(self.capture(port)?.lock().unwrap().read(after, limit))
@@ -394,21 +560,34 @@ impl SerialManager {
         }).collect()
     }
 
+    fn ensure_rtt_closed(&self, port_name: &str) -> Result<(), String> {
+        if self.sessions.lock().unwrap().get(port_name).map_or(false, |s| s.lock().unwrap().is_running.load(Ordering::SeqCst)) {
+            return Err("RTT session is already open; disconnect before reconnecting".into());
+        }
+        Ok(())
+    }
+
     pub fn open_rtt(
         &self,
         app: AppHandle,
         port_name: &str,
         tcp_port: u16,
     ) -> Result<(), String> {
-        let _lifecycle = self.lifecycle.lock().unwrap();
-        // If already open, close previous session for this port
-        let _ = self.close_inner(Some(port_name));
+        self.open_rtt_prepared(app, port_name, || Ok(tcp_port))
+    }
 
-        let stream = TcpStream::connect(format!("127.0.0.1:{}", tcp_port))
+    pub fn open_rtt_prepared(&self, app: AppHandle, port_name: &str, prepare: impl FnOnce() -> Result<u16, String>) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock().unwrap();
+        self.ensure_rtt_closed(port_name)?;
+        let tcp_port = prepare()?;
+        if tcp_port == 0 { return Err("Invalid RTT TCP bridge port".into()); }
+        self.close_inner(Some(port_name))?;
+
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], tcp_port));
+        let stream = TcpStream::connect_timeout(&address, Duration::from_secs(3))
             .map_err(|e| format!("Failed to connect to RTT TCP bridge (port {}): {}", tcp_port, e))?;
-        stream
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .map_err(|e| e.to_string())?;
+        stream.set_read_timeout(Some(Duration::from_millis(50))).map_err(|e| e.to_string())?;
+        stream.set_write_timeout(Some(Duration::from_secs(1))).map_err(|e| e.to_string())?;
 
         let reader_stream = stream.try_clone().map_err(|e| e.to_string())?;
 
@@ -529,16 +708,13 @@ impl SerialManager {
             is_running_clone.store(false, Ordering::SeqCst);
             capture.lock().unwrap().append("INFO", &[], Some("Connection closed".into()));
             let _ = capture.lock().unwrap().stop();
-            let mut map = sessions_clone.lock().unwrap();
-            if map.get(&current_port_name).map(|s| Arc::ptr_eq(&s.lock().unwrap().is_running, &is_running_clone)).unwrap_or(false) {
-                map.remove(&current_port_name);
-                drop(map);
+            Self::finish_session(&sessions_clone, &current_port_name, &is_running_clone, "采样/RTT 连接已结束", |payload| {
                 if !batch_buffer.is_empty() {
-                    let _ = app.emit("serial-rx", SerialRxPayload { session_id: Some(capture.lock().unwrap().session_id.clone()), port: current_port_name.clone(), data: batch_buffer,
-                        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64 });
+                    let _ = app.emit("serial-rx", SerialRxPayload { session_id: payload.session_id.clone(), port: current_port_name.clone(), data: batch_buffer,
+                        timestamp_ms: hil_debug_core::capture::wall_time_ms() });
                 }
-                let _ = app.emit("serial-disconnected", SerialDisconnectPayload { port: current_port_name, reason: "采样/RTT 连接已结束".into() });
-            }
+                let _ = app.emit("serial-disconnected", payload);
+            });
         });
 
         Ok(())
@@ -574,7 +750,7 @@ impl SerialManager {
             }
         })))?;
         let capture=native.capture.clone();*capture_slot.lock().unwrap()=Some(capture.clone());
-        self.captures.lock().unwrap().insert(port_name.into(),capture.clone());
+        self.register_capture(port_name, capture.clone());
         let running=native.running.clone();
         let is_daplink=Self::list_ports().iter().find(|p|p.port_name.eq_ignore_ascii_case(port_name)).map_or(false,|p|p.is_daplink);
         let session=Arc::new(Mutex::new(PortSession{
@@ -589,13 +765,31 @@ impl SerialManager {
         let sessions=self.sessions.clone();let name=port_name.to_string();
         std::thread::spawn(move||{
             while running.load(Ordering::SeqCst){std::thread::sleep(Duration::from_millis(100));}
-            let mut map=sessions.lock().unwrap();
-            if map.get(&name).map_or(false,|s|Arc::ptr_eq(&s.lock().unwrap().is_running,&running)){
-                map.remove(&name);drop(map);
-                let _=app.emit("serial-disconnected",SerialDisconnectPayload{port:name,reason:"串口连接已断开".into()});
-            }
+            Self::finish_session(&sessions, &name, &running, "串口连接已断开", |payload| {
+                let _ = app.emit("serial-disconnected", payload);
+            });
         });
         Ok(())
+    }
+
+    // Identity check, map removal and event enqueue form one critical section.
+    // Otherwise a replacement may open between removal and the old notification.
+    fn finish_session(
+        sessions: &Mutex<HashMap<String, Arc<Mutex<PortSession>>>>,
+        port: &str, running: &Arc<AtomicBool>, reason: &str,
+        notify: impl FnOnce(SerialDisconnectPayload),
+    ) -> bool {
+        let mut map = sessions.lock().unwrap();
+        let Some(current) = map.get(port) else { return false; };
+        let session_id = {
+            let session = current.lock().unwrap();
+            if !Arc::ptr_eq(&session.is_running, running) { return false; }
+            let id = session.capture.lock().unwrap().session_id.clone();
+            id
+        };
+        map.remove(port);
+        notify(SerialDisconnectPayload { session_id: Some(session_id), port: port.into(), reason: reason.into() });
+        true
     }
 
     pub fn close(&self, port_name: Option<&str>) -> Result<(), String> {
@@ -603,31 +797,36 @@ impl SerialManager {
         self.close_inner(port_name)
     }
 
+    pub fn close_and_notify(&self, app: &AppHandle, port_name: Option<&str>, reason: &str) -> Result<(), String> {
+        let _lifecycle = self.lifecycle.lock().unwrap();
+        self.close_inner_with_notify(port_name, reason, |payload| { let _ = app.emit("serial-disconnected", payload); })
+    }
+
     fn close_inner(&self, port_name: Option<&str>) -> Result<(), String> {
-        let mut sessions_guard = self.sessions.lock().unwrap();
-        if let Some(target) = port_name {
-            if let Some(session_arc) = sessions_guard.remove(target) {
-                let mut session = session_arc.lock().unwrap();
+        self.close_inner_with_notify(port_name, "连接已关闭", |_| {})
+    }
+
+    fn close_inner_with_notify(&self, port_name: Option<&str>, reason: &str, mut notify: impl FnMut(SerialDisconnectPayload)) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let targets: Vec<String> = match port_name {
+            Some(port) => vec![port.into()],
+            None => sessions.keys().cloned().collect(),
+        };
+        for target in &targets {
+            if let Some(session) = sessions.remove(target) {
+                let mut session = session.lock().unwrap();
+                let session_id = session.capture.lock().unwrap().session_id.clone();
                 session.close();
+                notify(SerialDisconnectPayload { session_id: Some(session_id), port: target.clone(), reason: reason.into() });
             }
-            let mut last_active = self.last_active_port.lock().unwrap();
-            if last_active.as_deref() == Some(target) {
-                *last_active = sessions_guard.keys().next().cloned();
-            }
-            let mut wf_guard = self.waveform_source.lock().unwrap();
-            if wf_guard.as_deref() == Some(target) {
-                *wf_guard = sessions_guard.keys().next().cloned();
-            }
-        } else {
-            // Close all
-            for (_, session_arc) in sessions_guard.drain() {
-                let mut session = session_arc.lock().unwrap();
-                session.close();
-            }
-            let mut last_active = self.last_active_port.lock().unwrap();
-            *last_active = None;
-            let mut wf_guard = self.waveform_source.lock().unwrap();
-            *wf_guard = None;
+        }
+        let mut active = self.last_active_port.lock().unwrap();
+        if port_name.is_none() || active.as_ref().map_or(false, |name| targets.contains(name)) {
+            *active = sessions.keys().next().cloned();
+        }
+        let mut source = self.waveform_source.lock().unwrap();
+        if port_name.is_none() || source.as_ref().map_or(false, |name| targets.contains(name)) {
+            *source = sessions.keys().next().cloned();
         }
         Ok(())
     }
@@ -691,62 +890,67 @@ impl SerialManager {
         Err("目标端口未处于连接状态".to_string())
     }
 
-    pub fn set_dtr(&self, level: bool, port_name: Option<&str>) -> Result<(), String> {
-        let session_arc = self.resolve_session(port_name)?;
-        let mut session = session_arc.lock().unwrap();
-        if let Some(native)=&session.native{native.set_dtr(level)?;session.dtr_state.store(level,Ordering::SeqCst);return Ok(());}
-        if let Some(ref mut port) = session.port {
-            port.write_data_terminal_ready(level)
-                .map_err(|e| format!("Set DTR failed: {}", e))?;
-            session.dtr_state.store(level, Ordering::SeqCst);
-            Ok(())
+    // The caller owns the transaction permit. Never resolve a port name again
+    // between reset stages: a close/reopen must not redirect a pulse.
+    fn set_session_line(session: &Arc<Mutex<PortSession>>, dtr: bool, level: bool) -> Result<(), String> {
+        let mut session = session.lock().unwrap();
+        if !session.is_running.load(Ordering::SeqCst) { return Err("Session disconnected; pin state unknown".into()); }
+        if let Some(native) = &session.native {
+            if dtr { native.set_dtr(level)?; } else { native.set_rts(level)?; }
+        } else if let Some(port) = session.port.as_mut() {
+            let result = if dtr { port.write_data_terminal_ready(level) } else { port.write_request_to_send(level) };
+            result.map_err(|e| format!("Set {} failed: {e}", if dtr { "DTR" } else { "RTS" }))?;
         } else {
-            Err("目标串口未打开".to_string())
+            return Err("目标串口未打开".into());
         }
+        if dtr { session.dtr_state.store(level, Ordering::SeqCst); }
+        else { session.rts_state.store(level, Ordering::SeqCst); }
+        Ok(())
+    }
+
+    fn set_line(&self, dtr: bool, level: bool, port_name: Option<&str>) -> Result<(), String> {
+        let session = self.resolve_session(port_name)?;
+        let transaction = session.lock().unwrap().transaction.clone();
+        let _permit = transaction.try_lock().map_err(|_| "Port is owned by a command transaction or reset")?;
+        Self::set_session_line(&session, dtr, level)
+    }
+
+    pub fn set_dtr(&self, level: bool, port_name: Option<&str>) -> Result<(), String> {
+        self.set_line(true, level, port_name)
     }
 
     pub fn set_rts(&self, level: bool, port_name: Option<&str>) -> Result<(), String> {
-        let session_arc = self.resolve_session(port_name)?;
-        let mut session = session_arc.lock().unwrap();
-        if let Some(native)=&session.native{native.set_rts(level)?;session.rts_state.store(level,Ordering::SeqCst);return Ok(());}
-        if let Some(ref mut port) = session.port {
-            port.write_request_to_send(level)
-                .map_err(|e| format!("Set RTS failed: {}", e))?;
-            session.rts_state.store(level, Ordering::SeqCst);
-            Ok(())
-        } else {
-            Err("目标串口未打开".to_string())
-        }
+        self.set_line(false, level, port_name)
     }
 
-    pub async fn execute_reset(&self, is_bootloader: bool, port_name: Option<&str>) -> Result<(), String> {
-        let (is_open, _, _, _, is_daplink) = self.get_status(port_name);
-        if !is_open {
-            return Err("串口未打开，无法执行硬件复位。".to_string());
+    pub fn execute_reset(&self, is_bootloader: bool, port_name: Option<&str>) -> Result<(), String> {
+        self.execute_reset_with_wait(is_bootloader, port_name, std::thread::sleep)
+    }
+
+    fn execute_reset_with_wait(&self, is_bootloader: bool, port_name: Option<&str>, mut wait: impl FnMut(Duration)) -> Result<(), String> {
+        let session = self.resolve_session(port_name)?;
+        let transaction = session.lock().unwrap().transaction.clone();
+        let _permit = transaction.try_lock().map_err(|_| "Port is owned by a command transaction or reset")?;
+        {
+            let state = session.lock().unwrap();
+            if !state.is_running.load(Ordering::SeqCst) { return Err("串口未打开，无法执行硬件复位。".into()); }
+            if !state.is_daplink { return Err("当前串口不支持已有 DAPLink RTS/DTR 复位适配；必须核对板级接线与极性。".into()); }
         }
-        if !is_daplink {
-            return Err(
-                "当前串口设备不是 DAPLink 探针，仅 DAPLink 硬件支持通过 RTS/DTR 硬件引脚控制复位与进入 BOOT。"
-                    .to_string(),
-            );
-        }
-
-        if is_bootloader {
-            self.set_rts(true, port_name)?;
-            tokio::time::sleep(Duration::from_millis(500)).await;
-
-            self.set_dtr(true, port_name)?;
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            self.set_dtr(false, port_name)?;
-        } else {
-            self.set_rts(false, port_name)?;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-
-            self.set_dtr(true, port_name)?;
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            self.set_dtr(false, port_name)?;
+        // Preserve the existing adapter's line polarity and timing, not a
+        // claim that every DAPLink board is wired this way.
+        let result = (|| {
+            Self::set_session_line(&session, false, is_bootloader)?;
+            wait(Duration::from_millis(if is_bootloader { 500 } else { 50 }));
+            Self::set_session_line(&session, true, true)?;
+            wait(Duration::from_millis(100));
+            Self::set_session_line(&session, true, false)
+        })();
+        if let Err(error) = result {
+            // Best-effort release only on the original session, never a new
+            // connection with the same name. Preserve unknown cleanup outcomes.
+            let dtr = Self::set_session_line(&session, true, false);
+            let rts = Self::set_session_line(&session, false, false);
+            return Err(format!("Reset failed: {error}; cleanup DTR={dtr:?}, RTS={rts:?}"));
         }
         Ok(())
     }
@@ -792,12 +996,18 @@ impl SerialManager {
     pub fn resume_after_flashing(&self, app: &AppHandle, port_name: &str, baud_rate: u32) -> Result<(), String> {
         // Sleep briefly to ensure flashing handle is completely closed
         std::thread::sleep(Duration::from_millis(150));
-        let res = self.open(app.clone(), port_name, baud_rate);
-        let _ = app.emit("serial-flash-done", SerialFlashEventPayload {
-            port: port_name.to_string(),
-            original_baud: Some(baud_rate),
-            message: format!("固件烧录任务已结束，串口 {} 控制权已归还给终端（恢复波特率: {}）", port_name, baud_rate),
-        });
-        res
+        Self::finish_restore(self.open(app.clone(), port_name, baud_rate), || {
+            let _ = app.emit("serial-flash-done", SerialFlashEventPayload {
+                port: port_name.to_string(),
+                original_baud: Some(baud_rate),
+                message: format!("固件烧录任务已结束，串口 {} 控制权已归还给终端（恢复波特率: {}）", port_name, baud_rate),
+            });
+        })
+    }
+
+    fn finish_restore(result: Result<(), String>, notify_restored: impl FnOnce()) -> Result<(), String> {
+        result.map_err(|error| format!("串口恢复失败，控制权未归还终端: {error}"))?;
+        notify_restored();
+        Ok(())
     }
 }

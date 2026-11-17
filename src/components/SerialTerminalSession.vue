@@ -52,6 +52,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'switch-tab', tab: string): void;
   (e: 'update-stats', stats: { rx: number; tx: number }): void;
+  (e: 'update-session-id', sessionId: string): void;
   (e: 'toggle-connection'): void;
   (e: 'change-baud', baud: number): void;
   (e: 'change-port', port: string): void;
@@ -59,6 +60,9 @@ const emit = defineEmits<{
 
 const dtrState = ref<boolean>(false);
 const rtsState = ref<boolean>(false);
+function isNetworkPortName(name: string): boolean {
+  return name.startsWith('TCP-Client:') || name.startsWith('TCP-Server:') || name.startsWith('UDP:') || name.startsWith('TCP:');
+}
 const isResetting = ref<boolean>(false);
 
 
@@ -252,6 +256,7 @@ const analysisOpen = ref(false);
 const backendJournal = computed(() => isTauri() && !/^(TCP|UDP)/.test(props.portName));
 let captureCursor = 0;
 let captureSession = '';
+let gapNoticeSession = '';
 let capturePolling = false;
 const retainedRaw = shallowRef<RawEvent[]>([]);
 let captureDecoder = new TextDecoder();
@@ -276,12 +281,15 @@ async function refreshCapture() {
     let page = await safeInvoke<CapturePage>('serial_capture_read', { portName: port, after: captureCursor, limit: 500 });
     if (props.portName !== port) return;
     if (captureSession !== page.status.session_id) {
-      captureSession = page.status.session_id; captureCursor = 0; retainedRaw.value = []; logs.value = []; captureDecoder = new TextDecoder();
+      captureSession = page.status.session_id; captureCursor = 0; gapNoticeSession = ''; retainedRaw.value = []; logs.value = []; bookmarks.value = []; captureDecoder = new TextDecoder();
       page = await safeInvoke<CapturePage>('serial_capture_read', { portName: port, after: 0, limit: 500 });
       if (props.portName !== port) return;
     }
     captureStatus.value = page.status;
-    if (page.gap) appendLog('后台环形窗口已覆盖部分历史；完整内容请读取录制文件', 'error');
+    if (page.gap && gapNoticeSession !== captureSession) {
+      gapNoticeSession = captureSession;
+      appendLog('后台环形窗口已覆盖部分历史；完整内容请读取录制文件', 'error');
+    }
     captureCursor = page.cursor;
     const retained = [...retainedRaw.value, ...page.events];
     let size = retained.reduce((n,e) => n + e.data.length + 256, 0); let cut = 0;
@@ -422,6 +430,7 @@ function scheduleLogFlush() {
 }
 
 function clearLogs() {
+  bookmarks.value = [];
   pendingLogQueue = [];
   if (logFlushRafId !== null) {
     cancelAnimationFrame(logFlushRafId);
@@ -462,6 +471,7 @@ function exportLogs() {
 }
 
 async function handleSendMessage(customText?: string) {
+  if (!props.isConnected) return;
   const targetPort = props.portName;
   let identity: string | null;
   try { identity = await serialIdentity(targetPort); } catch (error) { appendLog(String(error), 'error'); return; }
@@ -544,6 +554,11 @@ onMounted(async () => {
         if (event.payload.port && event.payload.port !== props.portName) {
           return; // Ignore other ports
         }
+        if (event.payload.session_id && captureSession && event.payload.session_id !== captureSession) return;
+        if (event.payload.session_id && event.payload.session_id !== captureSession) {
+          captureSession = event.payload.session_id;
+          emit('update-session-id', event.payload.session_id);
+        }
         const raw = new Uint8Array(event.payload.data);
         const ts = formatTimestamp();
         const decodedRx = rxDecoder.decode(raw, { stream: true });
@@ -571,11 +586,13 @@ onMounted(async () => {
           return;
         }
         if (worker) {
+          // This is the last use of raw in this path; transfer ownership to avoid
+          // copying high-rate serial payloads through the worker boundary.
           worker.postMessage({
             rawBytes: raw,
             mode: viewMode.value,
             timestamp: ts
-          });
+          }, [raw.buffer]);
         } else {
           const text = viewMode.value === 'hex'
             ? Array.from(raw, byte => byte.toString(16).padStart(2, '0').toUpperCase()).join(' ') + ' '
@@ -586,8 +603,9 @@ onMounted(async () => {
         }
       });
 
-      unlistenDisconnect = await listen<{ port: string; reason: string }>('serial-disconnected', (event) => {
-        if (event.payload.port && event.payload.port === props.portName) {
+      unlistenDisconnect = await listen<{ port: string; reason: string; session_id?: string | null }>('serial-disconnected', (event) => {
+        if (event.payload.port && event.payload.port === props.portName &&
+            (!event.payload.session_id || !captureSession || event.payload.session_id === captureSession)) {
           appendLog(t('term_log_disconnected', { port: props.portName }), 'error');
         }
       });
@@ -631,6 +649,10 @@ watch(() => props.isConnected, (connected: boolean) => {
   }
 });
 watch(() => props.portName, () => {
+  bookmarks.value = [];
+  captureCursor = 0;
+  captureSession = '';
+  gapNoticeSession = '';
   for (const timer of triggerTimers) clearTimeout(timer);
   triggerTimers.clear(); triggerPanelRef.value?.suspendMatcher(); rxDecoder.decode();
   refreshCapture();
@@ -670,7 +692,7 @@ onUnmounted(() => {
           
           <!-- Switch Port Dropdown (Enabled if disconnected, or available ports provided) -->
           <select
-            v-if="availablePorts && availablePorts.length > 0 && !portName.startsWith('RTT')"
+            v-if="availablePorts && availablePorts.length > 0 && !portName.startsWith('RTT') && !isNetworkPortName(portName)"
             :value="portName"
             @change="(e: any) => emit('change-port', e.target.value)"
             :disabled="isConnected"
@@ -685,7 +707,7 @@ onUnmounted(() => {
 
           <!-- Switch Baud Rate Dropdown & Custom Input (Enabled even if connected, supports runtime adjustment) -->
           <BaudrateSelect
-            v-if="!portName.startsWith('RTT')"
+            v-if="!portName.startsWith('RTT') && !isNetworkPortName(portName)"
             :model-value="baudRate"
             @update:model-value="(b) => emit('change-baud', b)"
           />

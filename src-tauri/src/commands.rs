@@ -4,7 +4,7 @@ use crate::hardware::serial_manager::{PortInfo, SerialManager};
 use crate::system_metrics::{collect_metrics, SystemMetrics};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tauri::{AppHandle, State, Emitter};
+use tauri::{AppHandle, State};
 
 pub struct AppState {
     pub serial: Arc<SerialManager>,
@@ -35,11 +35,8 @@ pub fn hil_command(app: AppHandle, state: State<'_, AppState>, operation: String
         if let Some(ports) = prepared.plan().pointer("/_resources/ports").and_then(Value::as_object) {
             for port in ports.keys() {
                 if state.serial.list_active_sessions().contains(port) {
-                    state.serial.close(Some(port)).map_err(|e|
+                    state.serial.close_and_notify(&app, Some(port), "串口已交给 HIL 后台任务；日志见测试运行窗口").map_err(|e|
                         format!("HIL_NOT_STARTED: 串口交接失败（此前已关闭端口需手动重连）: {e}"))?;
-                    let _ = app.emit("serial-disconnected", crate::hardware::serial_manager::SerialDisconnectPayload {
-                        port: port.clone(), reason: "串口已交给 HIL 后台任务；日志见测试运行窗口".into(),
-                    });
                 }
             }
         }
@@ -126,27 +123,17 @@ pub fn open_serial_port(
     block_address: Option<u64>,
 ) -> Result<(), String> {
     if port_name.starts_with("RTT") {
-        state.daemon.ensure_started(&app)?;
-        let probe_type = if port_name.contains("J-Link") {
-            "jlink"
-        } else {
-            "daplink"
-        };
-        let rtt_res = state.daemon.call_rpc(
-            "start_rtt",
-            json!({
+        state.serial.open_rtt_prepared(app.clone(), &port_name, || {
+            state.daemon.ensure_started(&app)?;
+            let probe_type = if port_name.contains("J-Link") { "jlink" } else { "daplink" };
+            let rtt_res = state.daemon.call_rpc("start_rtt", json!({
                 "probe_type": probe_type,
                 "ram_start": ram_start,
                 "ram_size": ram_size,
                 "block_address": block_address,
-            }),
-        )?;
-        let tcp_port = rtt_res
-            .get("tcp_port")
-            .and_then(|p| p.as_u64())
-            .ok_or_else(|| "Failed to get RTT TCP bridge port".to_string())? as u16;
-
-        state.serial.open_rtt(app, &port_name, tcp_port)
+            }))?;
+            rtt_bridge_port(&rtt_res)
+        })
     } else {
         state.serial.open(app, &port_name, baud_rate)
     }
@@ -160,7 +147,7 @@ pub fn close_serial_port(
 ) -> Result<(), String> {
     if let Some(ref name) = port_name {
         if name.starts_with("TCP:") || name.starts_with("TCP-Client:") || name.starts_with("TCP-Server:") || name.starts_with("UDP:") {
-            state.network.stop_stream(name);
+            state.network.stop_stream_and_notify(&app, name);
             return Ok(());
         }
         if name.starts_with("RTT") {
@@ -169,11 +156,7 @@ pub fn close_serial_port(
     } else {
         let _ = state.daemon.call_rpc("stop_rtt", json!({}));
     }
-    state.serial.close(port_name.as_deref())?;
-    if let Some(port) = port_name {
-        let _ = app.emit("serial-disconnected", crate::hardware::serial_manager::SerialDisconnectPayload { port, reason: "连接已关闭".into() });
-    }
-    Ok(())
+    state.serial.close_and_notify(&app, port_name.as_deref(), "连接已关闭")
 }
 
 #[tauri::command(async)]
@@ -219,14 +202,51 @@ pub fn set_rts(
     state.serial.set_rts(level, port_name.as_deref())
 }
 
-#[tauri::command]
-pub async fn execute_reset_sequence(
+fn reset_is_bootloader(seq_type: &str) -> Result<bool, String> {
+    match seq_type {
+        "normal_reset" => Ok(false),
+        "bootloader_reset" => Ok(true),
+        _ => Err(format!("Unsupported reset sequence: {seq_type}")),
+    }
+}
+
+fn rtt_bridge_port(response: &Value) -> Result<u16, String> {
+    response.get("tcp_port").and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok()).filter(|port| *port != 0)
+        .ok_or_else(|| "RTT TCP bridge port must be an integer in 1..65535".into())
+}
+
+#[cfg(test)]
+mod serial_contract_tests {
+    use super::*;
+    #[test]
+    fn reset_rejects_unknown_action_instead_of_resetting() {
+        assert_eq!(reset_is_bootloader("normal_reset").unwrap(), false);
+        assert_eq!(reset_is_bootloader("bootloader_reset").unwrap(), true);
+        for action in ["", "reset", "NORMAL_RESET", "bootloader_reset "] {
+            assert!(reset_is_bootloader(action).is_err());
+        }
+    }
+    #[test]
+    fn rtt_port_never_wraps_or_defaults() {
+        for value in [json!(0), json!(65536), json!(u64::MAX), json!(-1), json!(1.5), json!("19021"), Value::Null] {
+            assert!(rtt_bridge_port(&json!({"tcp_port": value})).is_err());
+        }
+        assert!(rtt_bridge_port(&json!({})).is_err());
+        for port in [1, 19021, 65535] {
+            assert_eq!(rtt_bridge_port(&json!({"tcp_port": port})).unwrap(), port);
+        }
+    }
+}
+
+#[tauri::command(async)]
+pub fn execute_reset_sequence(
     state: State<'_, AppState>,
     seq_type: String,
     port_name: Option<String>,
 ) -> Result<(), String> {
-    let is_bootloader = seq_type == "bootloader_reset";
-    state.serial.execute_reset(is_bootloader, port_name.as_deref()).await
+    let is_bootloader = reset_is_bootloader(&seq_type)?;
+    state.serial.execute_reset(is_bootloader, port_name.as_deref())
 }
 
 #[tauri::command(async)]
@@ -934,10 +954,11 @@ pub fn start_network_stream(
 
 #[tauri::command(async)]
 pub fn stop_network_stream(
+    app: AppHandle,
     state: State<'_, AppState>,
     name: String,
 ) -> Result<(), String> {
-    state.network.stop_stream(&name);
+    state.network.stop_stream_and_notify(&app, &name);
     Ok(())
 }
 

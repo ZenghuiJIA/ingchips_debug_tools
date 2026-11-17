@@ -97,7 +97,7 @@ def package(custom_version: str = None, daemon_source=None):
         print("[0/5] Building latest frontend and Tauri release executable...")
         try:
             subprocess.run(
-                ["node", str(ROOT_DIR / "node_modules" / "@tauri-apps" / "cli" / "tauri.js"), "build", "--no-bundle"],
+                ["node", str(ROOT_DIR / "node_modules" / "@tauri-apps" / "cli" / "tauri.js"), "build"],
                 cwd=str(ROOT_DIR),
                 check=True,
                 shell=False
@@ -125,6 +125,7 @@ def package(custom_version: str = None, daemon_source=None):
     (target_dir / "skills").mkdir(exist_ok=True)
     (target_dir / "mcp").mkdir(exist_ok=True)
     (target_dir / "packs").mkdir(exist_ok=True)
+    (target_dir / "installers").mkdir(exist_ok=True)
 
     # Copy primary executables
     print("[1/5] Copying application executables...")
@@ -139,6 +140,17 @@ def package(custom_version: str = None, daemon_source=None):
     if main_exe:
         shutil.copy2(main_exe, target_dir / "AI-HIL-Debugger.exe")
         print(f"  [OK] Copied {main_exe.name} -> AI-HIL-Debugger.exe ({main_exe.stat().st_size / 1024 / 1024:.1f} MB)")
+
+    # Keep installer artifacts inside the same versioned release directory.
+    bundle_dir = ROOT_DIR / "src-tauri" / "target" / "release" / "bundle"
+    installer_version = version.lstrip("v")
+    installer_candidates = [p for p in list((bundle_dir / "nsis").glob("*.exe")) + list((bundle_dir / "msi").glob("*.msi"))
+                           if installer_version in p.name]
+    for installer in installer_candidates:
+        shutil.copy2(installer, target_dir / "installers" / installer.name)
+        print(f"  [OK] Copied installer {installer.name}")
+    if not installer_candidates:
+        raise FileNotFoundError("Tauri installer artifacts missing; run a bundled tauri build first")
 
     daemon_exe = Path(daemon_source) if daemon_source else ROOT_DIR / 'build_dist/hil-native.exe'
     if not daemon_exe.is_file():
@@ -229,6 +241,10 @@ def package(custom_version: str = None, daemon_source=None):
     if review.is_file():
         (target_dir / "docs").mkdir(exist_ok=True)
         shutil.copy2(review, target_dir / "docs" / review.name)
+    serial_audit = ROOT_DIR / "docs" / "SERIAL_ASSISTANT_AUDIT_2026-11.md"
+    if serial_audit.is_file():
+        (target_dir / "docs").mkdir(exist_ok=True)
+        shutil.copy2(serial_audit, target_dir / "docs" / serial_audit.name)
 
     # Copy packs: only include the official default pack to keep release clean and free of testing debris
     default_pack_name = "INGChips.INGCHIPS_DeviceFamilyPack.1.0.1.pack"

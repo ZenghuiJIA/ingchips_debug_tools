@@ -194,6 +194,14 @@ const networkHost = ref<string>('127.0.0.1');
 const networkPort = ref<number>(8080);
 const isConnectingNetwork = ref<boolean>(false);
 
+function networkSpec(name: string): { mode: 'tcp_client' | 'tcp_server' | 'udp_socket'; host: string; port: number } | null {
+  const match = name.match(/^(TCP-Client|TCP-Server|UDP):(.*):(\d+)$/);
+  if (!match) return null;
+  const mode = match[1] === 'TCP-Client' ? 'tcp_client' : match[1] === 'TCP-Server' ? 'tcp_server' : 'udp_socket';
+  const port = Number(match[3]);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? { mode, host: match[2], port } : null;
+}
+
 // RTT RAM presets for new tab
 const rttRamPresets = [
   { label: t('term_ram_preset_128k'), start: 0x20000000, size: 0x20000 },
@@ -261,6 +269,20 @@ async function importPackForNewPortRtt() {
 
 async function toggleTabConnection(tab: TerminalSessionTab) {
   reconnectPending.delete(tab.id);
+  const network = networkSpec(tab.portName);
+  if (network) {
+    try {
+      if (tab.isConnected || tab.isListening) {
+        await safeInvoke('stop_network_stream', { name: tab.portName });
+      } else {
+        await safeInvoke('start_network_stream', { name: tab.portName, ...network });
+      }
+      await syncActiveSessions();
+    } catch (err: any) {
+      alert(t('term_alert_stream_err', { stream: tab.portName, err }));
+    }
+    return;
+  }
   if (tab.isConnected || tab.isListening) {
     try {
       await safeInvoke('close_serial_port', { portName: tab.portName });
@@ -271,19 +293,7 @@ async function toggleTabConnection(tab: TerminalSessionTab) {
     }
   } else {
     try {
-      if (tab.portName.startsWith('TCP-Client:') || tab.portName.startsWith('TCP-Server:') || tab.portName.startsWith('UDP:')) {
-        const parts = tab.portName.split(':');
-        const prefix = parts[0];
-        const host = parts[1] || '127.0.0.1';
-        const port = Number(parts[2]) || 8080;
-        const mode = prefix.includes('Client') ? 'tcp_client' : prefix.includes('Server') ? 'tcp_server' : 'udp_socket';
-        await safeInvoke('start_network_stream', {
-          name: tab.portName,
-          mode,
-          host,
-          port
-        });
-      } else if (tab.portName.startsWith('RTT')) {
+      if (tab.portName.startsWith('RTT')) {
         await safeInvoke('open_serial_port', {
           portName: tab.portName,
           baudRate: tab.baudRate,
@@ -310,6 +320,7 @@ async function toggleTabConnection(tab: TerminalSessionTab) {
 }
 
 async function handleTabBaudChange(tab: TerminalSessionTab, newBaud: number) {
+  if (networkSpec(tab.portName)) return;
   tab.baudRate = newBaud;
   // If currently connected, reconnect with the new baud rate seamlessly
   if (tab.isConnected && !tab.portName.startsWith('RTT')) {
@@ -499,7 +510,8 @@ async function closeTab(tab: TerminalSessionTab, e?: MouseEvent) {
 
   if (tab.isConnected || tab.isListening) {
     try {
-      await safeInvoke('close_serial_port', { portName: tab.portName });
+      if (networkSpec(tab.portName)) await safeInvoke('stop_network_stream', { name: tab.portName });
+      else await safeInvoke('close_serial_port', { portName: tab.portName });
     } catch (err) {
       console.error(`关闭端口 ${tab.portName} 失败:`, err);
     }
@@ -552,13 +564,19 @@ async function syncActiveSessions() {
     const activeSessions: string[] = await safeInvoke('list_active_serial_sessions');
     const network = await safeInvoke<any[]>('list_network_streams');
     
-    // 1. Mark status for existing tabs
+    // 1. Mark status for existing tabs. Network sessions are not serial sessions.
     for (const tab of tabs.value) {
-      tab.isConnected = activeSessions.includes(tab.portName);
-      tab.isListening = network.some(n => n.name === tab.portName && n.mode === 'tcp_server' && !n.is_connected);
+      const net = network.find(n => n.name === tab.portName);
+      if (networkSpec(tab.portName)) {
+        tab.isConnected = Boolean(net?.is_connected);
+        tab.isListening = Boolean(net && net.mode === 'tcp_server' && !net.is_connected);
+      } else {
+        tab.isConnected = activeSessions.includes(tab.portName);
+        tab.isListening = false;
+      }
     }
 
-    // 2. Authoritative restoration: If backend has active sessions not in tabs, auto-reconstruct them!
+    // 2. Authoritative restoration: restore backend-owned serial sessions.
     for (const portName of activeSessions) {
       const existing = tabs.value.find(t => t.portName === portName);
       if (!existing) {
@@ -581,6 +599,23 @@ async function syncActiveSessions() {
         };
         tabs.value.push(newTab);
       }
+    }
+
+    // Restore network sessions after a page remount; their backend state is authoritative.
+    for (const info of network) {
+      if (tabs.value.some(t => t.portName === info.name)) continue;
+      const spec = networkSpec(info.name);
+      if (!spec) continue;
+      tabs.value.push({
+        id: `tab_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        portName: info.name,
+        baudRate: 0,
+        isConnected: Boolean(info.is_connected),
+        isListening: info.mode === 'tcp_server' && !info.is_connected,
+        isDaplink: false,
+        rxBytesCount: 0,
+        txBytesCount: 0,
+      });
     }
 
     // Ensure activeTabId points to a valid tab
@@ -626,12 +661,13 @@ onMounted(async () => {
   if (isTauri()) {
     try {
       unlistenNetwork = await listen('network-state', () => { syncActiveSessions(); });
-      unlistenDisconnect = await listen<{ port: string; reason: string }>('serial-disconnected', (event) => {
+      unlistenDisconnect = await listen<{ port: string; reason: string; session_id?: string | null }>('serial-disconnected', (event) => {
         const disconnectedPort = event.payload.port;
         const targetTab = tabs.value.find(t => t.portName === disconnectedPort);
-        if (targetTab) {
+        if (targetTab && (!event.payload.session_id || !targetTab.sessionId || event.payload.session_id === targetTab.sessionId)) {
           if (targetTab.isConnected && targetTab.autoReconnect && targetTab.deviceKey && !/HIL|交给|已关闭/.test(event.payload.reason)) reconnectPending.add(targetTab.id);
           targetTab.isConnected = false;
+          targetTab.isListening = false;
         }
       });
     } catch (e) {
@@ -772,6 +808,7 @@ onUnmounted(() => {
               :available-ports="availablePorts"
               @switch-tab="(t) => emit('switch-tab', t)"
               @update-stats="(s) => handleTabStatsUpdate(tab.id, s)"
+              @update-session-id="(id) => { tab.sessionId = id }"
               @toggle-connection="toggleTabConnection(tab)"
               @change-baud="(b) => handleTabBaudChange(tab, b)"
               @change-port="(p) => handleTabPortChange(tab, p)"
@@ -808,6 +845,7 @@ onUnmounted(() => {
                 :available-ports="availablePorts"
                 @switch-tab="(t) => emit('switch-tab', t)"
                 @update-stats="(s) => handleTabStatsUpdate(tab.id, s)"
+              @update-session-id="(id) => { tab.sessionId = id }"
                 @toggle-connection="toggleTabConnection(tab)"
                 @change-baud="(b) => handleTabBaudChange(tab, b)"
                 @change-port="(p) => handleTabPortChange(tab, p)"
@@ -887,6 +925,7 @@ onUnmounted(() => {
                   :available-ports="availablePorts"
                   @switch-tab="(t) => emit('switch-tab', t)"
                   @update-stats="(s) => handleTabStatsUpdate(tab.id, s)"
+              @update-session-id="(id) => { tab.sessionId = id }"
                   @toggle-connection="toggleTabConnection(tab)"
                   @change-baud="(b) => handleTabBaudChange(tab, b)"
                   @change-port="(p) => handleTabPortChange(tab, p)"

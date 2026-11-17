@@ -5,13 +5,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+static NETWORK_GENERATION: AtomicU64 = AtomicU64::new(1);
+fn new_session_id() -> String {
+    format!("network-{}-{}-{}", std::process::id(), hil_debug_core::capture::wall_time_ms(), NETWORK_GENERATION.fetch_add(1, Ordering::Relaxed))
+}
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 use super::protocol_engine::ProtocolEngine;
-use super::serial_manager::{SerialRxPayload, WaveformPointsPayload};
+use super::serial_manager::{SerialDisconnectPayload, SerialRxPayload, WaveformPointsPayload};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +30,42 @@ pub enum NetworkMode {
 mod tests {
     use super::*;
 
+    fn session(name: &str) -> Arc<NetworkSession> {
+        Arc::new(NetworkSession {
+            session_id: new_session_id(), name: name.into(), mode: NetworkMode::TcpClient,
+            host: "127.0.0.1".into(), port: 0, backend: Arc::new(Mutex::new(None)),
+            is_running: Arc::new(AtomicBool::new(true)),
+        })
+    }
+    #[test]
+    fn stale_network_worker_cannot_notify_replacement() {
+        let manager = NetworkManager::new(Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        let old = session("TCP:test");
+        let next = session("TCP:test");
+        assert_ne!(old.session_id, next.session_id);
+        manager.sessions.lock().unwrap().insert(next.name.clone(), next.clone());
+        assert!(!NetworkManager::finish_session(&manager.sessions, &old.name, &old.is_running, "old".into(), |_| panic!("stale notification")));
+        assert_eq!(manager.list_sessions()[0].session_id, next.session_id);
+        let mut called = false;
+        assert!(NetworkManager::finish_session(&manager.sessions, &next.name, &next.is_running, "current".into(), |event| {
+            assert!(manager.sessions.try_lock().is_err());
+            assert_eq!(event.session_id.as_deref(), Some(next.session_id.as_str()));
+            called = true;
+        }));
+        assert!(called);
+    }
+    #[test]
+    fn explicit_network_stop_notifies_once_with_identity() {
+        let manager = NetworkManager::new(Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        let current = session("TCP:test");
+        manager.sessions.lock().unwrap().insert(current.name.clone(), current.clone());
+        let mut events = vec![];
+        manager.stop_stream_with_notify(&current.name, |event| events.push(event));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id.as_deref(), Some(current.session_id.as_str()));
+        assert!(!NetworkManager::finish_session(&manager.sessions, &current.name, &current.is_running, "late".into(), |_| panic!("duplicate notification")));
+    }
+
     #[test]
     fn udp_reply_requires_peer_and_close_releases_session() {
         let manager = NetworkManager::new(Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
@@ -35,7 +76,7 @@ mod tests {
         let backend = Arc::new(Mutex::new(Some(ConnectionBackend::Udp(socket, None))));
         let running = Arc::new(AtomicBool::new(true));
         manager.sessions.lock().unwrap().insert(name.into(), Arc::new(NetworkSession {
-            name: name.into(), mode: NetworkMode::UdpSocket, host: "127.0.0.1".into(), port: 0,
+            session_id: new_session_id(), name: name.into(), mode: NetworkMode::UdpSocket, host: "127.0.0.1".into(), port: 0,
             backend: Arc::clone(&backend), is_running: Arc::clone(&running),
         }));
         assert!(manager.write_data(name, b"reply").is_err());
@@ -55,6 +96,8 @@ mod tests {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkStreamInfo {
+    #[serde(default)]
+    pub session_id: String,
     pub name: String,
     pub mode: NetworkMode,
     pub host: String,
@@ -69,6 +112,7 @@ enum ConnectionBackend {
 }
 
 pub struct NetworkSession {
+    pub session_id: String,
     pub name: String,
     pub mode: NetworkMode,
     pub host: String,
@@ -115,6 +159,7 @@ impl NetworkManager {
                 };
 
                 NetworkStreamInfo {
+                    session_id: s.session_id.clone(),
                     name: s.name.clone(),
                     mode: s.mode.clone(),
                     host: s.host.clone(),
@@ -161,8 +206,9 @@ impl NetworkManager {
         };
         let is_running = Arc::new(AtomicBool::new(true));
         let backend = Arc::new(Mutex::new(initial));
+        let session_id = new_session_id();
         let session = Arc::new(NetworkSession {
-            name: name.clone(), mode: mode.clone(), host, port,
+            session_id: session_id.clone(), name: name.clone(), mode: mode.clone(), host, port,
             backend: Arc::clone(&backend), is_running: Arc::clone(&is_running),
         });
         self.sessions.lock().unwrap().insert(name.clone(), session);
@@ -184,7 +230,7 @@ impl NetworkManager {
                                 let reader = stream.try_clone().map_err(|e| e.to_string())?;
                                 *backend.lock().unwrap() = Some(ConnectionBackend::Tcp(stream));
                                 let _ = app.emit("network-state", &name);
-                                Self::run_tcp_read_loop(app.clone(), reader, name.clone(), Arc::clone(&is_running), Arc::clone(&engine), Arc::clone(&source), true);
+                                Self::run_tcp_read_loop(app.clone(), reader, name.clone(), session_id.clone(), Arc::clone(&is_running), Arc::clone(&engine), Arc::clone(&source), true);
                                 *backend.lock().unwrap() = None;
                                 let _ = app.emit("network-state", &name);
                             }
@@ -203,9 +249,9 @@ impl NetworkManager {
                     };
                     if let Some((tcp, udp)) = cloned {
                         if let Some(stream) = tcp {
-                            Self::run_tcp_read_loop(app.clone(), stream, name.clone(), Arc::clone(&is_running), engine, source, false);
+                            Self::run_tcp_read_loop(app.clone(), stream, name.clone(), session_id.clone(), Arc::clone(&is_running), engine, source, false);
                         } else if let Some(socket) = udp {
-                            Self::run_udp_read_loop(app.clone(), socket, name.clone(), Arc::clone(&is_running), engine, source, Arc::clone(&backend));
+                            Self::run_udp_read_loop(app.clone(), socket, name.clone(), session_id.clone(), Arc::clone(&is_running), engine, source, Arc::clone(&backend));
                         }
                     }
                 }
@@ -213,16 +259,10 @@ impl NetworkManager {
             })();
             is_running.store(false, Ordering::SeqCst);
             *backend.lock().unwrap() = None;
-            // An old worker must not remove a replacement session with the same name.
-            let mut map = sessions.lock().unwrap();
-            if map.get(&name).map(|s| Arc::ptr_eq(&s.is_running, &is_running)).unwrap_or(false) {
-                map.remove(&name);
-            }
-            drop(map);
-            let _ = app.emit("serial-disconnected", super::serial_manager::SerialDisconnectPayload {
-                port: name.clone(), reason: result.err().unwrap_or_else(|| "网络连接已关闭".into()),
+            Self::finish_session(&sessions, &name, &is_running, result.err().unwrap_or_else(|| "网络连接已关闭".into()), |payload| {
+                let _ = app.emit("serial-disconnected", payload);
+                let _ = app.emit("network-state", &name);
             });
-            let _ = app.emit("network-state", &name);
         });
         Ok(())
     }
@@ -232,6 +272,7 @@ impl NetworkManager {
         app: AppHandle,
         mut stream: TcpStream,
         stream_name: String,
+        session_id: String,
         is_running: Arc<AtomicBool>,
         engine_arc: Arc<Mutex<Option<ProtocolEngine>>>,
         waveform_source_arc: Arc<Mutex<Option<String>>>,
@@ -298,7 +339,7 @@ impl NetworkManager {
                     .as_millis() as u64;
 
                 let payload = SerialRxPayload {
-                    session_id: None,
+                    session_id: Some(session_id.clone()),
                     port: stream_name.clone(),
                     data: std::mem::take(&mut batch_buffer),
                     timestamp_ms: now_ms,
@@ -313,7 +354,7 @@ impl NetworkManager {
 
         if !batch_buffer.is_empty() {
             let _ = app.emit("serial-rx", SerialRxPayload {
-                session_id: None,
+                session_id: Some(session_id.clone()),
                 port: stream_name, data: batch_buffer,
                 timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
             });
@@ -326,6 +367,7 @@ impl NetworkManager {
         app: AppHandle,
         socket: UdpSocket,
         stream_name: String,
+        session_id: String,
         is_running: Arc<AtomicBool>,
         engine_arc: Arc<Mutex<Option<ProtocolEngine>>>,
         waveform_source_arc: Arc<Mutex<Option<String>>>,
@@ -388,7 +430,7 @@ impl NetworkManager {
                     .as_millis() as u64;
 
                 let payload = SerialRxPayload {
-                    session_id: None,
+                    session_id: Some(session_id.clone()),
                     port: stream_name.clone(),
                     data: std::mem::take(&mut batch_buffer),
                     timestamp_ms: now_ms,
@@ -427,14 +469,36 @@ impl NetworkManager {
         }
     }
 
-    /// Stop and close a network stream
+    fn finish_session(sessions: &Mutex<HashMap<String, Arc<NetworkSession>>>, name: &str, running: &Arc<AtomicBool>, reason: String, notify: impl FnOnce(SerialDisconnectPayload)) -> bool {
+        let mut sessions = sessions.lock().unwrap();
+        let Some(session) = sessions.get(name) else { return false; };
+        if !Arc::ptr_eq(&session.is_running, running) { return false; }
+        let session_id = session.session_id.clone();
+        sessions.remove(name);
+        // Keep the map locked until the event is enqueued, before a new open.
+        notify(SerialDisconnectPayload { session_id: Some(session_id), port: name.into(), reason });
+        true
+    }
+
+    /// Stop and close a network stream without a GUI notification.
     pub fn stop_stream(&self, name: &str) {
+        self.stop_stream_with_notify(name, |_| {});
+    }
+
+    pub fn stop_stream_and_notify(&self, app: &AppHandle, name: &str) {
+        self.stop_stream_with_notify(name, |payload| {
+            let _ = app.emit("serial-disconnected", payload);
+            let _ = app.emit("network-state", name);
+        });
+    }
+
+    fn stop_stream_with_notify(&self, name: &str, notify: impl FnOnce(SerialDisconnectPayload)) {
         let _lifecycle = self.lifecycle.lock().unwrap();
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(s) = sessions.remove(name) {
             s.is_running.store(false, Ordering::SeqCst);
-            let mut b_guard = s.backend.lock().unwrap();
-            *b_guard = None;
+            *s.backend.lock().unwrap() = None;
+            notify(SerialDisconnectPayload { session_id: Some(s.session_id.clone()), port: name.into(), reason: "连接已关闭".into() });
         }
         let mut source = self.waveform_source.lock().unwrap();
         if source.as_deref() == Some(name) { *source = None; }

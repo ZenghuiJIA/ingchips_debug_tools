@@ -529,6 +529,7 @@ export interface ProtocolConfig {
 export interface TerminalSessionTab {
   alias?: string;
   deviceKey?: string;
+  sessionId?: string;
   autoReconnect?: boolean;
   isListening?: boolean;
   id: string;

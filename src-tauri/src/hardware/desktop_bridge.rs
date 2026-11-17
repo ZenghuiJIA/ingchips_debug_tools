@@ -63,7 +63,7 @@ impl DesktopBridgeServer {
         let bridge_info = json!({
             "pid": std::process::id(),
             "port": port,
-            "version": "1.3.3"
+            "version": "1.3.5"
         });
 
         let bridge_file = Self::get_bridge_file_path();
@@ -154,7 +154,7 @@ impl DesktopBridgeServer {
             "ping" => json!({
                 "status": "ok",
                 "app": "ai-hil-debugger",
-                "version": "1.3.3",
+                "version": "1.3.5",
                 "pid": std::process::id()
             }),
 
