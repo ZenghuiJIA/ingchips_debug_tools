@@ -88,6 +88,8 @@ jobs:
         run: pnpm build
 
       - name: Build native runtime for Tauri external-bin checks
+        env:
+          MCP_SERVER_VERSION: ${{ steps.release.outputs.version }}
         run: python scripts/build_daemon_windows.py --daemon-only
 
       - name: Rust check and workspace tests
@@ -100,6 +102,8 @@ jobs:
         run: python scripts/verify_backend_regression.py --native build_dist/hil-native.exe
 
       - name: Build and package Windows release
+        env:
+          MCP_SERVER_VERSION: ${{ steps.release.outputs.version }}
         run: python scripts/package_release.py '${{ steps.release.outputs.tag }}'
 
       - name: Verify release archive
