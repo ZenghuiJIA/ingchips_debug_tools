@@ -87,14 +87,14 @@ jobs:
       - name: Frontend build
         run: pnpm build
 
+      - name: Build native runtime for Tauri external-bin checks
+        run: python scripts/build_daemon_windows.py --daemon-only
+
       - name: Rust check and workspace tests
         working-directory: src-tauri
         run: |
           cargo check --locked
           cargo test --locked --workspace --lib
-
-      - name: Build native runtime for process regression
-        run: python scripts/build_daemon_windows.py --daemon-only
 
       - name: Backend and native regression
         run: python scripts/verify_backend_regression.py --native build_dist/hil-native.exe
