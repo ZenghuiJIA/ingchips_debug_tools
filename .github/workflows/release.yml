@@ -40,7 +40,7 @@ jobs:
           "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
 
       - name: Checkout tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ steps.release.outputs.tag }}
           fetch-depth: 0
@@ -52,16 +52,17 @@ jobs:
           run_install: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.13'
-          cache: pip
+          # No requirements.txt/pyproject.toml exists; dependency installation is explicit below.
+          # Do not enable setup-python pip caching here, because the action requires a dependency file.
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
