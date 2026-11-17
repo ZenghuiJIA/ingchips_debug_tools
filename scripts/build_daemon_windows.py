@@ -212,6 +212,7 @@ def build_native_runtime():
     import daemon_entry
     catalog = {'tools': daemon_entry.MCP_TOOLS}
     for folder in [ROOT_DIR / 'build_dist', SRC_ENTRY.parent, ROOT_DIR / 'src-tauri/binaries', ROOT_DIR / 'src-tauri/target/release', ROOT_DIR / 'src-tauri/target/debug']:
+        folder.mkdir(parents=True, exist_ok=True)
         (folder / 'mcp-tools.json').write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding='utf-8')
         if folder != ROOT_DIR / 'build_dist':
             shutil.copy2(ROOT_DIR / 'build_dist/hil-python-worker.exe', folder / 'hil-python-worker.exe')
