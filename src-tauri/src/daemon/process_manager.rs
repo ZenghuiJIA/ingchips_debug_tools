@@ -261,6 +261,10 @@ impl DaemonManager {
         Ok(resp_val.get("result").cloned().unwrap_or(Value::Null))
     }
 
+    pub fn is_busy(&self) -> bool {
+        self.rpc_lock.try_lock().is_err()
+    }
+
     pub fn call_mcp_tool(&self, name: &str, arguments: Value) -> Result<Value, String> {
         self.call_rpc(
             "tools/call",

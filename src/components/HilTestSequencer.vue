@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'HilTestSequencer' });
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { safeInvoke, isTauri } from '../utils/ipc';
 import { t } from '../utils/i18n';

@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 const RETAINED_CAPTURES: usize = 8;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -215,9 +215,60 @@ use super::protocol_engine::{ProtocolConfig, ProtocolEngine};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaveformPointsPayload {
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub port: String,
     pub points: Vec<HashMap<String, f64>>,
     pub timestamp_ms: u64,
+}
+
+/// Normalize COM port aliases (`com3`, `\\.\com3`, `COM3`) to `COM3` while preserving network/RTT/test keys.
+pub fn normalize_port_key(name: &str) -> String {
+    let trimmed = name.trim();
+    let stripped = trimmed.strip_prefix(r"\\.\").unwrap_or(trimmed);
+    if stripped.len() > 3
+        && stripped[..3].eq_ignore_ascii_case("com")
+        && stripped[3..].bytes().all(|b| b.is_ascii_digit())
+    {
+        return format!("COM{}", &stripped[3..]);
+    }
+    trimmed.to_string()
+}
+
+pub(crate) struct UiBackpressureLimiter {
+    window_start: Instant,
+    emitted_in_window: usize,
+    max_per_emit: usize,
+    max_per_sec: usize,
+    pub dropped_bytes: AtomicU64,
+}
+
+impl UiBackpressureLimiter {
+    pub(crate) fn new(max_per_emit: usize, max_per_sec: usize) -> Self {
+        Self {
+            window_start: Instant::now(),
+            emitted_in_window: 0,
+            max_per_emit,
+            max_per_sec,
+            dropped_bytes: AtomicU64::new(0),
+        }
+    }
+
+    /// Returns the slice length allowed for GUI IPC emit; excess bytes are counted in `dropped_bytes`.
+    pub(crate) fn admit(&mut self, len: usize) -> usize {
+        if self.window_start.elapsed() >= Duration::from_secs(1) {
+            self.window_start = Instant::now();
+            self.emitted_in_window = 0;
+        }
+        let budget = self.max_per_sec.saturating_sub(self.emitted_in_window);
+        let allowed = len.min(self.max_per_emit).min(budget);
+        self.emitted_in_window += allowed;
+        if len > allowed {
+            self.dropped_bytes
+                .fetch_add((len - allowed) as u64, Ordering::Relaxed);
+        }
+        allowed
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,10 +384,11 @@ impl SerialManager {
         capture
     }
     pub fn capture(&self, port: &str) -> Result<Arc<Mutex<Capture>>, String> {
-        if let Ok(session) = self.resolve_session(Some(port)) {
+        let key = normalize_port_key(port);
+        if let Ok(session) = self.resolve_session(Some(&key)) {
             return Ok(session.lock().unwrap().capture.clone());
         }
-        self.captures.lock().unwrap().iter().find(|(name, _)| name == port)
+        self.captures.lock().unwrap().iter().find(|(name, _)| name == &key)
             .map(|(_, capture)| capture.clone()).ok_or_else(|| "No retained capture for this port".into())
     }
     pub fn capture_page(&self, port: &str, after: u64, limit: usize) -> Result<CapturePage, String> {
@@ -666,6 +718,7 @@ impl SerialManager {
                                     .unwrap_or_default()
                                     .as_millis() as u64;
                                 let points_payload = WaveformPointsPayload {
+                                    session_id: Some(capture.lock().unwrap().session_id.clone()),
                                     port: current_port_name.clone(),
                                     points: parsed_points,
                                     timestamp_ms: now_ms,
@@ -722,47 +775,53 @@ impl SerialManager {
 
     pub fn open(&self, app: AppHandle, port_name: &str, baud_rate: u32) -> Result<(), String> {
         let _lifecycle = self.lifecycle.lock().unwrap();
-        if super::ing_flasher::FLASH_PORT.lock().unwrap().as_deref() == Some(port_name) { return Err("串口正在用于烧录".into()); }
-        if let Some(existing)=self.sessions.lock().unwrap().get(port_name) {
+        let port_key = normalize_port_key(port_name);
+        if super::ing_flasher::FLASH_PORT.lock().unwrap().as_deref() == Some(port_key.as_str()) { return Err("串口正在用于烧录".into()); }
+        if let Some(existing)=self.sessions.lock().unwrap().get(&port_key) {
             let s=existing.lock().unwrap();
             if s.is_running.load(Ordering::SeqCst) {
                 return if s.baud_rate==baud_rate { Ok(()) } else { Err("串口以不同波特率使用，请先断开".into()) };
             }
         }
-        let _=self.close_inner(Some(port_name));
+        let _=self.close_inner(Some(&port_key));
         let decoder:Arc<Mutex<Option<Decoder>>>=Arc::new(Mutex::new(None));
         let legacy:Arc<Mutex<Option<ProtocolEngine>>>=Arc::new(Mutex::new(None));
         let capture_slot:Arc<Mutex<Option<Arc<Mutex<Capture>>>>> = Arc::new(Mutex::new(None));
+        let ui_limiter = Arc::new(Mutex::new(UiBackpressureLimiter::new(64 * 1024, 512 * 1024)));
         let slot=capture_slot.clone();let d=decoder.clone();let l=legacy.clone();let source=self.waveform_source.clone();
-        let target=port_name.to_string();let app_rx=app.clone();
-        let native=hil_runtime::serial::SerialSession::open(port_name,baud_rate,Some(Arc::new(move|bytes,_|{
+        let target=port_key.clone();let app_rx=app.clone();
+        let native=hil_runtime::serial::SerialSession::open(&port_key,baud_rate,Some(Arc::new(move|bytes,_|{
             let capture=slot.lock().unwrap().clone();
             if let Some(capture)=capture {
                 Self::parse_frames(&app_rx,&target,&d,&capture,bytes);
+                let session_id = capture.lock().unwrap().session_id.clone();
                 let selected=source.lock().unwrap().clone();
                 if selected.as_deref()==Some(target.as_str()) {
                     if let Some(engine)=l.lock().unwrap().as_mut() {
                         let points=engine.parse_chunk(bytes);
-                        if !points.is_empty(){let _=app_rx.emit("waveform-points",WaveformPointsPayload{port:target.clone(),points,timestamp_ms:hil_debug_core::capture::wall_time_ms()});}
+                        if !points.is_empty(){let _=app_rx.emit("waveform-points",WaveformPointsPayload{session_id:Some(session_id.clone()),port:target.clone(),points,timestamp_ms:hil_debug_core::capture::wall_time_ms()});}
                     }
                 }
-                let _=app_rx.emit("serial-rx",SerialRxPayload{session_id:Some(capture.lock().unwrap().session_id.clone()),port:target.clone(),data:bytes.into(),timestamp_ms:hil_debug_core::capture::wall_time_ms()});
+                let ui_len = ui_limiter.lock().unwrap().admit(bytes.len());
+                if ui_len > 0 {
+                    let _=app_rx.emit("serial-rx",SerialRxPayload{session_id:Some(session_id),port:target.clone(),data:bytes[..ui_len].into(),timestamp_ms:hil_debug_core::capture::wall_time_ms()});
+                }
             }
         })))?;
         let capture=native.capture.clone();*capture_slot.lock().unwrap()=Some(capture.clone());
-        self.register_capture(port_name, capture.clone());
+        self.register_capture(&port_key, capture.clone());
         let running=native.running.clone();
-        let is_daplink=Self::list_ports().iter().find(|p|p.port_name.eq_ignore_ascii_case(port_name)).map_or(false,|p|p.is_daplink);
+        let is_daplink=Self::list_ports().iter().find(|p|p.port_name.eq_ignore_ascii_case(&port_key)).map_or(false,|p|p.is_daplink);
         let session=Arc::new(Mutex::new(PortSession{
             native:Some(native),capture,decoder,legacy,transaction:Arc::new(Mutex::new(())),uncertain:false,
             used_requests:std::collections::HashSet::new(),request_cancel:Arc::new(AtomicBool::new(false)),request_id:None,
-            port_name:port_name.into(),baud_rate,port:None,rtt_stream:None,is_daplink,is_running:running.clone(),
+            port_name:port_key.clone(),baud_rate,port:None,rtt_stream:None,is_daplink,is_running:running.clone(),
             dtr_state:Arc::new(AtomicBool::new(false)),rts_state:Arc::new(AtomicBool::new(false)),
         }));
-        self.sessions.lock().unwrap().insert(port_name.into(),session);
-        *self.last_active_port.lock().unwrap()=Some(port_name.into());
-        if self.waveform_source.lock().unwrap().is_none(){*self.waveform_source.lock().unwrap()=Some(port_name.into());}
-        let sessions=self.sessions.clone();let name=port_name.to_string();
+        self.sessions.lock().unwrap().insert(port_key.clone(),session);
+        *self.last_active_port.lock().unwrap()=Some(port_key.clone());
+        if self.waveform_source.lock().unwrap().is_none(){*self.waveform_source.lock().unwrap()=Some(port_key.clone());}
+        let sessions=self.sessions.clone();let name=port_key;
         std::thread::spawn(move||{
             while running.load(Ordering::SeqCst){std::thread::sleep(Duration::from_millis(100));}
             Self::finish_session(&sessions, &name, &running, "串口连接已断开", |payload| {
@@ -809,7 +868,7 @@ impl SerialManager {
     fn close_inner_with_notify(&self, port_name: Option<&str>, reason: &str, mut notify: impl FnMut(SerialDisconnectPayload)) -> Result<(), String> {
         let mut sessions = self.sessions.lock().unwrap();
         let targets: Vec<String> = match port_name {
-            Some(port) => vec![port.into()],
+            Some(port) => vec![normalize_port_key(port)],
             None => sessions.keys().cloned().collect(),
         };
         for target in &targets {
@@ -834,10 +893,11 @@ impl SerialManager {
     fn resolve_session(&self, port_name: Option<&str>) -> Result<Arc<Mutex<PortSession>>, String> {
         let sessions = self.sessions.lock().unwrap();
         if let Some(target) = port_name {
+            let key = normalize_port_key(target);
             sessions
-                .get(target)
+                .get(&key)
                 .cloned()
-                .ok_or_else(|| format!("端口 '{}' 未打开", target))
+                .ok_or_else(|| format!("端口 '{}' 未打开", key))
         } else {
             let last_active = self.last_active_port.lock().unwrap();
             if let Some(active) = last_active.as_deref() {
@@ -971,10 +1031,11 @@ impl SerialManager {
 
     /// Pause the port session for firmware flashing, returning the original baud rate if it was active
     pub fn pause_for_flashing(&self, app: &AppHandle, port_name: &str) -> Option<u32> {
+        let port_key = normalize_port_key(port_name);
         let mut original_baud = None;
         {
             let mut sessions_guard = self.sessions.lock().unwrap();
-            if let Some(session_arc) = sessions_guard.remove(port_name) {
+            if let Some(session_arc) = sessions_guard.remove(&port_key) {
                 let mut session = session_arc.lock().unwrap();
                 original_baud = Some(session.baud_rate);
                 session.close();
@@ -982,9 +1043,9 @@ impl SerialManager {
         }
         if let Some(baud) = original_baud {
             let _ = app.emit("serial-flash-active", SerialFlashEventPayload {
-                port: port_name.to_string(),
+                port: port_key.clone(),
                 original_baud: Some(baud),
-                message: format!("串口 {} 正在被固件烧录任务临时接管，终端数据监听已暂时挂起...", port_name),
+                message: format!("串口 {} 正在被固件烧录任务临时接管，终端数据监听已暂时挂起...", port_key),
             });
         }
         // Give Windows OS kernel sufficient time to release the COM file handle
@@ -994,13 +1055,14 @@ impl SerialManager {
 
     /// Resume the port session after firmware flashing finishes
     pub fn resume_after_flashing(&self, app: &AppHandle, port_name: &str, baud_rate: u32) -> Result<(), String> {
+        let port_key = normalize_port_key(port_name);
         // Sleep briefly to ensure flashing handle is completely closed
         std::thread::sleep(Duration::from_millis(150));
-        Self::finish_restore(self.open(app.clone(), port_name, baud_rate), || {
+        Self::finish_restore(self.open(app.clone(), &port_key, baud_rate), || {
             let _ = app.emit("serial-flash-done", SerialFlashEventPayload {
-                port: port_name.to_string(),
+                port: port_key.clone(),
                 original_baud: Some(baud_rate),
-                message: format!("固件烧录任务已结束，串口 {} 控制权已归还给终端（恢复波特率: {}）", port_name, baud_rate),
+                message: format!("固件烧录任务已结束，串口 {} 控制权已归还给终端（恢复波特率: {}）", port_key, baud_rate),
             });
         })
     }
@@ -1009,5 +1071,30 @@ impl SerialManager {
         result.map_err(|error| format!("串口恢复失败，控制权未归还终端: {error}"))?;
         notify_restored();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod port_and_backpressure_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_port_key_unifies_windows_com_aliases() {
+        assert_eq!(normalize_port_key("com3"), "COM3");
+        assert_eq!(normalize_port_key(" COM12 "), "COM12");
+        assert_eq!(normalize_port_key(r"\\.\com7"), "COM7");
+        assert_eq!(normalize_port_key("TCP-Client:127.0.0.1:8080"), "TCP-Client:127.0.0.1:8080");
+        assert_eq!(normalize_port_key("TEST"), "TEST");
+    }
+
+    #[test]
+    fn backpressure_limiter_caps_burst_and_counts_dropped_bytes() {
+        let mut limiter = UiBackpressureLimiter::new(64, 100);
+        assert_eq!(limiter.admit(80), 64);
+        assert_eq!(limiter.dropped_bytes.load(Ordering::Relaxed), 16);
+        assert_eq!(limiter.admit(60), 36);
+        assert_eq!(limiter.dropped_bytes.load(Ordering::Relaxed), 40);
+        assert_eq!(limiter.admit(10), 0);
+        assert_eq!(limiter.dropped_bytes.load(Ordering::Relaxed), 50);
     }
 }

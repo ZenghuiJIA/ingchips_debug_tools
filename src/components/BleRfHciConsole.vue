@@ -1,7 +1,9 @@
 <script setup lang="ts">
+defineOptions({ name: 'BleRfHciConsole' });
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { buildDtmCommand, DTM_TEST_END, H4Decoder } from '../utils/bleProtocol';
 import { safeInvoke, isTauri } from '../utils/ipc';
+import { notifyWarn } from '../utils/notify';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SerialRxPayload, PortInfo } from '../types';
 import {
@@ -300,7 +302,7 @@ function clearPackets() {
 // Export PCAP file helper
 function exportPcap() {
   if (hciPackets.value.length === 0) {
-    alert('暂无捕获的 HCI 报文');
+    notifyWarn('暂无捕获的 HCI 报文');
     return;
   }
   const text = hciPackets.value.map(p => `[${p.timestamp}] [${p.type}] ${p.opcodeOrEvent}: ${p.rawHex}`).join('\n');

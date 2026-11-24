@@ -492,6 +492,7 @@ export interface SvdRegister {
 }
 
 export interface WaveformPointsPayload {
+  session_id?: string | null;
   port: string;
   points: Record<string, number>[];
   timestamp_ms: number;

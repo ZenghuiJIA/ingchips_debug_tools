@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
 import { t } from '../utils/i18n';
 import type { SystemMetrics } from '../types';
+import UpdateManager from './UpdateManager.vue';
 import {
   Cpu,
   Activity,
@@ -55,13 +56,37 @@ async function handleTrimMemory() {
   }
 }
 
-onMounted(() => {
+function startMetricsPolling() {
+  if (metricsTimer) return;
   refreshMetrics();
-  metricsTimer = setInterval(refreshMetrics, 2000);
+  metricsTimer = setInterval(refreshMetrics, 3000);
+}
+
+function stopMetricsPolling() {
+  if (metricsTimer) {
+    clearInterval(metricsTimer);
+    metricsTimer = null;
+  }
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === 'hidden') {
+    stopMetricsPolling();
+  } else {
+    startMetricsPolling();
+  }
+}
+
+onMounted(() => {
+  if (document.visibilityState !== 'hidden') {
+    startMetricsPolling();
+  }
+  document.addEventListener('visibilitychange', handleVisibilityChange);
 });
 
 onUnmounted(() => {
-  if (metricsTimer) clearInterval(metricsTimer);
+  stopMetricsPolling();
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
 });
 </script>
 
@@ -137,6 +162,8 @@ onUnmounted(() => {
       <div v-else class="text-[11px] text-zinc-500 font-mono hidden sm:block">
         {{ t('no_active_conn') }}
       </div>
+
+      <UpdateManager />
     </div>
   </header>
 </template>

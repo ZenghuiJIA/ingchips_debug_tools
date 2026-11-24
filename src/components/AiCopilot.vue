@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'AiCopilot' });
 import { ref, onMounted, nextTick } from 'vue';
 import { safeInvoke } from '../utils/ipc';
 import { parseHardwareIntent } from '../utils/hardwareContracts';

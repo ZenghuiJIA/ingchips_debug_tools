@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import { notifyWarn } from '../utils/notify';
 import { readMemoryRange } from '../utils/memorySnapshot';
 import { parseHexUint } from '../utils/hardwareContracts';
 import type { ProbeInfo } from '../types';
@@ -225,7 +226,7 @@ async function pickLocalFile() {
 // 4. Dump Buffer A to local disk
 async function dumpBufferAToDisk() {
   if (bufferA.value.length === 0) {
-    alert('快照 A 数据为空，请先读取芯片内存');
+    notifyWarn('快照 A 数据为空，请先读取芯片内存');
     return;
   }
   try {

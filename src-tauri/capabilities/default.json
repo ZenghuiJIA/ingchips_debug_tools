@@ -6,6 +6,11 @@
     "main"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-close",
+    "updater:allow-check",
+    "updater:allow-download",
+    "updater:allow-install",
+    "opener:allow-open-url"
   ]
 }

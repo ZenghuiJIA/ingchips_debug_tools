@@ -308,6 +308,7 @@ impl NetworkManager {
                                 .unwrap_or_default()
                                 .as_millis() as u64;
                             let points_payload = WaveformPointsPayload {
+                                session_id: Some(session_id.clone()),
                                 port: stream_name.clone(),
                                 points: parsed_points,
                                 timestamp_ms: now_ms,
@@ -403,6 +404,7 @@ impl NetworkManager {
                                 .unwrap_or_default()
                                 .as_millis() as u64;
                             let points_payload = WaveformPointsPayload {
+                                session_id: Some(session_id.clone()),
                                 port: stream_name.clone(),
                                 points: parsed_points,
                                 timestamp_ms: now_ms,
@@ -478,6 +480,14 @@ impl NetworkManager {
         // Keep the map locked until the event is enqueued, before a new open.
         notify(SerialDisconnectPayload { session_id: Some(session_id), port: name.into(), reason });
         true
+    }
+
+    /// Stop and close all active network streams without GUI notifications.
+    pub fn stop_all(&self) {
+        let names: Vec<String> = self.sessions.lock().unwrap().keys().cloned().collect();
+        for name in names {
+            self.stop_stream(&name);
+        }
     }
 
     /// Stop and close a network stream without a GUI notification.

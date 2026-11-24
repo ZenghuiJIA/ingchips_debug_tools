@@ -12,6 +12,16 @@ export default defineConfig({
     strictPort: true,
     host: '127.0.0.1',
   },
+  build: {
+    rolldownOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('@xterm')) return 'vendor-xterm';
+          if (id.includes('@lucide')) return 'vendor-icons';
+        },
+      },
+    },
+  },
   css: {
     postcss: {
       plugins: [

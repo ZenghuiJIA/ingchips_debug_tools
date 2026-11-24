@@ -10,6 +10,7 @@ import {
   Info
 } from '@lucide/vue';
 import { t } from '../utils/i18n';
+import { notifyWarn, confirmAction } from '../utils/notify';
 
 const emit = defineEmits<{
   (e: 'close'): void;
@@ -103,7 +104,7 @@ watch(rules, () => {
 
 function handleCreateRule() {
   if (!newRule.value.name || !newRule.value.matchPattern || !newRule.value.responsePayload) {
-    alert(t('trig_alert_fill_all'));
+    notifyWarn(t('trig_alert_fill_all'));
     return;
   }
 
@@ -146,8 +147,8 @@ function resetHits() {
   rules.value.forEach(r => r.hits = 0);
 }
 
-function restorePresets() {
-  if (confirm(t('trig_confirm_reset'))) {
+async function restorePresets() {
+  if (await confirmAction(t('trig_confirm_reset'))) {
     rules.value = [...defaultPresets];
   }
 }

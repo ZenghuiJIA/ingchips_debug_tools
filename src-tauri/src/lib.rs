@@ -3,6 +3,8 @@ pub mod daemon;
 pub mod hardware;
 pub mod platform;
 pub mod system_metrics;
+#[cfg(test)]
+mod update_tests;
 
 use commands::AppState;
 use daemon::process_manager::DaemonManager;
@@ -69,26 +71,20 @@ pub fn run() {
 
     let serial = Arc::new(SerialManager::new());
     let daemon = Arc::new(DaemonManager::new());
+    let metrics = Arc::new(system_metrics::MetricsCollector::new());
     let network = Arc::new(hardware::network_manager::NetworkManager::new(
         Arc::clone(&serial.protocol_engine),
         Arc::clone(&serial.waveform_source),
     ));
 
     let serial_exit = Arc::clone(&serial);
+    let network_exit = Arc::clone(&network);
     let daemon_exit = Arc::clone(&daemon);
-    let serial_win = Arc::clone(&serial);
-    let daemon_win = Arc::clone(&daemon);
     let serial_bridge = Arc::clone(&serial);
 
     let app = match tauri::Builder::default()
-        .on_window_event(move |_window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
-                log_debug("[WINDOW_EVENT] Window closing, cleaning up all background processes...");
-                crate::hardware::desktop_bridge::DesktopBridgeServer::stop();
-                let _ = serial_win.close(None);
-                daemon_win.stop();
-            }
-        })
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_opener::init())
         .on_page_load(|window, payload| {
             log_debug(&format!("[PAGE_LOAD] {}: url={}, event={:?}", window.label(), payload.url(), payload.event()));
         })
@@ -114,6 +110,7 @@ pub fn run() {
             serial: Arc::clone(&serial),
             network: Arc::clone(&network),
             daemon: Arc::clone(&daemon),
+            metrics: Arc::clone(&metrics),
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_serial_ports,
@@ -202,6 +199,9 @@ pub fn run() {
             commands::pick_save_trace_file,
             commands::pick_open_trace_file,
             commands::trim_system_memory,
+            commands::open_release_page,
+            commands::check_update_install_guard,
+            commands::prepare_for_update,
         ])
         .build(tauri::generate_context!()) {
             Ok(a) => {
@@ -243,16 +243,21 @@ pub fn run() {
             }
             tauri::RunEvent::WindowEvent { label, event, .. } => {
                 if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
+                    log_debug("[WINDOW_EVENT] Window closing, cleaning up all background processes...");
                     if let Some(win) = _app_handle.get_webview_window(&label) {
                         platform::window_state::save_window_state(&win);
                     }
+                    crate::hardware::desktop_bridge::DesktopBridgeServer::stop();
                     let _ = serial_exit.close(None);
+                    network_exit.stop_all();
                     daemon_exit.stop();
                 }
             }
             tauri::RunEvent::Exit => {
                 log_debug("[EVENT] RunEvent::Exit");
+                crate::hardware::desktop_bridge::DesktopBridgeServer::stop();
                 let _ = serial_exit.close(None);
+                network_exit.stop_all();
                 daemon_exit.stop();
             }
             tauri::RunEvent::ExitRequested { .. } => {

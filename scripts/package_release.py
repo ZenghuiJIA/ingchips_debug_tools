@@ -78,6 +78,30 @@ def get_release_paths(ver: str):
     zip_path = RELEASE_DIR / f"{pkg_name}.zip"
     return pkg_name, target_dir, zip_path
 
+def prepare_signing_env(env: dict) -> dict:
+    """Load local updater signing key if TAURI_SIGNING_PRIVATE_KEY is not already set."""
+    if env.get("TAURI_SIGNING_PRIVATE_KEY"):
+        return env
+    local_key = Path(
+        env.get("AI_HIL_SIGNING_KEY_PATH")
+        or (Path.home() / ".tauri" / "AI-HIL-Debugger" / "updater.key")
+    )
+    if not local_key.is_file():
+        return env
+    pub_file = Path(f"{local_key}.pub")
+    if pub_file.is_file():
+        import json
+        conf = json.loads((ROOT_DIR / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+        expected_pub = conf.get("plugins", {}).get("updater", {}).get("pubkey", "").strip()
+        actual_pub = pub_file.read_text(encoding="utf-8").strip()
+        if expected_pub and actual_pub != expected_pub:
+            raise RuntimeError("本地签名公钥与应用 tauri.conf.json 中的 pubkey 不一致")
+    updated = dict(env)
+    updated["TAURI_SIGNING_PRIVATE_KEY"] = local_key.read_text(encoding="utf-8")
+    updated.setdefault("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "")
+    return updated
+
+
 def package(custom_version: str = None, daemon_source=None):
     version = custom_version or get_release_version()
     pkg_name, target_dir, zip_path = get_release_paths(version)
@@ -99,6 +123,7 @@ def package(custom_version: str = None, daemon_source=None):
             subprocess.run(
                 ["node", str(ROOT_DIR / "node_modules" / "@tauri-apps" / "cli" / "tauri.js"), "build"],
                 cwd=str(ROOT_DIR),
+                env=prepare_signing_env(os.environ),
                 check=True,
                 shell=False
             )
@@ -125,7 +150,6 @@ def package(custom_version: str = None, daemon_source=None):
     (target_dir / "skills").mkdir(exist_ok=True)
     (target_dir / "mcp").mkdir(exist_ok=True)
     (target_dir / "packs").mkdir(exist_ok=True)
-    (target_dir / "installers").mkdir(exist_ok=True)
 
     # Copy primary executables
     print("[1/5] Copying application executables...")
@@ -141,16 +165,22 @@ def package(custom_version: str = None, daemon_source=None):
         shutil.copy2(main_exe, target_dir / "AI-HIL-Debugger.exe")
         print(f"  [OK] Copied {main_exe.name} -> AI-HIL-Debugger.exe ({main_exe.stat().st_size / 1024 / 1024:.1f} MB)")
 
-    # Keep installer artifacts inside the same versioned release directory.
+    # Copy standalone NSIS installer & signature to release/ (not inside portable ZIP)
     bundle_dir = ROOT_DIR / "src-tauri" / "target" / "release" / "bundle"
     installer_version = version.lstrip("v")
-    installer_candidates = [p for p in list((bundle_dir / "nsis").glob("*.exe")) + list((bundle_dir / "msi").glob("*.msi"))
-                           if installer_version in p.name]
-    for installer in installer_candidates:
-        shutil.copy2(installer, target_dir / "installers" / installer.name)
-        print(f"  [OK] Copied installer {installer.name}")
-    if not installer_candidates:
-        raise FileNotFoundError("Tauri installer artifacts missing; run a bundled tauri build first")
+    nsis_exe = next(
+        (p for p in (bundle_dir / "nsis").glob("*.exe") if installer_version in p.name and not p.name.endswith(".sig")),
+        None,
+    )
+    if nsis_exe is None:
+        raise FileNotFoundError("Tauri NSIS installer missing; run a bundled tauri build first")
+    shutil.copy2(nsis_exe, RELEASE_DIR / "AI-HIL-Debugger-setup.exe")
+    print(f"  [OK] Copied NSIS installer -> release/AI-HIL-Debugger-setup.exe")
+
+    nsis_sig = Path(f"{nsis_exe}.sig")
+    if nsis_sig.is_file():
+        shutil.copy2(nsis_sig, RELEASE_DIR / "AI-HIL-Debugger-setup.exe.sig")
+        print(f"  [OK] Copied updater signature -> release/AI-HIL-Debugger-setup.exe.sig")
 
     daemon_exe = Path(daemon_source) if daemon_source else ROOT_DIR / 'build_dist/hil-native.exe'
     if not daemon_exe.is_file():
@@ -275,6 +305,40 @@ def package(custom_version: str = None, daemon_source=None):
                 zf.write(full_path, rel_path)
 
     zip_size_mb = zip_path.stat().st_size / 1024 / 1024
+
+    # Generate signed updater latest.json & release-manifest.json if .sig exists
+    sig_file = RELEASE_DIR / "AI-HIL-Debugger-setup.exe.sig"
+    if sig_file.is_file():
+        sys.path.insert(0, str(ROOT_DIR / "scripts"))
+        from update_manifest import build_latest_manifest, build_release_manifest
+
+        notes_text = notes.read_text(encoding="utf-8") if notes.is_file() else ""
+        latest_data = build_latest_manifest(
+            version=installer_version,
+            signature=sig_file.read_text(encoding="utf-8"),
+            tag=version if version.startswith("v") else f"v{version}",
+            notes=notes_text,
+        )
+        (RELEASE_DIR / "latest.json").write_text(
+            json.dumps(latest_data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        rel_manifest = build_release_manifest(
+            version=installer_version,
+            release_dir=RELEASE_DIR,
+            filenames=[
+                "AI-HIL-Debugger-setup.exe",
+                "AI-HIL-Debugger-setup.exe.sig",
+                zip_path.name,
+                "latest.json",
+            ],
+        )
+        (RELEASE_DIR / "release-manifest.json").write_text(
+            json.dumps(rel_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print("  [OK] Generated release/latest.json & release/release-manifest.json")
+
     print("=" * 60)
     print(f"[SUCCESS] Release packaged successfully!")
     print(f"  Directory: {target_dir}")

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { serialIdentity, guardedSend } from '../utils/serialSession';
+import { notifyWarn, confirmAction } from '../utils/notify';
 import { ref, computed, watch, onUnmounted } from 'vue';
 import type { CommandGroup, CommandItem } from '../types';
 import {
@@ -22,7 +23,7 @@ import {
   Layers,
   Repeat,
   Sparkles
-} from 'lucide-vue-next';
+} from '@lucide/vue';
 import { t } from '../utils/i18n';
 
 const props = defineProps<{
@@ -215,12 +216,12 @@ function createNewGroup() {
   activeGroupId.value = newId;
 }
 
-function deleteCurrentGroup() {
+async function deleteCurrentGroup() {
   if (groups.value.length <= 1) {
-    alert(t('cmd_keep_one_group'));
+    notifyWarn(t('cmd_keep_one_group'));
     return;
   }
-  if (confirm(t('cmd_confirm_delete_group', { name: activeGroup.value?.name || '' }))) {
+  if (await confirmAction(t('cmd_confirm_delete_group', { name: activeGroup.value?.name || '' }))) {
     groups.value = groups.value.filter(g => g.id !== activeGroupId.value);
     activeGroupId.value = groups.value[0]?.id || '';
   }
@@ -253,10 +254,10 @@ function importGroupsJson() {
           activeGroupId.value = parsed[0].id;
           emit('log', t('cmd_import_success', { count: parsed.length }), 'info');
         } else {
-          alert(t('cmd_import_invalid_format'));
+          notifyWarn(t('cmd_import_invalid_format'));
         }
       } catch (err: any) {
-        alert(t('cmd_import_parse_err', { err: err.message }));
+        notifyWarn(t('cmd_import_parse_err', { err: err.message }));
       }
     };
     reader.readAsText(file);

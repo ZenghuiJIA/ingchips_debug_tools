@@ -14,7 +14,7 @@ import {
   Sliders,
   Database,
   FolderPlus
-} from 'lucide-vue-next';
+} from '@lucide/vue';
 
 // State
 const devices = ref<SvdDevice[]>([]);

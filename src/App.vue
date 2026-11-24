@@ -1,25 +1,28 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted, onErrorCaptured } from 'vue';
-import { isTauri, safeInvoke } from './utils/ipc';
+import { ref, watch, onMounted, onUnmounted, onErrorCaptured, defineAsyncComponent } from 'vue';
+import pkg from '../package.json';
+import { isTauri } from './utils/ipc';
 import { initTheme } from './utils/themeManager';
 import HeaderBar from './components/HeaderBar.vue';
 import SerialTerminal from './components/SerialTerminal.vue';
-import WaveformPlotter from './components/WaveformPlotter.vue';
-import PyocdFlasher from './components/PyocdFlasher.vue';
-import HardFaultInspector from './components/HardFaultInspector.vue';
-import MemoryInspector from './components/MemoryInspector.vue';
-import FirmwareResourceAnalyzer from './components/FirmwareResourceAnalyzer.vue';
-import SvdRegisterInspector from './components/SvdRegisterInspector.vue';
-import RTOSTracer from './components/RTOSTracer.vue';
-import LcdScreenMirror from './components/LcdScreenMirror.vue';
-import FirmwareMerger from './components/FirmwareMerger.vue';
-import HilTestSequencer from './components/HilTestSequencer.vue';
-import BleRfHciConsole from './components/BleRfHciConsole.vue';
-import McuProfiler from './components/McuProfiler.vue';
-import RadixCalculator from './components/RadixCalculator.vue';
-import AiCopilot from './components/AiCopilot.vue';
 import CollapsibleToolbar from './components/CollapsibleToolbar.vue';
 import GlobalSettingsModal from './components/GlobalSettingsModal.vue';
+import GlobalNotify from './components/GlobalNotify.vue';
+const WaveformPlotter = defineAsyncComponent(() => import('./components/WaveformPlotter.vue'));
+const PyocdFlasher = defineAsyncComponent(() => import('./components/PyocdFlasher.vue'));
+const FirmwareMerger = defineAsyncComponent(() => import('./components/FirmwareMerger.vue'));
+const FirmwareResourceAnalyzer = defineAsyncComponent(() => import('./components/FirmwareResourceAnalyzer.vue'));
+const SvdRegisterInspector = defineAsyncComponent(() => import('./components/SvdRegisterInspector.vue'));
+const RTOSTracer = defineAsyncComponent(() => import('./components/RTOSTracer.vue'));
+const LcdScreenMirror = defineAsyncComponent(() => import('./components/LcdScreenMirror.vue'));
+const HardFaultInspector = defineAsyncComponent(() => import('./components/HardFaultInspector.vue'));
+const MemoryInspector = defineAsyncComponent(() => import('./components/MemoryInspector.vue'));
+const HilTestSequencer = defineAsyncComponent(() => import('./components/HilTestSequencer.vue'));
+const BleRfHciConsole = defineAsyncComponent(() => import('./components/BleRfHciConsole.vue'));
+const McuProfiler = defineAsyncComponent(() => import('./components/McuProfiler.vue'));
+const RadixCalculator = defineAsyncComponent(() => import('./components/RadixCalculator.vue'));
+const AiCopilot = defineAsyncComponent(() => import('./components/AiCopilot.vue'));
+const keepAliveTabs = ['SerialTerminal', 'WaveformPlotter', 'PyocdFlasher', 'HilTestSequencer', 'BleRfHciConsole', 'AiCopilot'];
 import { t } from './utils/i18n';
 import {
   Terminal,
@@ -60,9 +63,6 @@ onErrorCaptured((err: any) => {
 
 watch(currentTab, () => {
   tabError.value = null;
-  if (isTauri()) {
-    safeInvoke('trim_system_memory').catch(() => {});
-  }
 });
 
 const runningInBrowser = ref<boolean>(!isTauri());
@@ -394,8 +394,8 @@ onUnmounted(() => {
           <p class="text-xs text-zinc-400 mb-3">页面已拦截异常，防止应用崩溃黑屏。可尝试点击下方重试恢复。</p>
           <button @click="tabError = null" class="px-3 py-1 bg-rose-700 hover:bg-rose-600 rounded text-xs">重试恢复</button>
         </div>
-        <!-- Keep task owners mounted: navigation must not discard running jobs or their logs. -->
-        <KeepAlive v-else>
+        <!-- Keep active connection/job owners mounted with bounded KeepAlive -->
+        <KeepAlive v-else :include="keepAliveTabs" :max="6">
           <component
             :is="
               currentTab === 'terminal' ? SerialTerminal :
@@ -431,7 +431,9 @@ onUnmounted(() => {
       <div class="flex items-center gap-4">
         <span>Windows x86_64</span>
         <span>•</span>
-        <span>PyOCD v0.45.1</span>
+        <span>AI-HIL v{{ pkg.version }}</span>
+        <span>•</span>
+        <span>PyOCD / J-Link SWD</span>
         <span>•</span>
         <span>MCP stdio RPC 2.0</span>
       </div>
@@ -448,6 +450,7 @@ onUnmounted(() => {
       :is-open="isSettingsOpen"
       @close="isSettingsOpen = false"
     />
+    <GlobalNotify />
 
     <!-- Quick Navigation Modal (全功能标签快捷索引浮层) -->
     <div

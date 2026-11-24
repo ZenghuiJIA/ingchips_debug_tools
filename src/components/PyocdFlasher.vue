@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'PyocdFlasher' });
 import { ref, computed, onMounted, watch } from 'vue';
 import { safeInvoke } from '../utils/ipc';
 import { pyocdFlashUnsupportedReason } from '../utils/flashCapabilities';

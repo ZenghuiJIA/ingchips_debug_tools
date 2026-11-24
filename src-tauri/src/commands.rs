@@ -1,7 +1,7 @@
 use crate::daemon::process_manager::DaemonManager;
 use crate::hardware::network_manager::{NetworkManager, NetworkMode, NetworkStreamInfo};
 use crate::hardware::serial_manager::{PortInfo, SerialManager};
-use crate::system_metrics::{collect_metrics, SystemMetrics};
+use crate::system_metrics::SystemMetrics;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
@@ -10,6 +10,7 @@ pub struct AppState {
     pub serial: Arc<SerialManager>,
     pub network: Arc<NetworkManager>,
     pub daemon: Arc<DaemonManager>,
+    pub metrics: Arc<crate::system_metrics::MetricsCollector>,
 }
 
 #[tauri::command(async)]
@@ -495,7 +496,7 @@ pub fn call_mcp_tool(
 #[tauri::command(async)]
 pub fn get_system_metrics(state: State<'_, AppState>) -> SystemMetrics {
     let daemon_pid = *state.daemon.child_pid.lock().unwrap();
-    collect_metrics(daemon_pid)
+    state.metrics.collect(daemon_pid)
 }
 
 #[tauri::command(async)]
@@ -1249,7 +1250,8 @@ pub async fn ing_start_flash(
     }
     let permit = FlashPermit;
     *crate::hardware::ing_flasher::FLASH_JOB.lock().unwrap() = Some(request.job_id.clone());
-    *crate::hardware::ing_flasher::FLASH_PORT.lock().unwrap() = Some(request.port_name.clone());
+    *crate::hardware::ing_flasher::FLASH_PORT.lock().unwrap() =
+        Some(crate::hardware::serial_manager::normalize_port_key(&request.port_name));
     FLASH_CANCEL.store(false, Ordering::SeqCst);
     // Check if the port was actively opened in the serial terminal; if so, pause it and record its baud rate
     let previous_baud = state.serial.pause_for_flashing(&app, &request.port_name);
@@ -1347,7 +1349,6 @@ mod win_mem {
     #[link(name = "kernel32")]
     extern "system" {
         pub fn GetCurrentProcess() -> HANDLE;
-        pub fn GetCurrentProcessId() -> u32;
         pub fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> HANDLE;
         pub fn CloseHandle(hObject: HANDLE) -> BOOL;
     }
@@ -1356,20 +1357,19 @@ mod win_mem {
 /// Trims unused working set memory of host process and all child WebView2 processes.
 #[tauri::command(async)]
 pub fn trim_system_memory() -> Result<u64, String> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let my_pid_u32 = std::process::id();
+
     #[cfg(target_os = "windows")]
     unsafe {
         use win_mem::*;
-        // 1. Trim current host process working set
         let cur = GetCurrentProcess();
         EmptyWorkingSet(cur);
 
-        // 2. Also trim WebView2 and helper child processes
-        let my_pid = GetCurrentProcessId();
-        let mut sys = sysinfo::System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         for (pid, proc_) in sys.processes() {
             if let Some(ppid) = proc_.parent() {
-                if ppid.as_u32() == my_pid {
+                if ppid.as_u32() == my_pid_u32 {
                     // PROCESS_SET_QUOTA (0x0100) | PROCESS_QUERY_INFORMATION (0x0400) = 0x0500
                     let h = OpenProcess(0x0500, 0, pid.as_u32());
                     if !h.is_null() {
@@ -1381,12 +1381,79 @@ pub fn trim_system_memory() -> Result<u64, String> {
         }
     }
 
-    let mut sys = sysinfo::System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    let my_pid = sysinfo::Pid::from_u32(std::process::id());
+    let my_pid = sysinfo::Pid::from_u32(my_pid_u32);
     let mem = sys.process(my_pid).map(|p| p.memory()).unwrap_or(0);
     Ok(mem)
 }
+
+#[tauri::command]
+pub fn open_release_page(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(
+            "https://github.com/ZenghuiJIA/ingchips_debug_tools/releases",
+            None::<&str>,
+        )
+        .map_err(|e| format!("打开 GitHub 发布页失败: {}", e))
+}
+
+fn update_install_block_reason(state: &AppState) -> Option<String> {
+    if crate::hardware::ing_flasher::FLASH_JOB
+        .lock()
+        .unwrap()
+        .is_some()
+    {
+        return Some("正在执行 ING 串口烧录，请等待烧录完成后再安装更新".into());
+    }
+    if state.daemon.is_busy() {
+        return Some("硬件调试或固件烧录任务正在执行，请等待完成后再安装更新".into());
+    }
+    None
+}
+
+#[tauri::command]
+pub fn check_update_install_guard(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(update_install_block_reason(&state))
+}
+
+#[tauri::command(async)]
+pub fn prepare_for_update(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(reason) = update_install_block_reason(&state) {
+        return Err(reason);
+    }
+    crate::hardware::desktop_bridge::DesktopBridgeServer::stop();
+    let _ = state.serial.close(None);
+    state.network.stop_all();
+    state.daemon.stop();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    Ok(())
+}
+
+#[cfg(test)]
+mod update_guard_tests {
+    use super::*;
+
+    #[test]
+    fn update_guard_blocks_during_active_ing_flash_and_clears_afterward() {
+        let serial = Arc::new(SerialManager::new());
+        let state = AppState {
+            network: Arc::new(crate::hardware::network_manager::NetworkManager::new(
+                Arc::clone(&serial.protocol_engine),
+                Arc::clone(&serial.waveform_source),
+            )),
+            serial,
+            daemon: Arc::new(DaemonManager::new()),
+            metrics: Arc::new(crate::system_metrics::MetricsCollector::new()),
+        };
+        assert_eq!(update_install_block_reason(&state), None);
+        *crate::hardware::ing_flasher::FLASH_JOB.lock().unwrap() = Some("job-update-guard".into());
+        let blocked = update_install_block_reason(&state);
+        *crate::hardware::ing_flasher::FLASH_JOB.lock().unwrap() = None;
+        assert!(blocked.is_some());
+        assert_eq!(update_install_block_reason(&state), None);
+    }
+}
+
 
 
 

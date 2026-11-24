@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { safeInvoke } from '../utils/ipc';
+import { notifyWarn } from '../utils/notify';
 let activeJobId = '';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { IngIniConfig, IngFlashProgressPayload } from '../types';
@@ -246,16 +247,16 @@ async function startFlash() {
 
   if (mode.value === 'ini') {
     if (!iniPath.value) {
-      alert(t('ing_alert_select_ini'));
+      notifyWarn(t('ing_alert_select_ini'));
       return;
     }
     if (!parsedIni.value || parsedIni.value.items.filter(i => i.checked).length === 0) {
-      alert(t('ing_alert_no_firmware'));
+      notifyWarn(t('ing_alert_no_firmware'));
       return;
     }
   } else {
     if (!singlePath.value) {
-      alert(t('ing_alert_select_file'));
+      notifyWarn(t('ing_alert_select_file'));
       return;
     }
   }

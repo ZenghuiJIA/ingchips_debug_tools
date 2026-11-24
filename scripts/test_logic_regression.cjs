@@ -139,7 +139,7 @@ const hilPlan = moduleFromSource('src/utils/hilPlan.ts');
       ...contracts, editingStartIndex: { value: 0 }, editingChunkSize: { value: 2 }, editingValue: { value: '1234' },
       isWritingByte: { value: false }, isLoading: { value: false }, snapshot: { value: { address: 0x20000000, probeId: 'A', frequency: 1000000 } },
       addressInput: { value: '0x20000000' }, selectedProbeId: { value: 'A' }, memoryBytes: { value: [0, 0] }, previousBytes: { value: [0, 0] },
-      alert() {}, t: key => key,
+      alert() {}, notifyWarn() {}, notifyError() {}, t: key => key,
       safeInvoke: async (_, args) => { calls.push(args); ctx.addressInput.value = '0x20001000'; ctx.selectedProbeId.value = 'B'; },
     });
     await ctx.commitEditChunk();

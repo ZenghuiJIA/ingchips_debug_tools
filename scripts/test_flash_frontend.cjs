@@ -29,6 +29,9 @@ const context = {
   t: key => key,
   crypto: { randomUUID: () => 'mock-flash-job' },
   alert: text => { throw new Error(text); },
+  notifyWarn: text => { throw new Error(text); },
+  notifyError: text => { throw new Error(text); },
+  notify: text => { throw new Error(text); },
   safeInvoke: async (name, payload) => calls.push({ name, payload }),
 };
 vm.createContext(context);
@@ -83,7 +86,7 @@ async function testPyocdCapabilities() {
   const { ref, computed } = require('vue');
   const context = {
     ref, computed, pyocdFlashUnsupportedReason, console, Date,
-    onMounted: () => {}, watch: () => {}, defineProps: () => ({}), defineEmits: () => () => {},
+    onMounted: () => {}, watch: () => {}, defineOptions: () => {}, defineProps: () => ({}), defineEmits: () => () => {},
     t: key => key,
     safeInvoke: async (name, payload) => { calls.push({ name, payload }); return { message: 'mock-only' }; },
   };

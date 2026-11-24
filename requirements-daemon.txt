@@ -1,0 +1,10 @@
+pyinstaller
+pyocd
+cmsis-pack-manager
+pylink-square
+pyelftools
+capstone
+pyserial
+intelhex
+pyyaml
+psutil

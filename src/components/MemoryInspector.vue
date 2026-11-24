@@ -2,6 +2,7 @@
 import { ref, shallowRef, triggerRef, computed, onUnmounted, onDeactivated, watch } from 'vue';
 import { parseHexUint } from '../utils/hardwareContracts';
 import { safeInvoke } from '../utils/ipc';
+import { notifyWarn, notifyError } from '../utils/notify';
 import { t } from '../utils/i18n';
 import { usePersistentState } from '../composables/usePersistentState';
 import ProbeSelect from './common/ProbeSelect.vue';
@@ -238,7 +239,7 @@ async function commitEditChunk() {
 
   const expectedLength = size * 2;
   if (rawHex.length !== expectedLength || !/^[0-9a-fA-F]+$/.test(rawHex)) {
-    alert(t('mem_alert_invalid_hex', { len: expectedLength }));
+    notifyWarn(t('mem_alert_invalid_hex', { len: expectedLength }));
     return;
   }
 
@@ -269,7 +270,7 @@ async function commitEditChunk() {
     triggerRef(memoryBytes);
     triggerRef(previousBytes);
   } catch (err: any) {
-    alert(t('mem_err_write', { err }));
+    notifyError(t('mem_err_write', { err }));
   } finally {
     isWritingByte.value = false;
   }
@@ -426,7 +427,7 @@ function copyFormattedHex() {
 // --- Dump Memory to File ---
 async function handleExecuteDump() {
   if (!dumpFilePath.value.trim()) {
-    alert(t('mem_alert_need_dump_path'));
+    notifyWarn(t('mem_alert_need_dump_path'));
     return;
   }
   isDumping.value = true;
@@ -453,7 +454,7 @@ async function handleExecuteDump() {
 // --- Load File to Memory ---
 async function handleExecuteLoad() {
   if (!loadFilePath.value.trim()) {
-    alert(t('mem_alert_need_load_path'));
+    notifyWarn(t('mem_alert_need_load_path'));
     return;
   }
   isUploading.value = true;

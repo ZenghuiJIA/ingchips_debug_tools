@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, onActivated } from 'vue';
+defineOptions({ name: 'SerialTerminal' });
+import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated } from 'vue';
 import { safeInvoke, isTauri } from '../utils/ipc';
+import { notifyError } from '../utils/notify';
 import { t } from '../utils/i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { TerminalSessionTab, PortInfo, SvdDevice } from '../types';
@@ -261,7 +263,7 @@ async function importPackForNewPortRtt() {
       }
     }
   } catch (err: any) {
-    alert(t('term_alert_pack_parse_err', { err }));
+    notifyError(t('term_alert_pack_parse_err', { err }));
   } finally {
     isNewPortImportingPack.value = false;
   }
@@ -279,7 +281,7 @@ async function toggleTabConnection(tab: TerminalSessionTab) {
       }
       await syncActiveSessions();
     } catch (err: any) {
-      alert(t('term_alert_stream_err', { stream: tab.portName, err }));
+      notifyError(t('term_alert_stream_err', { stream: tab.portName, err }));
     }
     return;
   }
@@ -314,7 +316,7 @@ async function toggleTabConnection(tab: TerminalSessionTab) {
       }
       await syncActiveSessions();
     } catch (err: any) {
-      alert(t('term_alert_open_port_err', { port: tab.portName, err }));
+      notifyError(t('term_alert_open_port_err', { port: tab.portName, err }));
     }
   }
 }
@@ -335,7 +337,7 @@ async function handleTabBaudChange(tab: TerminalSessionTab, newBaud: number) {
       });
       tab.isConnected = true;
     } catch (err: any) {
-      alert(t('term_alert_baud_err', { baud: newBaud, err }));
+      notifyError(t('term_alert_baud_err', { baud: newBaud, err }));
       tab.isConnected = false;
     }
   }
@@ -435,7 +437,7 @@ async function confirmOpenNewPort() {
       activeTabId.value = tab.id;
       isNewPortModalOpen.value = false;
     } catch (err: any) {
-      alert(t('term_alert_stream_err', { stream: streamName, err }));
+      notifyError(t('term_alert_stream_err', { stream: streamName, err }));
     } finally {
       isConnectingNetwork.value = false;
     }
@@ -501,7 +503,7 @@ async function confirmOpenNewPort() {
     activeTabId.value = tab.id;
     isNewPortModalOpen.value = false;
   } catch (err: any) {
-    alert(t('term_alert_open_target_err', { port: targetPort, err }));
+    notifyError(t('term_alert_open_target_err', { port: targetPort, err }));
   }
 }
 
@@ -651,10 +653,29 @@ async function pollPorts() {
   } finally { pollingPorts = false; }
 }
 let unlistenNetwork: UnlistenFn | null = null;
-onActivated(syncActiveSessions);
+function startPortPoll() {
+  if (!portPoll) {
+    portPoll = setInterval(pollPorts, 2000);
+  }
+}
+function stopPortPoll() {
+  if (portPoll) {
+    clearInterval(portPoll);
+    portPoll = undefined;
+  }
+}
+onActivated(() => {
+  startPortPoll();
+  syncActiveSessions();
+});
+onDeactivated(() => {
+  if (reconnectPending.size === 0) {
+    stopPortPoll();
+  }
+});
 
 onMounted(async () => {
-  portPoll = setInterval(pollPorts, 2000);
+  startPortPoll();
   await refreshPortList();
   await syncActiveSessions();
 

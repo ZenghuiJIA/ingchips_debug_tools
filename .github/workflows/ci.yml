@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  check:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+          run_install: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-daemon.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend & Python dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          python -m pip install -r requirements-daemon.txt
+
+      - name: Frontend regression & build
+        run: |
+          node scripts/verify_features_regression.js
+          pnpm build
+
+      - name: Python daemon, MCP & release plan tests
+        run: |
+          python scripts/test_daemon_logic.py
+          python scripts/test_mcp_integrated_capabilities.py
+          python scripts/test_release_plan.py
+
+      - name: Prepare resource placeholders for Cargo build checks
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          foreach ($f in @("hil-daemon-x86_64-pc-windows-msvc.exe", "hil-python-worker.exe", "hil-protocol.exe", "mcp-tools.json")) {
+            $p = "src-tauri/binaries/$f"
+            if (-not (Test-Path $p)) { Set-Content -Path $p -Value "{}" }
+          }
+
+      - name: Rust check, clippy & workspace tests
+        working-directory: src-tauri
+        run: |
+          cargo check --locked
+          cargo clippy --locked --workspace --all-targets
+          cargo test --locked --workspace --lib

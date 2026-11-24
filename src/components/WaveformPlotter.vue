@@ -1,8 +1,10 @@
 <script setup lang="ts">
+defineOptions({ name: 'WaveformPlotter' });
 import CaptureAnalysis from './CaptureAnalysis.vue';
 import { samplesCsv, statistics, type Sample } from '../utils/captureAnalysis';
 import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated, nextTick, markRaw } from 'vue';
 import { isTauri, safeInvoke } from '../utils/ipc';
+import { notifyWarn } from '../utils/notify';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SerialRxPayload, PlotterChannel, JScopeSymbol, WaveformPointsPayload } from '../types';
 import { parseTelemetryLine, PRESET_CHANNEL_COLORS } from '../utils/telemetryParser';
@@ -307,7 +309,7 @@ async function handleToggleJScopeSampling() {
     // Start
     const selected = axfSymbols.value.filter(s => s.selected);
     if (selected.length === 0) {
-      alert(t('plot_alert_select_one_var'));
+      notifyWarn(t('plot_alert_select_one_var'));
       return;
     }
     jscopeError.value = '';
@@ -1212,11 +1214,24 @@ onMounted(async () => {
 
   if (isTauri()) {
     try {
-      unlistenDisconnect = await listen<{port: string}>('serial-disconnected', event => {
+      const closedSessionIds = new Set<string>();
+      const recordClosedSession = (sid?: string | null) => {
+        if (!sid) return;
+        closedSessionIds.add(sid);
+        if (closedSessionIds.size > 32) {
+          const oldest = closedSessionIds.values().next().value;
+          if (oldest) closedSessionIds.delete(oldest);
+        }
+      };
+      unlistenDisconnect = await listen<{port: string; session_id?: string | null}>('serial-disconnected', event => {
+        recordClosedSession(event.payload.session_id);
         if (event.payload.port === 'JScope 变量采样') isSampling.value = false;
         refreshActivePortList();
       });
       unlistenRx = await listen<SerialRxPayload>('serial-rx', (event) => {
+        if (event.payload.session_id && closedSessionIds.has(event.payload.session_id)) {
+          return;
+        }
         // Filter by bound waveform port if set
         if (boundWaveformSource.value && event.payload.port && event.payload.port !== boundWaveformSource.value) {
           return;
@@ -1229,6 +1244,9 @@ onMounted(async () => {
       });
 
       unlistenPoints = await listen<WaveformPointsPayload>('waveform-points', (event) => {
+        if (event.payload.session_id && closedSessionIds.has(event.payload.session_id)) {
+          return;
+        }
         // Filter by bound waveform port if set
         if (boundWaveformSource.value && event.payload.port && event.payload.port !== boundWaveformSource.value) {
           return;

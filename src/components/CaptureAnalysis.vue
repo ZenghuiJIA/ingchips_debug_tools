@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted, watch, nextTick } from 'vue';
+import { ref, computed, onUnmounted, onDeactivated, watch, nextTick } from 'vue';
 import { safeInvoke, isTauri } from '../utils/ipc';
 import { normalizeEvent, statistics, parseSamplesCsv, samplesCsv, extremaDecimation, compareRuns, type Sample, type TimelineEvent } from '../utils/captureAnalysis';
 import { exampleProtocol, type ProtocolFrame } from '../utils/protocol';
@@ -109,6 +109,7 @@ function pickPoint(event: MouseEvent) {
   if (closest) { position.value = closest.t; selectedEvent.value = events.value.find(e => e.seq === closest!.source && (!closest!.session || e.session === closest!.session)) || null; }
 }
 watch([samples, from, to, position, selectedChannel], () => nextTick(draw));
+onDeactivated(stop);
 onUnmounted(stop);
 </script>
 <template>

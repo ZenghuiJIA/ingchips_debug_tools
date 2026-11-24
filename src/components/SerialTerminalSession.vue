@@ -4,6 +4,7 @@ import { appendBoundedLog, filterLogs, highlightParts } from '../utils/serialLog
 import { DEFAULT_SERIAL_APPEARANCE, loadSerialAppearance, saveSerialAppearance, normalizeSerialAppearance, serialLogStyle, serialLogColor, type SerialAppearance } from '../utils/serialAppearance';
 import { serialIdentity, guardedSend, type CaptureStatus, type CapturePage, type RawEvent } from '../utils/serialSession';
 import { safeInvoke, isTauri } from '../utils/ipc';
+import { notifyWarn } from '../utils/notify';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SerialRxPayload, SerialLogItem } from '../types';
 import {
@@ -106,7 +107,7 @@ async function toggleRts() {
 async function triggerReset(seqType: string) {
   if (!props.isConnected) return;
   if (!props.isDaplink) {
-    alert(t('term_not_daplink_tip'));
+    notifyWarn(t('term_not_daplink_tip'));
     return;
   }
   isResetting.value = true;

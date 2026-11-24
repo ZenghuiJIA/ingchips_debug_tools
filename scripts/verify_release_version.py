@@ -24,6 +24,20 @@ def main() -> int:
     config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
     if config.get("version") != version:
         raise SystemExit(f"tauri.conf.json version {config.get('version')} != tag {version}")
+    cargo_lock = (ROOT / "src-tauri/Cargo.lock").read_text(encoding="utf-8")
+    for pkg_name in ("ai-hil-debugger", "hil-runtime"):
+        m = re.search(rf'\[\[package\]\]\s+name = "{re.escape(pkg_name)}"\s+version = "([^"]+)"', cargo_lock)
+        if not m or m.group(1) != version:
+            raise SystemExit(f"Cargo.lock {pkg_name} version {m.group(1) if m else None} != {version}")
+    daemon_text = (ROOT / "src-tauri/daemon/daemon_entry.py").read_text(encoding="utf-8")
+    m_daemon = re.search(
+        r'^MCP_SERVER_VERSION\s*=\s*(?:os\.environ\.get\(\s*"MCP_SERVER_VERSION"\s*,\s*"([^"]+)"\s*\)|"([^"]+)")',
+        daemon_text,
+        re.MULTILINE,
+    )
+    daemon_ver = (m_daemon.group(1) or m_daemon.group(2)) if m_daemon else None
+    if daemon_ver != version:
+        raise SystemExit(f"daemon_entry.py MCP_SERVER_VERSION {daemon_ver} != {version}")
     notes = ROOT / "docs" / f"RELEASE_NOTES_{tag}.md"
     if not notes.is_file():
         raise SystemExit(f"Missing functional release notes: {notes}")

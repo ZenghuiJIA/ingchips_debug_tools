@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue';
+import { ref, computed, onUnmounted, onDeactivated } from 'vue';
 import { safeInvoke } from '../utils/ipc';
 import { usePersistentState } from '../composables/usePersistentState';
 import ProbeSelect from './common/ProbeSelect.vue';
@@ -581,6 +581,17 @@ function resetStatistics() {
     item.minUs = item.avgUs;
   }
 }
+
+onDeactivated(() => {
+  if (continuousTimer) {
+    clearInterval(continuousTimer);
+    continuousTimer = null;
+  }
+  if (isContinuousRunning.value) {
+    isContinuousRunning.value = false;
+    parseStatusMsg.value = '已切离页面，自动暂停持续 SWD PC 采样以释放探针';
+  }
+});
 
 onUnmounted(() => {
   if (timer) clearInterval(timer);

@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue';
 import EmbeddedDebugPanel from './EmbeddedDebugPanel.vue';
 const embeddedDebugOpen=ref(false);
 import { safeInvoke } from '../utils/ipc';
+import { notifyError } from '../utils/notify';
 import { t } from '../utils/i18n';
 import type {
   CoreRegisters,
@@ -216,7 +217,7 @@ async function handleReadMemory() {
     });
     memoryDump.value = res;
   } catch (err: any) {
-    alert(t('hf_err_read_mem', { err }));
+    notifyError(t('hf_err_read_mem', { err }));
   } finally {
     isReadingMem.value = false;
   }

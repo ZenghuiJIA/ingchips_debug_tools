@@ -2,7 +2,7 @@
 
 本项目是一款基于 **Tauri v2 (Rust)** 与 **Vue 3 + Vite + TailwindCSS** 构建的现代化、极速、低内存消耗的 AI 驱动嵌入式调试工具。
 
-当前版本 **v1.3.5** 延续串口/网络会话、断开事件身份、复位并发、capture 缓存和高速日志交互修复，并通过 tag 驱动的 GitHub Actions 自动测试与 Windows 安装包发布。使用方法见 [串口专项审查](docs/SERIAL_ASSISTANT_AUDIT_2026-11.md)、[嵌入式调试状态](docs/EMBEDDED_DEBUG_STATUS.md)、[Rust 迁移说明](docs/RUST_MIGRATION.md) 和 [ABC 调试说明](docs/ABC_DEBUGGING.md)，交付范围见 [发布说明](docs/RELEASE_NOTES_v1.3.5.md)。[HIL runner](docs/HIL_RUNNER.md) 保留 UI、CLI、MCP 共用执行器。真实 MCU、FreeRTOS 端口、功耗仪和电源驱动仍需目标选型与上板验证。
+当前版本 **v1.3.6** 集成应用内签名自动升级与 GitHub Actions 原子发布流水线，完成前端按需懒加载与 Rust LTO 体积/功耗优化，并补齐串口会话身份隔离、背压限流与全局非阻塞交互体验。使用方法见 [串口专项审查](docs/SERIAL_ASSISTANT_AUDIT_2026-11.md)、[嵌入式调试状态](docs/EMBEDDED_DEBUG_STATUS.md)、[Rust 迁移说明](docs/RUST_MIGRATION.md) 和 [ABC 调试说明](docs/ABC_DEBUGGING.md)，交付范围见 [发布说明](docs/RELEASE_NOTES_v1.3.6.md)。[HIL runner](docs/HIL_RUNNER.md) 保留 UI、CLI、MCP 共用执行器。真实 MCU、FreeRTOS 端口、功耗仪和电源驱动仍需目标选型与上板验证。
 
 ---
 
