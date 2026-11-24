@@ -117,7 +117,7 @@ def main() -> int:
         assets=assets,
     ):
         _gh(cmd)
-    print(f"已验证并原子发布 {tag} 的安装器、便携 ZIP 与签名更新清单。")
+    print(f"[OK] Published verified release {tag} (installer, portable ZIP, latest.json).")
     return 0
 
 
