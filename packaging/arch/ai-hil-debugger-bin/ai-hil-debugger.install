@@ -1,0 +1,12 @@
+post_install() {
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+    udevadm trigger >/dev/null 2>&1 || true
+  fi
+  echo "==> To access DAPLink / J-Link / USB-Serial without root, ensure your user is in 'uucp':"
+  echo "    sudo usermod -aG uucp \$USER  (then re-login)"
+}
+
+post_upgrade() {
+  post_install
+}

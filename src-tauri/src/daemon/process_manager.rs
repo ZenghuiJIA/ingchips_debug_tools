@@ -109,40 +109,47 @@ impl DaemonManager {
 
         // Determine launch target: candidate paths in order of preference
         let mut candidates = Vec::new();
+        let daemon_names: &[&str] = if cfg!(windows) {
+            &["hil-daemon-x86_64-pc-windows-msvc.exe", "hil-daemon.exe"]
+        } else {
+            &["hil-daemon", "hil-daemon-x86_64-unknown-linux-gnu"]
+        };
 
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                // Same directory as AI-HIL-Debugger.exe
-                candidates.push(exe_dir.join("hil-daemon-x86_64-pc-windows-msvc.exe"));
-                candidates.push(exe_dir.join("hil-daemon.exe"));
-                // bin/ subdirectory (Release structure)
-                candidates.push(exe_dir.join("bin").join("hil-daemon-x86_64-pc-windows-msvc.exe"));
-                candidates.push(exe_dir.join("bin").join("hil-daemon.exe"));
-                // binaries/ subdirectory
-                candidates.push(exe_dir.join("binaries").join("hil-daemon-x86_64-pc-windows-msvc.exe"));
+                for name in daemon_names {
+                    candidates.push(exe_dir.join(name));
+                    candidates.push(exe_dir.join("bin").join(name));
+                    candidates.push(exe_dir.join("binaries").join(name));
+                }
                 // Parent directory structures (e.g. if run from bin/ or target/release/)
                 if let Some(parent) = exe_dir.parent() {
-                    candidates.push(parent.join("bin").join("hil-daemon-x86_64-pc-windows-msvc.exe"));
-                    candidates.push(parent.join("hil-daemon-x86_64-pc-windows-msvc.exe"));
-                    candidates.push(parent.join("binaries").join("hil-daemon-x86_64-pc-windows-msvc.exe"));
+                    for name in daemon_names {
+                        candidates.push(parent.join("bin").join(name));
+                        candidates.push(parent.join(name));
+                        candidates.push(parent.join("binaries").join(name));
+                    }
                 }
             }
         }
 
-        candidates.push(PathBuf::from("bin/hil-daemon-x86_64-pc-windows-msvc.exe"));
-        candidates.push(PathBuf::from("hil-daemon-x86_64-pc-windows-msvc.exe"));
-        candidates.push(PathBuf::from("src-tauri/binaries/hil-daemon-x86_64-pc-windows-msvc.exe"));
-        candidates.push(PathBuf::from("binaries/hil-daemon-x86_64-pc-windows-msvc.exe"));
+        for name in daemon_names {
+            candidates.push(PathBuf::from("bin").join(name));
+            candidates.push(PathBuf::from(name));
+            candidates.push(PathBuf::from("src-tauri/binaries").join(name));
+            candidates.push(PathBuf::from("binaries").join(name));
+        }
 
+        let python_bin = if cfg!(windows) { "python" } else { "python3" };
         let mut cmd = if let Some(found_bin) = candidates.into_iter().find(|p| p.exists()) {
             println!("[DaemonManager] Found standalone binary: {:?}", found_bin);
             Command::new(found_bin)
         } else if Path::new("src-tauri/daemon/daemon_entry.py").exists() {
-            let mut c = Command::new("python");
+            let mut c = Command::new(python_bin);
             c.arg("src-tauri/daemon/daemon_entry.py");
             c
         } else if Path::new("daemon_entry.py").exists() {
-            let mut c = Command::new("python");
+            let mut c = Command::new(python_bin);
             c.arg("daemon_entry.py");
             c
         } else {

@@ -319,12 +319,22 @@ pub fn native_executable() -> Result<PathBuf, String> {
         return Ok(current);
     }
     let here = current.parent().unwrap();
-    for p in [
-        here.join("hil-native.exe"),
-        here.join("bin/hil-native.exe"),
-        here.join("bin/hil-daemon-x86_64-pc-windows-msvc.exe"),
-        here.join("hil-daemon-x86_64-pc-windows-msvc.exe"),
-    ] {
+    let candidates = if cfg!(windows) {
+        [
+            here.join("hil-native.exe"),
+            here.join("bin/hil-native.exe"),
+            here.join("bin/hil-daemon-x86_64-pc-windows-msvc.exe"),
+            here.join("hil-daemon-x86_64-pc-windows-msvc.exe"),
+        ]
+    } else {
+        [
+            here.join("hil-native"),
+            here.join("bin/hil-native"),
+            here.join("bin/hil-daemon-x86_64-unknown-linux-gnu"),
+            here.join("hil-daemon"),
+        ]
+    };
+    for p in candidates {
         if p.is_file() {
             return Ok(p);
         }

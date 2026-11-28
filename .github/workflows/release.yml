@@ -1,4 +1,4 @@
-name: Signed Windows Release
+name: Multi-Platform Signed Release
 
 on:
   push:
@@ -18,59 +18,68 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-defaults:
-  run:
-    shell: pwsh
-
 jobs:
-  release:
-    runs-on: windows-2022
-    env:
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || secrets.IDEA_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      notes_file: ${{ steps.release.outputs.notes_file }}
     steps:
       - name: Resolve release tag
         id: release
         run: |
-          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Expected vX.Y.Z tag, got $tag" }
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
-          "notes_file=docs/RELEASE_NOTES_${tag}.md" >> $env:GITHUB_OUTPUT
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected vX.Y.Z tag, got $tag" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "notes_file=docs/RELEASE_NOTES_${tag}.md" >> "$GITHUB_OUTPUT"
 
       - name: Check updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || secrets.IDEA_KEY }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
-            throw "TAURI_SIGNING_PRIVATE_KEY (or IDEA_KEY) secret is required for signed updater releases."
-          }
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY// }" ]]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY (or IDEA_KEY) secret is required for signed updater releases." >&2
+            exit 1
+          fi
 
+  build-windows:
+    needs: prepare
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || secrets.IDEA_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
       - name: Checkout tagged source
         uses: actions/checkout@v5
         with:
-          ref: ${{ steps.release.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4
         with:
           version: 12.4.2
           run_install: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
           cache: pip
           cache-dependency-path: requirements-daemon.txt
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable-x86_64-pc-windows-msvc
           targets: x86_64-pc-windows-msvc
@@ -87,7 +96,7 @@ jobs:
 
       - name: Validate tag, versions, release notes & publish plan
         run: |
-          python scripts/verify_release_version.py '${{ steps.release.outputs.tag }}'
+          python scripts/verify_release_version.py '${{ needs.prepare.outputs.tag }}'
           python scripts/test_release_plan.py
 
       - name: Frontend production regression
@@ -95,7 +104,7 @@ jobs:
 
       - name: Build native runtime & Python worker
         env:
-          MCP_SERVER_VERSION: ${{ steps.release.outputs.version }}
+          MCP_SERVER_VERSION: ${{ needs.prepare.outputs.version }}
         run: python scripts/build_daemon_windows.py --daemon-only
 
       - name: Rust check & workspace tests
@@ -113,28 +122,232 @@ jobs:
       - name: Package portable ZIP, latest.json & release-manifest.json
         env:
           SKIP_BUILD: '1'
-        run: python scripts/package_release.py '${{ steps.release.outputs.tag }}'
+        run: python scripts/package_release.py '${{ needs.prepare.outputs.tag }}'
 
       - name: Verify signed installer against embedded public key & ZIP checksums
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml signed_release_matches_embedded_key_and_rejects_tampering -- --ignored
-          python scripts/verify_release.py "release/AI-HIL-Debugger-${{ steps.release.outputs.tag }}-windows-x64.zip"
+          python scripts/verify_release.py "release/AI-HIL-Debugger-${{ needs.prepare.outputs.tag }}-windows-x64.zip"
 
-      - name: Upload workflow release artifacts
+      - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: AI-HIL-Debugger-${{ steps.release.outputs.tag }}-windows-x64
+          name: release-windows
           path: |
-            release/AI-HIL-Debugger-${{ steps.release.outputs.tag }}-windows-x64.zip
+            release/AI-HIL-Debugger-${{ needs.prepare.outputs.tag }}-windows-x64.zip
             release/AI-HIL-Debugger-setup.exe
             release/AI-HIL-Debugger-setup.exe.sig
             release/latest.json
             release/release-manifest.json
           if-no-files-found: error
 
-      - name: Publish verified GitHub Release atomically
+  build-linux:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || secrets.IDEA_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Install Linux Tauri & packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libusb-1.0-0-dev \
+            libhidapi-dev \
+            libudev-dev \
+            dpkg \
+            rpm \
+            squashfs-tools \
+            desktop-file-utils \
+            file
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+          run_install: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-daemon.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-unknown-linux-gnu
+          targets: x86_64-unknown-linux-gnu
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          python3 -m pip install -r requirements-daemon.txt
+
+      - name: Frontend production regression
+        run: node scripts/verify_features_regression.js
+
+      - name: Build native runtime & Python worker
+        env:
+          MCP_SERVER_VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 scripts/build_daemon_linux.py
+
+      - name: Rust check & workspace tests
+        working-directory: src-tauri
+        run: |
+          cargo check --locked
+          cargo test --locked --workspace --lib
+
+      - name: Backend and native regression
+        run: python3 scripts/verify_backend_regression.py --native build_dist/hil-native
+
+      - name: Build Tauri Linux packages (deb, rpm, AppImage + updater sig)
+        run: pnpm tauri build
+
+      - name: Package portable Linux tar.gz
+        run: python3 scripts/package_linux_tarball.py '${{ needs.prepare.outputs.tag }}'
+
+      - name: Validate Arch PKGBUILD syntax
+        run: |
+          bash -n packaging/arch/ai-hil-debugger/PKGBUILD
+          bash -n packaging/arch/ai-hil-debugger-bin/PKGBUILD
+
+      - name: Collect Linux release artifacts
+        run: |
+          mkdir -p release-linux
+          cp src-tauri/target/release/bundle/deb/*.deb release-linux/
+          cp src-tauri/target/release/bundle/rpm/*.rpm release-linux/
+          cp src-tauri/target/release/bundle/appimage/*.AppImage release-linux/
+          cp src-tauri/target/release/bundle/appimage/*.AppImage.sig release-linux/ || true
+          cp release/AI-HIL-Debugger-${{ needs.prepare.outputs.tag }}-linux-x86_64.tar.gz* release-linux/
+          ls -lh release-linux/
+
+      - name: Verify Linux release packages
+        run: |
+          deb_file=$(ls release-linux/*.deb)
+          rpm_file=$(ls release-linux/*.rpm)
+          appimage_file=$(ls release-linux/*.AppImage)
+          tar_file=$(ls release-linux/*.tar.gz)
+
+          dpkg-deb -I "$deb_file"
+          dpkg-deb -c "$deb_file" | grep -E "ai-hil-debugger|hil-daemon|hil-python-worker|99-ai-hil-debugger.rules"
+          rpm -qlp "$rpm_file" | grep -E "ai-hil-debugger|hil-daemon|hil-python-worker|99-ai-hil-debugger.rules"
+          test -x "$appimage_file"
+          test -s "${appimage_file}.sig"
+          (cd release-linux && sha256sum -c "$(basename "$tar_file").sha256")
+          tar -tzf "$tar_file" | grep -E "bin/ai-hil-debugger|bin/hil-daemon|lib/hil-python-worker|udev/99-ai-hil-debugger.rules"
+          echo "PASS all Linux release package checks"
+
+      - name: Upload Linux release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: release-linux/*
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, build-windows, build-linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge Linux AppImage updater entry into latest.json
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          tag = os.environ["TAG"]
+          repo = os.environ["REPO"]
+          win_dir = Path("artifacts/release-windows")
+          lin_dir = Path("artifacts/release-linux")
+
+          latest_path = win_dir / "latest.json"
+          latest = json.loads(latest_path.read_text(encoding="utf-8"))
+          sigs = list(lin_dir.glob("*.AppImage.sig"))
+          if sigs:
+              sig_file = sigs[0]
+              appimage_name = sig_file.name[:-4]
+              latest.setdefault("platforms", {})["linux-x86_64"] = {
+                  "signature": sig_file.read_text(encoding="utf-8").strip(),
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{appimage_name}",
+              }
+              latest_path.write_text(json.dumps(latest, indent=2) + "\n", encoding="utf-8")
+              print(f"Added linux-x86_64 updater entry for {appimage_name}")
+          PY
+
+      - name: Publish verified multi-platform GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_NOTES_FILE: ${{ steps.release.outputs.notes_file }}
-        run: python scripts/publish_release.py
+          TAG: ${{ needs.prepare.outputs.tag }}
+          NOTES_FILE: ${{ needs.prepare.outputs.notes_file }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/release-windows/* artifacts/release-linux/* --clobber
+          else
+            gh release create "$TAG" artifacts/release-windows/* artifacts/release-linux/* \
+              --title "AI-HIL Debugger $TAG" \
+              --notes-file "$NOTES_FILE"
+          fi
+
+      - name: Verify published GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          tag = os.environ["TAG"]
+          out = subprocess.check_output(
+              ["gh", "release", "view", tag, "--json", "assets,isDraft"],
+              text=True,
+          )
+          data = json.loads(out)
+          assert not data["isDraft"], "Release should not remain draft"
+          names = [a["name"] for a in data["assets"]]
+          print("Published assets:", names)
+          for required in [
+              f"AI-HIL-Debugger-{tag}-windows-x64.zip",
+              "AI-HIL-Debugger-setup.exe",
+              "AI-HIL-Debugger-setup.exe.sig",
+              f"AI-HIL-Debugger-{tag}-linux-x86_64.tar.gz",
+              f"AI-HIL-Debugger-{tag}-linux-x86_64.tar.gz.sha256",
+              "latest.json",
+              "release-manifest.json",
+          ]:
+              assert required in names, f"Missing asset: {required}"
+          assert any(n.endswith(".deb") for n in names), "Missing .deb asset"
+          assert any(n.endswith(".rpm") for n in names), "Missing .rpm asset"
+          assert any(n.endswith(".AppImage") for n in names), "Missing .AppImage asset"
+          assert any(n.endswith(".AppImage.sig") for n in names), "Missing .AppImage.sig asset"
+          print("PASS all published release assets verified!")
+          PY

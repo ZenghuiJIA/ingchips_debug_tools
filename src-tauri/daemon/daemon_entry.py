@@ -3445,7 +3445,7 @@ MCP_TOOLS = [
 ]
 
 MCP_SERVER_NAME = "embedded-hil-debugger"
-MCP_SERVER_VERSION = os.environ.get("MCP_SERVER_VERSION", "1.3.6")
+MCP_SERVER_VERSION = os.environ.get("MCP_SERVER_VERSION", "1.3.7")
 MCP_DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
 # 兼容旧调用方式：直接以工具名作为 JSON-RPC method

@@ -11,7 +11,13 @@ from pathlib import Path
 def codec_path():
     name = 'hil-protocol.exe' if os.name == 'nt' else 'hil-protocol'
     if getattr(sys, 'frozen', False):
-        candidates = [Path(sys.executable).parent / name, Path(sys.executable).parent / 'bin' / name]
+        here = Path(sys.executable).parent
+        candidates = [
+            here / name,
+            here / 'bin' / name,
+            here / '../lib/ai-hil-debugger' / name,
+            here / '../share/ai-hil-debugger' / name,
+        ]
     else:
         root = Path(__file__).resolve().parents[2]
         candidates = [root / 'target' / 'debug' / name, root / 'target' / 'release' / name]

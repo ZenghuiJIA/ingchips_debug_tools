@@ -1,0 +1,41 @@
+{
+  "bundle": {
+    "targets": [
+      "deb",
+      "rpm",
+      "appimage"
+    ],
+    "resources": {
+      "binaries/hil-python-worker.exe": null,
+      "binaries/hil-protocol.exe": null,
+      "binaries/hil-python-worker": "hil-python-worker",
+      "binaries/hil-protocol": "hil-protocol",
+      "../packaging/udev/99-ai-hil-debugger.rules": "99-ai-hil-debugger.rules"
+    },
+    "linux": {
+      "deb": {
+        "section": "devel",
+        "priority": "optional",
+        "depends": [
+          "libusb-1.0-0",
+          "libhidapi-hidraw0"
+        ],
+        "files": {
+          "/usr/lib/udev/rules.d/99-ai-hil-debugger.rules": "../packaging/udev/99-ai-hil-debugger.rules"
+        }
+      },
+      "rpm": {
+        "depends": [
+          "libusb1",
+          "hidapi"
+        ],
+        "files": {
+          "/usr/lib/udev/rules.d/99-ai-hil-debugger.rules": "../packaging/udev/99-ai-hil-debugger.rules"
+        }
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  }
+}

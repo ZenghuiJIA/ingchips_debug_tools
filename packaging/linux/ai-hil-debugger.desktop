@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=AI-HIL Debugger
+Name[zh_CN]=AI-HIL 嵌入式调试器
+Comment=AI-Driven Embedded Hardware-in-the-Loop (HIL) Testing & Debugging Desktop Tool
+Exec=ai-hil-debugger %U
+Icon=ai-hil-debugger
+Terminal=false
+Type=Application
+Categories=Development;Electronics;Engineering;
+Keywords=embedded;hil;debug;swd;uart;pyocd;jlink;daplink;
+StartupWMClass=ai-hil-debugger

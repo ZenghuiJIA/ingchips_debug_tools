@@ -7,6 +7,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::{Duration, Instant};
+#[allow(unused_variables)]
 pub fn hide(command: &mut Command) {
     #[cfg(windows)]
     {
@@ -38,8 +39,18 @@ impl Bridge {
             .parent()
             .unwrap()
             .to_path_buf();
-        let worker = here.join("hil-python-worker.exe");
-        let mut command = if worker.is_file() {
+        let worker_name = if cfg!(windows) {
+            "hil-python-worker.exe"
+        } else {
+            "hil-python-worker"
+        };
+        let worker_candidates = [
+            here.join(worker_name),
+            here.join("binaries").join(worker_name),
+            here.join("../lib/ai-hil-debugger").join(worker_name),
+            here.join("../share/ai-hil-debugger").join(worker_name),
+        ];
+        let mut command = if let Some(worker) = worker_candidates.into_iter().find(|p| p.is_file()) {
             Command::new(worker)
         } else {
             let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -49,7 +60,8 @@ impl Bridge {
             if !script.is_file() {
                 return Err("Python probe worker is not installed".into());
             }
-            let mut command = Command::new(std::env::var("HIL_PYTHON").unwrap_or("python".into()));
+            let default_py = if cfg!(windows) { "python" } else { "python3" };
+            let mut command = Command::new(std::env::var("HIL_PYTHON").unwrap_or_else(|_| default_py.into()));
             command.arg(script);
             command
         };

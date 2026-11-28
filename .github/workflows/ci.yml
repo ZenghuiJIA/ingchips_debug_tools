@@ -9,13 +9,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-defaults:
-  run:
-    shell: pwsh
-
 jobs:
-  check:
+  check-windows:
     runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v5
 
@@ -68,6 +67,79 @@ jobs:
             $p = "src-tauri/binaries/$f"
             if (-not (Test-Path $p)) { Set-Content -Path $p -Value "{}" }
           }
+
+      - name: Rust check, clippy & workspace tests
+        working-directory: src-tauri
+        run: |
+          cargo check --locked
+          cargo clippy --locked --workspace --all-targets
+          cargo test --locked --workspace --lib
+
+  check-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux Tauri & USB dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libusb-1.0-0-dev \
+            libhidapi-dev \
+            libudev-dev
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+          run_install: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-daemon.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-unknown-linux-gnu
+          targets: x86_64-unknown-linux-gnu
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend & Python dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          python3 -m pip install -r requirements-daemon.txt
+
+      - name: Frontend regression & build
+        run: |
+          node scripts/verify_features_regression.js
+          pnpm build
+
+      - name: Python daemon, MCP & release plan tests
+        run: |
+          python3 scripts/test_daemon_logic.py
+          python3 scripts/test_mcp_integrated_capabilities.py
+          python3 scripts/test_release_plan.py
+
+      - name: Prepare resource placeholders for Cargo build checks
+        run: |
+          mkdir -p src-tauri/binaries
+          for f in hil-daemon-x86_64-unknown-linux-gnu hil-python-worker hil-protocol mcp-tools.json; do
+            [ -f "src-tauri/binaries/$f" ] || printf "{}" > "src-tauri/binaries/$f"
+          done
 
       - name: Rust check, clippy & workspace tests
         working-directory: src-tauri

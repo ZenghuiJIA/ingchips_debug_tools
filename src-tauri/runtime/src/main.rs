@@ -308,8 +308,11 @@ fn run() -> Result<(), String> {
             "shutdown" | "exit" => Ok(json!("ok")),
             "tools/list" | "list_tools" => {
                 let here = std::env::current_exe().map_err(|e| e.to_string())?;
+                let here_dir = here.parent().unwrap();
                 let candidates = [
-                    here.parent().unwrap().join("mcp-tools.json"),
+                    here_dir.join("mcp-tools.json"),
+                    here_dir.join("../lib/ai-hil-debugger/mcp-tools.json"),
+                    here_dir.join("../share/ai-hil-debugger/mcp-tools.json"),
                     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                         .parent()
                         .unwrap()

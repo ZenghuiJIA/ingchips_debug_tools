@@ -32,8 +32,18 @@ fn ensure_dev_server_running() {
         }
 
         println!("[DevServerCheck] Port 5173 is offline. Automatically spawning Vite dev server...");
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/c", "pnpm", "run", "dev"]);
+        #[cfg(target_os = "windows")]
+        let mut cmd = {
+            let mut c = Command::new("cmd");
+            c.args(["/c", "pnpm", "run", "dev"]);
+            c
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut cmd = {
+            let mut c = Command::new("pnpm");
+            c.args(["run", "dev"]);
+            c
+        };
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
