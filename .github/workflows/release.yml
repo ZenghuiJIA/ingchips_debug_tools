@@ -232,12 +232,12 @@ jobs:
         run: |
           mkdir -p release-arch
           docker run --rm -e TAG="$TAG" -e VER="$VER" -v "$PWD:/work" -w /work archlinux:latest bash -ceu '
-            pacman -Sy --noconfirm --needed fakeroot >/dev/null
+            pacman -Sy --noconfirm --needed fakeroot binutils >/dev/null
             useradd -m builder
             mkdir -p /tmp/arch-build
             cp packaging/arch/ai-hil-debugger-bin/PKGBUILD packaging/arch/ai-hil-debugger-bin/ai-hil-debugger.install /tmp/arch-build/
             cp "release/AI-HIL-Debugger-${TAG}-linux-x86_64.tar.gz" /tmp/arch-build/
-            sha=$(sha256sum "/tmp/arch-build/AI-HIL-Debugger-${TAG}-linux-x86_64.tar.gz" | awk "{print \$1}")
+            sha=$(sha256sum "/tmp/arch-build/AI-HIL-Debugger-${TAG}-linux-x86_64.tar.gz" | cut -d" " -f1)
             sed -i "s/^pkgver=.*/pkgver=${VER}/" /tmp/arch-build/PKGBUILD
             sed -i "s/^sha256sums=.*/sha256sums=(\x27${sha}\x27)/" /tmp/arch-build/PKGBUILD
             chown -R builder:builder /tmp/arch-build
