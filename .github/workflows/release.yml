@@ -232,7 +232,7 @@ jobs:
         run: |
           mkdir -p release-arch
           docker run --rm -e TAG="$TAG" -e VER="$VER" -v "$PWD:/work" -w /work archlinux:latest bash -ceu '
-            pacman -Sy --noconfirm --needed fakeroot binutils >/dev/null
+            pacman -Sy --noconfirm --needed fakeroot binutils debugedit >/dev/null
             useradd -m builder
             mkdir -p /tmp/arch-build
             cp packaging/arch/ai-hil-debugger-bin/PKGBUILD packaging/arch/ai-hil-debugger-bin/ai-hil-debugger.install /tmp/arch-build/
@@ -245,8 +245,9 @@ jobs:
             cp /tmp/arch-build/ai-hil-debugger-bin-*.pkg.tar.zst /work/release-arch/
             cd /work/release-arch
             repo-add ai-hil-debugger.db.tar.gz ai-hil-debugger-bin-*.pkg.tar.zst
-            cp -fL ai-hil-debugger.db.tar.gz ai-hil-debugger.db
-            cp -fL ai-hil-debugger.files.tar.gz ai-hil-debugger.files
+            rm -f ai-hil-debugger.db ai-hil-debugger.files
+            cp ai-hil-debugger.db.tar.gz ai-hil-debugger.db
+            cp ai-hil-debugger.files.tar.gz ai-hil-debugger.files
             ls -lh /work/release-arch/
           '
 
