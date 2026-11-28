@@ -77,32 +77,32 @@ interface TabNavItem {
   icon: any;
   color: string;
   category: 'comm' | 'firmware' | 'swd' | 'tool';
-  desc: string;
+  descKey: string;
 }
 
 const tabNavCategories = [
-  { id: 'comm', title: '通信与无线接口' },
-  { id: 'firmware', title: '固件与系统分析' },
-  { id: 'swd', title: 'SWD 硬件调试与诊断' },
-  { id: 'tool', title: '自动化、工具与 AI' }
+  { id: 'comm', titleKey: 'nav_cat_comm' },
+  { id: 'firmware', titleKey: 'nav_cat_firmware' },
+  { id: 'swd', titleKey: 'nav_cat_swd' },
+  { id: 'tool', titleKey: 'nav_cat_tool' }
 ];
 
 const allTabNavItems: TabNavItem[] = [
-  { id: 'terminal', titleKey: 'tab_terminal', icon: Terminal, color: 'text-emerald-400', category: 'comm', desc: '串口、RTT 与网络调试终端' },
-  { id: 'plotter', titleKey: 'tab_plotter', icon: Activity, color: 'text-cyan-400', category: 'comm', desc: '实时波形数据流可视化分析' },
-  { id: 'ble_rf', titleKey: 'tab_ble_rf', icon: Radio, color: 'text-blue-400', category: 'comm', desc: 'BLE 射频测试 (DTM) 与 HCI 抓包' },
-  { id: 'flasher', titleKey: 'tab_flasher', icon: Zap, color: 'text-amber-400', category: 'firmware', desc: '高速固件烧录与芯片擦除' },
-  { id: 'merger', titleKey: 'tab_merger', icon: Merge, color: 'text-emerald-400', category: 'firmware', desc: '多固件 Bin/Hex 拼接与地址偏移合并' },
-  { id: 'analyzer', titleKey: 'tab_analyzer', icon: PieChart, color: 'text-teal-400', category: 'firmware', desc: 'ELF / AXF 符号与 RAM/Flash 内存占用' },
-  { id: 'svd', titleKey: 'tab_svd', icon: Sliders, color: 'text-indigo-400', category: 'swd', desc: '芯片外设寄存器与位域实时交互' },
-  { id: 'rtos', titleKey: 'tab_rtos', icon: Cpu, color: 'text-purple-400', category: 'swd', desc: '从固件符号识别 RTOS 内核与控制块地址' },
-  { id: 'lcd', titleKey: 'tab_lcd', icon: Monitor, color: 'text-cyan-400', category: 'swd', desc: '屏幕显存实时镜像抓取与截图' },
-  { id: 'hardfault', titleKey: 'tab_hardfault', icon: AlertOctagon, color: 'text-rose-400', category: 'swd', desc: 'Cortex-M 崩溃现场定位与智能诊断' },
-  { id: 'memory', titleKey: 'tab_memory', icon: Database, color: 'text-emerald-400', category: 'swd', desc: 'RAM/Flash 内存直转储与 HEX 差异对比' },
-  { id: 'profiler', titleKey: 'tab_profiler', icon: Gauge, color: 'text-amber-400', category: 'swd', desc: 'DWT_PCSR 统计采样与函数符号定位' },
-  { id: 'sequencer', titleKey: 'tab_sequencer', icon: Workflow, color: 'text-blue-400', category: 'tool', desc: '自动化 HIL 硬件在环测试编排与断言' },
-  { id: 'calculator', titleKey: 'tab_calculator', icon: Calculator, color: 'text-emerald-400', category: 'tool', desc: '2/8/10/16 快捷进制转换与位操作计算器' },
-  { id: 'ai', titleKey: 'tab_ai', icon: Sparkles, color: 'text-fuchsia-400', category: 'tool', desc: '完整快捷命令驱动硬件操作' }
+  { id: 'terminal', titleKey: 'tab_terminal', icon: Terminal, color: 'text-emerald-400', category: 'comm', descKey: 'nav_desc_terminal' },
+  { id: 'plotter', titleKey: 'tab_plotter', icon: Activity, color: 'text-cyan-400', category: 'comm', descKey: 'nav_desc_plotter' },
+  { id: 'ble_rf', titleKey: 'tab_ble_rf', icon: Radio, color: 'text-blue-400', category: 'comm', descKey: 'nav_desc_ble_rf' },
+  { id: 'flasher', titleKey: 'tab_flasher', icon: Zap, color: 'text-amber-400', category: 'firmware', descKey: 'nav_desc_flasher' },
+  { id: 'merger', titleKey: 'tab_merger', icon: Merge, color: 'text-emerald-400', category: 'firmware', descKey: 'nav_desc_merger' },
+  { id: 'analyzer', titleKey: 'tab_analyzer', icon: PieChart, color: 'text-teal-400', category: 'firmware', descKey: 'nav_desc_analyzer' },
+  { id: 'svd', titleKey: 'tab_svd', icon: Sliders, color: 'text-indigo-400', category: 'swd', descKey: 'nav_desc_svd' },
+  { id: 'rtos', titleKey: 'tab_rtos', icon: Cpu, color: 'text-purple-400', category: 'swd', descKey: 'nav_desc_rtos' },
+  { id: 'lcd', titleKey: 'tab_lcd', icon: Monitor, color: 'text-cyan-400', category: 'swd', descKey: 'nav_desc_lcd' },
+  { id: 'hardfault', titleKey: 'tab_hardfault', icon: AlertOctagon, color: 'text-rose-400', category: 'swd', descKey: 'nav_desc_hardfault' },
+  { id: 'memory', titleKey: 'tab_memory', icon: Database, color: 'text-emerald-400', category: 'swd', descKey: 'nav_desc_memory' },
+  { id: 'profiler', titleKey: 'tab_profiler', icon: Gauge, color: 'text-amber-400', category: 'swd', descKey: 'nav_desc_profiler' },
+  { id: 'sequencer', titleKey: 'tab_sequencer', icon: Workflow, color: 'text-blue-400', category: 'tool', descKey: 'nav_desc_sequencer' },
+  { id: 'calculator', titleKey: 'tab_calculator', icon: Calculator, color: 'text-emerald-400', category: 'tool', descKey: 'nav_desc_calculator' },
+  { id: 'ai', titleKey: 'tab_ai', icon: Sparkles, color: 'text-fuchsia-400', category: 'tool', descKey: 'nav_desc_ai' }
 ];
 
 function selectTabFromNav(tabId: TabNavItem['id']) {
@@ -185,7 +185,7 @@ onUnmounted(() => {
         <button
           @click="scrollTabs('left')"
           class="p-1.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/80 rounded-sm transition-colors shrink-0"
-          title="向左翻页"
+          :title="t('nav_scroll_left')"
         >
           <ChevronLeft class="w-4 h-4" />
         </button>
@@ -366,7 +366,7 @@ onUnmounted(() => {
         <button
           @click="scrollTabs('right')"
           class="p-1.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/80 rounded-sm transition-colors shrink-0"
-          title="向右翻页"
+          :title="t('nav_scroll_right')"
         >
           <ChevronRight class="w-4 h-4" />
         </button>
@@ -375,10 +375,10 @@ onUnmounted(() => {
         <button
           @click="isNavModalOpen = true"
           class="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold bg-zinc-800/90 hover:bg-zinc-700/90 text-cyan-400 hover:text-cyan-300 border border-zinc-700/70 rounded shrink-0 shadow-xs transition"
-          title="功能标签快捷索引 (Ctrl + K)"
+          :title="t('nav_button_title')"
         >
           <LayoutGrid class="w-3.5 h-3.5" />
-          <span class="hidden md:inline">功能导航</span>
+          <span class="hidden md:inline">{{ t('nav_button_label') }}</span>
           <kbd class="hidden lg:inline text-[9px] bg-zinc-900 border border-zinc-700 px-1 py-0.2 rounded text-zinc-400">Ctrl+K</kbd>
         </button>
 
@@ -390,9 +390,9 @@ onUnmounted(() => {
       <!-- Tab Content Area -->
       <div class="flex-1 overflow-hidden relative">
         <div v-if="tabError" class="p-6 bg-rose-950/40 border border-rose-800 m-4 rounded text-rose-200">
-          <div class="font-bold text-sm mb-2">组件渲染异常：{{ tabError }}</div>
-          <p class="text-xs text-zinc-400 mb-3">页面已拦截异常，防止应用崩溃黑屏。可尝试点击下方重试恢复。</p>
-          <button @click="tabError = null" class="px-3 py-1 bg-rose-700 hover:bg-rose-600 rounded text-xs">重试恢复</button>
+          <div class="font-bold text-sm mb-2">{{ t('tab_error_title', { error: tabError }) }}</div>
+          <p class="text-xs text-zinc-400 mb-3">{{ t('tab_error_desc') }}</p>
+          <button @click="tabError = null" class="px-3 py-1 bg-rose-700 hover:bg-rose-600 rounded text-xs">{{ t('tab_error_retry') }}</button>
         </div>
         <!-- Keep active connection/job owners mounted with bounded KeepAlive -->
         <KeepAlive v-else :include="keepAliveTabs" :max="6">
@@ -438,7 +438,7 @@ onUnmounted(() => {
         <span>MCP stdio RPC 2.0</span>
       </div>
       <div>
-        <span class="text-zinc-400">硬件状态以各工具连接与任务结果为准</span>
+        <span class="text-zinc-400">{{ t('footer_hardware_truth') }}</span>
       </div>
     </footer>
 
@@ -463,8 +463,8 @@ onUnmounted(() => {
         <div class="p-4 border-b border-zinc-800 bg-zinc-950/60 flex items-center justify-between gap-3">
           <div class="flex items-center gap-2 text-cyan-400 font-bold text-sm">
             <LayoutGrid class="w-5 h-5" />
-            <span>全功能快捷索引导航</span>
-            <span class="text-xs font-normal text-zinc-500">({{ allTabNavItems.length }} 个调试功能)</span>
+            <span>{{ t('nav_modal_title') }}</span>
+            <span class="text-xs font-normal text-zinc-500">{{ t('nav_modal_count', { count: allTabNavItems.length }) }}</span>
           </div>
           <div class="flex items-center gap-2 flex-1 max-w-sm">
             <div class="relative w-full flex items-center">
@@ -472,7 +472,7 @@ onUnmounted(() => {
               <input
                 v-model="navFilterText"
                 type="text"
-                placeholder="搜索标签名称或功能描述..."
+                :placeholder="t('nav_search_placeholder')"
                 class="w-full bg-zinc-900 border border-zinc-700 rounded-lg pl-8 pr-3 py-1 text-xs text-zinc-200 outline-none focus:border-cyan-500"
                 autofocus
               />
@@ -492,16 +492,16 @@ onUnmounted(() => {
             v-for="cat in tabNavCategories"
             :key="cat.id"
             class="space-y-2"
-            v-show="allTabNavItems.filter(item => item.category === cat.id && (!navFilterText.trim() || t(item.titleKey).toLowerCase().includes(navFilterText.toLowerCase()) || item.desc.toLowerCase().includes(navFilterText.toLowerCase()))).length > 0"
+            v-show="allTabNavItems.filter(item => item.category === cat.id && (!navFilterText.trim() || t(item.titleKey).toLowerCase().includes(navFilterText.toLowerCase()) || t(item.descKey).toLowerCase().includes(navFilterText.toLowerCase()))).length > 0"
           >
             <div class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider px-1 flex items-center gap-1.5">
               <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
-              <span>{{ cat.title }}</span>
+              <span>{{ t(cat.titleKey) }}</span>
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
               <button
-                v-for="item in allTabNavItems.filter(item => item.category === cat.id && (!navFilterText.trim() || t(item.titleKey).toLowerCase().includes(navFilterText.toLowerCase()) || item.desc.toLowerCase().includes(navFilterText.toLowerCase())))"
+                v-for="item in allTabNavItems.filter(item => item.category === cat.id && (!navFilterText.trim() || t(item.titleKey).toLowerCase().includes(navFilterText.toLowerCase()) || t(item.descKey).toLowerCase().includes(navFilterText.toLowerCase())))"
                 :key="item.id"
                 @click="selectTabFromNav(item.id)"
                 class="flex items-start gap-2.5 p-3 rounded-lg border text-left transition-all group"
@@ -515,10 +515,10 @@ onUnmounted(() => {
                 <div class="min-w-0 flex-1">
                   <div class="font-bold text-xs flex items-center justify-between" :class="currentTab === item.id ? 'text-cyan-300' : 'text-zinc-200 group-hover:text-cyan-400'">
                     <span>{{ t(item.titleKey) }}</span>
-                    <span v-if="currentTab === item.id" class="text-[9px] px-1 py-0.2 bg-cyan-950 text-cyan-400 border border-cyan-800 rounded">当前</span>
+                    <span v-if="currentTab === item.id" class="text-[9px] px-1 py-0.2 bg-cyan-950 text-cyan-400 border border-cyan-800 rounded">{{ t('nav_current_badge') }}</span>
                   </div>
                   <p class="text-[10.5px] text-zinc-400 mt-1 line-clamp-2 leading-relaxed">
-                    {{ item.desc }}
+                    {{ t(item.descKey) }}
                   </p>
                 </div>
               </button>
@@ -528,11 +528,11 @@ onUnmounted(() => {
 
         <!-- Footer Hint -->
         <div class="px-4 py-2 border-t border-zinc-800 bg-zinc-950/40 text-[11px] text-zinc-500 flex items-center justify-between">
-          <span>提示: 点击任意卡片立即切换对应功能界面</span>
+          <span>{{ t('nav_footer_hint') }}</span>
           <div class="flex items-center gap-2">
-            <span>支持快捷键</span>
+            <span>{{ t('nav_footer_shortcut_prefix') }}</span>
             <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-[10px]">ESC</kbd>
-            <span>退出</span>
+            <span>{{ t('nav_footer_shortcut_suffix') }}</span>
           </div>
         </div>
       </div>

@@ -30,28 +30,39 @@
         <!-- 1. 语言设置 -->
         <div class="space-y-2">
           <label class="block font-medium text-zinc-300">{{ t('settings_language') }}</label>
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-3 gap-2">
             <button
               type="button"
               @click="changeLocale('zh')"
-              class="flex items-center justify-center gap-2 py-2 px-3 rounded-lg border text-xs font-medium transition-all"
+              class="flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg border text-xs font-medium transition-all"
               :class="currentLocale === 'zh'
                 ? 'bg-blue-600/20 border-blue-500 text-blue-300'
                 : 'bg-zinc-800/50 border-zinc-700/60 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'"
             >
               <span>🇨🇳</span>
-              <span>简体中文 (Chinese)</span>
+              <span>简体中文</span>
+            </button>
+            <button
+              type="button"
+              @click="changeLocale('zh-TW')"
+              class="flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg border text-xs font-medium transition-all"
+              :class="currentLocale === 'zh-TW'
+                ? 'bg-blue-600/20 border-blue-500 text-blue-300'
+                : 'bg-zinc-800/50 border-zinc-700/60 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'"
+            >
+              <span>🇭🇰</span>
+              <span>繁體中文</span>
             </button>
             <button
               type="button"
               @click="changeLocale('en')"
-              class="flex items-center justify-center gap-2 py-2 px-3 rounded-lg border text-xs font-medium transition-all"
+              class="flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg border text-xs font-medium transition-all"
               :class="currentLocale === 'en'
                 ? 'bg-blue-600/20 border-blue-500 text-blue-300'
                 : 'bg-zinc-800/50 border-zinc-700/60 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'"
             >
               <span>🇺🇸</span>
-              <span>English (US)</span>
+              <span>English</span>
             </button>
           </div>
         </div>
