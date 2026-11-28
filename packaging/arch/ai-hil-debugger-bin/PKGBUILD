@@ -1,4 +1,4 @@
-# Maintainer: ZenghuiJIA <zenghui.JIA@ingchips.com>
+# Maintainer: ZenghuiJIA <zenghui.jia@ingchips.com>
 pkgname=ai-hil-debugger-bin
 _pkgname=ai-hil-debugger
 pkgver=1.3.8

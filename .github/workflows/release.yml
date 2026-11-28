@@ -225,6 +225,31 @@ jobs:
       - name: Package portable Linux tar.gz
         run: python3 scripts/package_linux_tarball.py '${{ needs.prepare.outputs.tag }}'
 
+      - name: Build Arch Linux pacman package & repo database
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VER: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p release-arch
+          docker run --rm -e TAG="$TAG" -e VER="$VER" -v "$PWD:/work" -w /work archlinux:latest bash -ceu '
+            pacman -Sy --noconfirm --needed fakeroot >/dev/null
+            useradd -m builder
+            mkdir -p /tmp/arch-build
+            cp packaging/arch/ai-hil-debugger-bin/PKGBUILD packaging/arch/ai-hil-debugger-bin/ai-hil-debugger.install /tmp/arch-build/
+            cp "release/AI-HIL-Debugger-${TAG}-linux-x86_64.tar.gz" /tmp/arch-build/
+            sha=$(sha256sum "/tmp/arch-build/AI-HIL-Debugger-${TAG}-linux-x86_64.tar.gz" | awk "{print \$1}")
+            sed -i "s/^pkgver=.*/pkgver=${VER}/" /tmp/arch-build/PKGBUILD
+            sed -i "s/^sha256sums=.*/sha256sums=(\x27${sha}\x27)/" /tmp/arch-build/PKGBUILD
+            chown -R builder:builder /tmp/arch-build
+            su - builder -c "cd /tmp/arch-build && makepkg --nodeps -f"
+            cp /tmp/arch-build/ai-hil-debugger-bin-*.pkg.tar.zst /work/release-arch/
+            cd /work/release-arch
+            repo-add ai-hil-debugger.db.tar.gz ai-hil-debugger-bin-*.pkg.tar.zst
+            cp -fL ai-hil-debugger.db.tar.gz ai-hil-debugger.db
+            cp -fL ai-hil-debugger.files.tar.gz ai-hil-debugger.files
+            ls -lh /work/release-arch/
+          '
+
       - name: Validate Arch PKGBUILD syntax
         run: |
           bash -n packaging/arch/ai-hil-debugger/PKGBUILD
@@ -238,6 +263,7 @@ jobs:
           cp src-tauri/target/release/bundle/appimage/*.AppImage release-linux/
           cp src-tauri/target/release/bundle/appimage/*.AppImage.sig release-linux/ || true
           cp release/AI-HIL-Debugger-${{ needs.prepare.outputs.tag }}-linux-x86_64.tar.gz* release-linux/
+          cp release-arch/* release-linux/
           ls -lh release-linux/
 
       - name: Verify Linux release packages
@@ -245,7 +271,8 @@ jobs:
           deb_file=$(ls release-linux/*.deb)
           rpm_file=$(ls release-linux/*.rpm)
           appimage_file=$(ls release-linux/*.AppImage)
-          tar_file=$(ls release-linux/*.tar.gz)
+          tar_file=$(ls release-linux/*.tar.gz | grep -v '\.db\.tar\.gz$' | grep -v '\.files\.tar\.gz$')
+          arch_pkg=$(ls release-linux/*.pkg.tar.zst)
 
           dpkg-deb -I "$deb_file"
           dpkg-deb -c "$deb_file" | grep -E "ai-hil-debugger|hil-daemon|hil-python-worker|99-ai-hil-debugger.rules"
@@ -254,7 +281,11 @@ jobs:
           test -s "${appimage_file}.sig"
           (cd release-linux && sha256sum -c "$(basename "$tar_file").sha256")
           tar -tzf "$tar_file" | grep -E "bin/ai-hil-debugger|bin/hil-daemon|lib/hil-python-worker|udev/99-ai-hil-debugger.rules"
-          echo "PASS all Linux release package checks"
+          test -s "$arch_pkg"
+          test -s release-linux/ai-hil-debugger.db
+          test -s release-linux/ai-hil-debugger.db.tar.gz
+          tar -tzf release-linux/ai-hil-debugger.db.tar.gz | grep -q "ai-hil-debugger-bin-"
+          echo "PASS all Linux & Arch release package checks"
 
       - name: Upload Linux release artifacts
         uses: actions/upload-artifact@v4
@@ -349,5 +380,8 @@ jobs:
           assert any(n.endswith(".rpm") for n in names), "Missing .rpm asset"
           assert any(n.endswith(".AppImage") for n in names), "Missing .AppImage asset"
           assert any(n.endswith(".AppImage.sig") for n in names), "Missing .AppImage.sig asset"
+          assert any(n.endswith(".pkg.tar.zst") for n in names), "Missing Arch .pkg.tar.zst asset"
+          assert "ai-hil-debugger.db" in names, "Missing ai-hil-debugger.db"
+          assert "ai-hil-debugger.db.tar.gz" in names, "Missing ai-hil-debugger.db.tar.gz"
           print("PASS all published release assets verified!")
           PY
